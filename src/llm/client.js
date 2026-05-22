@@ -45,8 +45,9 @@ function makeStreamingSignal(parentSignal) {
 }
 
 // Abort-aware retry wrapper for LLM calls.
-// Never retries on: user cancellation, auth errors (401/403), bad request (400), timeouts.
-// Retries on: network errors, 429 rate limits, 5xx server errors.
+// Never retries on: user cancellation, auth errors (401/403), bad request (400),
+//                   deliberate request-deadline timeouts.
+// Retries on: network errors (incl. socket ETIMEDOUT / ECONNRESET), 429, 5xx.
 //
 // Backoff policy:
 //   429        → exponential w/ jitter, capped at 60s, 4 retries (rate limits often clear within ~1 min)
@@ -58,7 +59,7 @@ function backoffWait(attempt, base, capMs) {
   return exp / 2 + Math.random() * (exp / 2); // jitter in [exp/2, exp]
 }
 
-async function retryLLMCall(fn, signal, _legacyMaxRetries) {
+export async function retryLLMCall(fn, signal, _legacyMaxRetries) {
   let attempt = 0;
   while (true) {
     try {
@@ -67,7 +68,12 @@ async function retryLLMCall(fn, signal, _legacyMaxRetries) {
       if (e.name === 'AbortError' || signal?.aborted) throw e;
       const status = e.status || e.statusCode;
       if (status === 401 || status === 403 || status === 400) throw e;
-      if (/timed? ?out|timeout/i.test(e.message)) throw e;
+      // A socket-level ETIMEDOUT is a transient network failure, not a
+      // deliberate request-deadline timeout — let it fall through to the
+      // network-error retry branch instead of failing the whole turn.
+      const isSocketTimeout = [e.code, e.cause?.code].includes('ETIMEDOUT')
+        || /\bETIMEDOUT\b/i.test(e.message || '');
+      if (!isSocketTimeout && /timed? ?out|timeout/i.test(e.message)) throw e;
 
       // Honor server-provided Retry-After if present (seconds or HTTP-date).
       let serverRetryMs = null;
