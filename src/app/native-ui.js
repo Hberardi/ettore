@@ -750,7 +750,7 @@ uiBridge.on('askUser', ({ question, options, resolve }) => {
     try {
       const result = await cmd.handler(cmdArgs, context);
       if (result && typeof result === 'object' && result.action === 'exit') { autoSaveSessionMemory().finally(() => { cleanup(); process.exit(0); }); return; }
-      if (result && typeof result === 'object' && result.action === 'clear') { tui.messages = []; tui.needsRender = true; return; }
+      if (result && typeof result === 'object' && result.action === 'clear') { tui.messages.length = 0; tui.needsRender = true; return; }
       if (result && typeof result === 'object' && result.action === 'setTheme') { setTheme(result.theme); tui.needsRender = true; return; }
       if (typeof result === 'string' && result.length > 0) {
         showCommandOutput(cmdName, result);
