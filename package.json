@@ -1,0 +1,59 @@
+{
+  "name": "ettore-ai-assistant",
+  "version": "1.0.0",
+  "description": "ETTORE - Advanced AI CLI Assistant",
+  "type": "module",
+  "main": "src/cli/index.js",
+  "bin": {
+    "ettore": "bin/cli.js"
+  },
+  "scripts": {
+    "start": "node bin/cli.js",
+    "dev": "node bin/cli.js",
+    "test": "node --test \"tests/**/*.test.js\"",
+    "lint": "eslint src tests",
+    "lint:fix": "eslint src tests --fix",
+    "preinstall": "echo 'Installing ETTORE...'",
+    "postinstall": "echo 'ETTORE installed! Run: ettore'"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "assistant",
+    "llm",
+    "ettore",
+    "openai",
+    "anthropic",
+    "claude"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/ettore"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.21.1",
+    "@types/react": "18.3.28",
+    "boxen": "7.1.1",
+    "chalk": "5.6.2",
+    "commander": "12.1.0",
+    "conf": "12.0.0",
+    "fuse.js": "7.3.0",
+    "glob": "10.5.0",
+    "ink": "4.4.1",
+    "ink-text-input": "5.0.1",
+    "inquirer": "9.3.8",
+    "openai": "4.104.0",
+    "ora": "7.0.1",
+    "react": "18.3.1"
+  },
+  "preferGlobal": true,
+  "devDependencies": {
+    "eslint": "^9.39.4",
+    "globals": "^15.15.0"
+  }
+}
