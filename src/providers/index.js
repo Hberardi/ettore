@@ -357,14 +357,15 @@ export class ConnectionManager {
     });
     
     if (this.activeProvider === name) {
-      this.activeModel = models[0]?.id;
+      const first = models[0];
+      this.activeModel = typeof first === 'string' ? first : first?.id || null;
     }
-    
+
     const saved = loadKeys();
     saved[name] = {
       key: newApiKey,
       valid: true,
-      models: models.map(m => m.id)
+      models: models.map(m => typeof m === 'string' ? m : m.id),
     };
     saveKeys(saved);
     

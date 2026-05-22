@@ -124,8 +124,11 @@ export class ContextCompressor {
 
   needsCompression(messages, thresholdOverride = null) {
     if (this._sessionCount >= MAX_COMPRESSIONS_PER_SESSION) return false;
-    // Skip if already has a compression marker at index 1
-    if (messages[1]?.__compressed) return false;
+    // No __compressed short-circuit here: after a compression the token count
+    // drops below threshold on its own, and climbs again only as new messages
+    // accumulate — at which point a further compression (up to the session cap)
+    // is exactly what we want. A permanent marker check would disable every
+    // compression after the first.
     const threshold = Number.isFinite(thresholdOverride) && thresholdOverride > 0
       ? thresholdOverride
       : this.threshold;
