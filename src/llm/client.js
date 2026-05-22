@@ -31,6 +31,8 @@ function makeStreamingSignal(parentSignal) {
     idleTimer = setTimeout(() => {
       ctrl.abort(new Error(`Streaming idle timeout — no token for ${STREAMING_IDLE_MS / 1000}s`));
     }, STREAMING_IDLE_MS);
+    // A watchdog must never be the reason the process stays alive.
+    idleTimer.unref?.();
   };
 
   parentSignal?.addEventListener('abort', () => {
@@ -145,10 +147,34 @@ export function normalizeMessagesForAnthropic(messages) {
     flushPendingToolResults();
 
     if (msg.role === 'assistant') {
-      out.push({
-        role: 'assistant',
-        content: Array.isArray(msg.content) ? msg.content : String(msg.content || ''),
-      });
+      // Anthropic content blocks (from a prior Anthropic turn) pass through.
+      if (Array.isArray(msg.content)) {
+        out.push({ role: 'assistant', content: msg.content });
+        continue;
+      }
+      // OpenAI-shaped assistant message carrying tool_calls: rebuild it as
+      // Anthropic content blocks, converting each tool_call into a tool_use
+      // block so the following tool_result messages still resolve. Without
+      // this the tool_calls would be dropped and Anthropic would reject the
+      // orphaned tool_result blocks.
+      if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+        const blocks = [];
+        const text = String(msg.content || '');
+        if (text) blocks.push({ type: 'text', text });
+        for (const tc of msg.tool_calls) {
+          let input = {};
+          try { input = JSON.parse(tc.function?.arguments || '{}'); } catch { input = {}; }
+          blocks.push({
+            type: 'tool_use',
+            id: String(tc.id || ''),
+            name: tc.function?.name || '',
+            input,
+          });
+        }
+        out.push({ role: 'assistant', content: blocks });
+        continue;
+      }
+      out.push({ role: 'assistant', content: String(msg.content || '') });
       continue;
     }
 
@@ -183,7 +209,6 @@ export async function openaiCompatibleTurn(client, model, messages, tools, onTok
   raiseSignalListenerCap(signal);
 
   const { signal: streamSignal, resetTimer, clear } = makeStreamingSignal(signal);
-  const stream = await retryLLMCall(() => client.chat.completions.create(params, { signal: streamSignal }), signal);
 
   let content = '';
   let usage = null;
@@ -193,7 +218,10 @@ export async function openaiCompatibleTurn(client, model, messages, tools, onTok
   // Supports: MiniMax M2.7, DeepSeek-R1 API (reasoning_content), OpenRouter (reasoning)
   let inReasoning = false;
 
+  // Stream creation stays inside the try: if it throws, clear() still runs and
+  // disarms the idle watchdog (otherwise the 120s timer would leak).
   try {
+    const stream = await retryLLMCall(() => client.chat.completions.create(params, { signal: streamSignal }), signal);
     for await (const chunk of stream) {
       // Final usage chunk (include_usage) carries an empty choices array.
       if (chunk.usage) usage = chunk.usage;
@@ -303,17 +331,19 @@ class AnthropicClient {
     // immediately; the full message (with any tool_use blocks) is assembled by
     // the SDK and retrieved via finalMessage() once the stream completes.
     const { signal: streamSignal, resetTimer, clear } = makeStreamingSignal(signal);
-    const stream = await retryLLMCall(
-      () => this.client.messages.stream(params, { ...reqOpts, signal: streamSignal }),
-      signal,
-    );
 
     let inputTokens = 0;
     let outputTokens = 0;
     let cacheCreate = 0;
     let cacheRead = 0;
     let final;
+    // Stream creation stays inside the try: if it throws, clear() still runs and
+    // disarms the idle watchdog (otherwise the 120s timer would leak).
     try {
+      const stream = await retryLLMCall(
+        () => this.client.messages.stream(params, { ...reqOpts, signal: streamSignal }),
+        signal,
+      );
       for await (const chunk of stream) {
         resetTimer();
         if (chunk.type === 'message_start') {

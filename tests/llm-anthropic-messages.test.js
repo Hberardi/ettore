@@ -28,3 +28,48 @@ test('normalizeMessagesForAnthropic converts tool messages into user tool_result
     { type: 'tool_result', tool_use_id: 'toolu_1', content: 'ok' },
   ]);
 });
+
+test('normalizeMessagesForAnthropic converts OpenAI-shaped tool_calls into tool_use blocks', () => {
+  const messages = [
+    { role: 'user', content: 'read the file' },
+    {
+      role: 'assistant',
+      content: 'let me check',
+      tool_calls: [
+        { id: 'call_1', type: 'function', function: { name: 'read', arguments: '{"file_path":"/tmp/a.txt"}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call_1', content: 'file body' },
+  ];
+
+  const normalized = normalizeMessagesForAnthropic(messages);
+  assert.equal(normalized.length, 3);
+  assert.deepEqual(normalized[1], {
+    role: 'assistant',
+    content: [
+      { type: 'text', text: 'let me check' },
+      { type: 'tool_use', id: 'call_1', name: 'read', input: { file_path: '/tmp/a.txt' } },
+    ],
+  });
+  // The tool_result must still resolve against the tool_use id above.
+  assert.deepEqual(normalized[2].content, [
+    { type: 'tool_result', tool_use_id: 'call_1', content: 'file body' },
+  ]);
+});
+
+test('normalizeMessagesForAnthropic tolerates tool_calls with empty/invalid arguments', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        { id: 'call_2', type: 'function', function: { name: 'git_status', arguments: '' } },
+      ],
+    },
+  ];
+
+  const normalized = normalizeMessagesForAnthropic(messages);
+  assert.deepEqual(normalized[0].content, [
+    { type: 'tool_use', id: 'call_2', name: 'git_status', input: {} },
+  ]);
+});

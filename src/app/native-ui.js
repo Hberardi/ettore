@@ -439,11 +439,10 @@ export async function startApp(options = {}) {
     }
   };
 
-  // The run has finished — every step is done by definition. Drop the task
-  // list from the conversation so the panel clears instead of leaving a stale
-  // "Tasks" block in the scrollback. Splice in place: reassigning tui.messages
-  // would lose the patched .push above.
-  const completePendingTodos = () => {
+  // A run ended (completed, errored, or cancelled) — drop the task list so the
+  // panel clears instead of leaving a stale "Tasks" block in the scrollback.
+  // Splice in place: reassigning tui.messages would lose the patched .push above.
+  const clearTodoPanel = () => {
     if (!Array.isArray(tui.todos) || tui.todos.length === 0) return;
     for (let i = tui.messages.length - 1; i >= 0; i--) {
       if (tui.messages[i].role === 'todos') tui.messages.splice(i, 1);
@@ -455,7 +454,7 @@ export async function startApp(options = {}) {
   emitter.on('complete', (content) => {
     tui.isRunning = false;
     flushTokenBuffer();
-    completePendingTodos();
+    clearTodoPanel();
     const text  = sanitizeModelText(tui.streaming?.text || content || '');
     const tools = tui.streaming?.tools || [];
     tui.messages.push({ role: 'assistant', text, tools, id: Date.now() });
@@ -470,6 +469,7 @@ export async function startApp(options = {}) {
   emitter.on('cancelled', () => {
     tui.isRunning = false;
     flushTokenBuffer();
+    clearTodoPanel();
     if (tui.streaming?.text) {
       tui.messages.push({ role: 'assistant', text: sanitizeModelText(tui.streaming.text) + ' [cancelled]', tools: tui.streaming.tools || [], id: Date.now() });
     }
@@ -486,6 +486,7 @@ export async function startApp(options = {}) {
     tui.streaming   = null;
     lastToolIntent = '';
     tokenBuffer = '';
+    clearTodoPanel();
     tui.messages.push({ role: 'assistant', text: `Error: ${msg}`, tools: [], id: Date.now() });
     tui.needsRender = true;
   });
