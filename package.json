@@ -37,19 +37,12 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.21.1",
-    "@types/react": "18.3.28",
-    "boxen": "7.1.1",
     "chalk": "5.6.2",
     "commander": "12.1.0",
     "conf": "12.0.0",
-    "fuse.js": "7.3.0",
     "glob": "10.5.0",
-    "ink": "4.4.1",
-    "ink-text-input": "5.0.1",
-    "inquirer": "9.3.8",
     "openai": "4.104.0",
-    "ora": "7.0.1",
-    "react": "18.3.1"
+    "ora": "7.0.1"
   },
   "preferGlobal": true,
   "devDependencies": {
