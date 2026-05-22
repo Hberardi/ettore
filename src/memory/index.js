@@ -439,7 +439,10 @@ export async function getMemoryStats(projectRoot) {
 
     // Conta sezioni
     for (const section of SECTIONS) {
-      const regex = new RegExp(`## ${section}\\n([\\s\\S]*?)(?=\\n## |\\Z)`);
+      // `$` (no /m flag) anchors at end of string. NB: \Z is NOT a JS regex
+      // anchor — it would match a literal "Z", which truncated the last
+      // section to 0 lines and clipped any section containing a "Z".
+      const regex = new RegExp(`## ${section}\\n([\\s\\S]*?)(?=\\n## |$)`);
       const match = content.match(regex);
       result.sections[section] = match ? match[1].trim().split('\n').filter(l => l.trim()).length : 0;
     }
