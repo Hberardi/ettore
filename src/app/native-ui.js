@@ -8,13 +8,23 @@ import { createClient } from '../llm/client.js';
 import { Agent } from '../agents/index.js';
 import { createSession, saveSession } from '../sessions/index.js';
 import { uiBridge } from '../tools/bridge.js';
-import { listInstallSessionApprovals } from '../tools/index.js';
+import { listInstallSessionApprovals, setAutoApprove } from '../tools/index.js';
 import { builtinCommands } from '../commands/index.js';
 import { getModelPricing, calcCost } from '../utils/pricing.js';
 import { stripAllAnsi } from '../utils/ansi.js';
 import { getModelCapability } from '../providers/model_capability.js';
+import { extractImageReferences, loadImageAttachments } from '../utils/images.js';
 
 const NON_METERED_PROVIDERS = new Set(['ollama', 'nvidia', 'minimax']);
+
+function hasLongReasoningWindow(provider, modelId) {
+  const p = String(provider || '').toLowerCase();
+  const m = String(modelId || '').toLowerCase();
+  if (p === 'minimax') return true;
+  // Kimi routed through NVIDIA NIM can have long silent reasoning stretches.
+  if (p === 'nvidia' && (m.includes('kimi') || m.includes('moonshot'))) return true;
+  return false;
+}
 
 function sanitizeUiText(value) {
   return stripAllAnsi(String(value ?? '')).replace(/\r/g, '');
@@ -175,6 +185,8 @@ export async function startApp(options = {}) {
   };
 
   const config = await loadConfig(options);
+  tui.safetyProfile = config.safetyProfile || 'balanced';
+  tui.dynamicToolRouting = config.dynamicToolRouting !== false;
   let agent = null;
 
   const rebuildAgent = async ({ announceMemory = false } = {}) => {
@@ -209,6 +221,16 @@ export async function startApp(options = {}) {
   const savedTheme = getConfig('theme');
   if (savedTheme && THEMES[savedTheme]) setTheme(savedTheme, { persist: false });
 
+  // Restore auto-approve state from persisted config so user doesn't have to
+  // re-toggle on every session start.
+  const savedAutoApprove = getConfig('autoApprove');
+  if (savedAutoApprove && typeof savedAutoApprove === 'object') {
+    setAutoApprove({
+      edits: savedAutoApprove.edits === true,
+      installs: savedAutoApprove.installs === true,
+    });
+  }
+
   const p = connectionManager.activeProvider || 'unknown';
   const m = connectionManager.activeModel   || 'unknown';
   const session = await createSession(p, m);
@@ -217,6 +239,7 @@ export async function startApp(options = {}) {
   tui.model     = m;
 
   const emitter = new EventEmitter();
+  connectionManager.setEmitter(emitter);
 
   let renderPending = false;
   let lastRenderTime = 0;
@@ -246,7 +269,7 @@ export async function startApp(options = {}) {
   // once the next chunk completes (or invalidates) the pattern. This kills
   // the root cause of orphan codes: a sequence split across two chunks.
   let tokenBuffer = '';
-  const STALL_MS = 1800;
+  const STALL_MS = 800;
 
   // Returns { safe, held } — `safe` can be sanitized & emitted now, `held`
   // stays in the buffer until more data arrives. Conservative: only holds
@@ -290,6 +313,14 @@ export async function startApp(options = {}) {
       read_pdf: ['Estrarre informazioni dal documento', args.file_path ? `Prossimo passo: analizzo PDF ${args.file_path}` : 'Prossimo passo: analizzo il PDF richiesto'],
       read_doc: ['Estrarre informazioni dal documento', args.file_path ? `Prossimo passo: analizzo file ${args.file_path}` : 'Prossimo passo: analizzo il documento richiesto'],
       read_server_console: ['Capire errori/runtime dell’app', 'Prossimo passo: leggo i log della console server'],
+      dev_server: ['Gestire il dev server locale', 'Prossimo passo: avvio/controllo stato o log del server di sviluppo'],
+      browser_check: ['Verificare rapidamente una pagina web', 'Prossimo passo: controllo HTTP, titolo e testi attesi della pagina'],
+      dep_inspect: ['Analizzare lo stato delle dipendenze del progetto', 'Prossimo passo: controllo pacchetti outdated e possibili vulnerabilità'],
+      repo_map: ['Mappare rapidamente la struttura del repository', 'Prossimo passo: costruisco una panoramica dei file chiave ed entrypoint'],
+      repo_find_symbol: ['Individuare rapidamente dove vive un simbolo', 'Prossimo passo: cerco occorrenze e definizioni del simbolo richiesto'],
+      apply_patch_structured: ['Applicare una patch validata su un file', 'Prossimo passo: verifico match univoco e applico la modifica'],
+      run_tests: ['Verificare che le modifiche non rompano il progetto', 'Prossimo passo: eseguo la suite di test appropriata'],
+      run_checks: ['Eseguire quality checks completi del progetto', 'Prossimo passo: lancio lint/typecheck/test in profilo sicuro'],
       glob: ['Mappare i file utili al task', args.pattern ? `Prossimo passo: cerco con pattern ${sanitizeIntentText(args.pattern)}` : 'Prossimo passo: cerco i file pertinenti'],
       grep: ['Trovare i punti di codice rilevanti', args.pattern ? `Prossimo passo: cerco "${sanitizeIntentText(args.pattern)}"` : 'Prossimo passo: cerco il pattern richiesto'],
       list_dir: ['Capire la struttura del progetto', args.path ? `Prossimo passo: esploro ${sanitizeIntentText(args.path)}` : 'Prossimo passo: esploro le directory principali'],
@@ -299,6 +330,7 @@ export async function startApp(options = {}) {
       websearch: ['Raccogliere informazioni aggiornate', args.query ? `Prossimo passo: cerco "${sanitizeIntentText(args.query)}"` : 'Prossimo passo: effettuo una ricerca web'],
       webfetch: ['Leggere contenuto di una pagina specifica', args.url ? `Prossimo passo: apro ${sanitizeIntentText(args.url)}` : 'Prossimo passo: apro la pagina richiesta'],
       bash: ['Eseguire una verifica operativa', args.command ? `Prossimo passo: eseguo ${sanitizeIntentText(args.command, 80)}` : 'Prossimo passo: eseguo il comando necessario'],
+      bash_session: ['Eseguire un comando con stato di shell persistente', args.command ? `Prossimo passo: eseguo nella sessione ${sanitizeIntentText(args.command, 80)}` : 'Prossimo passo: eseguo il comando nella sessione persistente'],
       write: ['Applicare le modifiche richieste', args.file_path ? `Prossimo passo: scrivo ${sanitizeIntentText(args.file_path)}` : 'Prossimo passo: scrivo le modifiche'],
       edit: ['Applicare patch mirata al codice', args.file_path ? `Prossimo passo: modifico ${sanitizeIntentText(args.file_path)}` : 'Prossimo passo: modifico il file richiesto'],
       ask_user: ['Chiarire una scelta necessaria', 'Prossimo passo: chiedo una decisione all’utente'],
@@ -395,6 +427,7 @@ export async function startApp(options = {}) {
     });
     tui.streaming.reasoning = reasoningText;
     reasoningText = '';
+    tui.turnState = 'tool_call';
     scheduleRender();
   });
 
@@ -409,7 +442,33 @@ export async function startApp(options = {}) {
       const stillRunning = tui.streaming.tools.some(t => t.status === 'running');
       tui.streaming.waitKind = stillRunning ? 'tool' : 'model';
       tui.streaming.lastActivityAt = Date.now();
-      tui.render(); // Immediate render for tool completion
+      tui.turnState = stillRunning ? 'tool_call' : 'tool_result';
+      scheduleRender();
+    }
+  });
+
+  emitter.on('turnState', ({ state }) => {
+    tui.turnState = state || 'idle';
+    if (tui.streaming) {
+      if (state === 'tool_call') tui.streaming.waitKind = 'tool';
+      if (state === 'tool_result') tui.streaming.waitKind = 'model';
+      tui.streaming.lastActivityAt = Date.now();
+    }
+    scheduleRender();
+  });
+
+  // Tools that take minutes (long bash, video_transcript with whisper, large
+  // webfetch) emit periodic toolProgress events from the tool handler. Forward
+  // them as activity ticks so the stall watchdog doesn't kill a tool that is
+  // genuinely working — and show the latest message under the running tool.
+  uiBridge.on('toolProgress', ({ name, key, message }) => {
+    if (!tui.streaming) return;
+    tui.streaming.lastActivityAt = Date.now();
+    const running = tui.streaming.tools.find(t => t.status === 'running' && t.name === name);
+    if (running) {
+      running.progress = String(message || '').slice(0, 200);
+      running.progressKey = key;
+      tui.needsRender = true;
     }
   });
 
@@ -453,6 +512,7 @@ export async function startApp(options = {}) {
 
   emitter.on('complete', (content) => {
     tui.isRunning = false;
+    tui.turnState = 'completed';
     flushTokenBuffer();
     clearTodoPanel();
     const text  = sanitizeModelText(tui.streaming?.text || content || '');
@@ -468,6 +528,7 @@ export async function startApp(options = {}) {
 
   emitter.on('cancelled', () => {
     tui.isRunning = false;
+    tui.turnState = 'cancelled';
     flushTokenBuffer();
     clearTodoPanel();
     if (tui.streaming?.text) {
@@ -483,6 +544,7 @@ export async function startApp(options = {}) {
 
   emitter.on('error', (msg) => {
     tui.isRunning   = false;
+    tui.turnState = 'failed';
     tui.streaming   = null;
     lastToolIntent = '';
     tokenBuffer = '';
@@ -506,6 +568,93 @@ export async function startApp(options = {}) {
   emitter.on('todoDone', (idx) => {
     tui.todos.forEach((t, i) => { if (i <= idx) t.status = 'done'; });
     tui.currentPlan = [...tui.todos];
+    tui.needsRender = true;
+  });
+
+  emitter.on('autoContinue', ({ attempt, max, remaining, stalled }) => {
+    const suffix = stalled ? ' — nessun progresso, sollecito il modello' : '';
+    tui.messages.push({
+      role: 'system',
+      text: `▸ Auto-continue ${attempt}/${max}: ${remaining} step rimasti dal piano${suffix}`,
+      tools: [],
+      id: Date.now(),
+    });
+    // Keep the streaming bubble alive across the auto-continue so the user
+    // sees a continuous run, not a fake "done → restart" flicker.
+    if (tui.streaming) {
+      tui.streaming.text = '';
+      tui.streaming.reasoning = '';
+      tui.streaming.waitKind = 'model';
+      tui.streaming.lastActivityAt = Date.now();
+    }
+    tui.needsRender = true;
+  });
+
+  // The turn ended with plan steps still open. Without this the run just stops
+  // on whatever the model last said — usually an announcement of work it never
+  // did — and the CLI looks like it froze.
+  emitter.on('autoContinueExhausted', ({ reason, remaining, attempts, pending = [] }) => {
+    const why = reason === 'no_progress'
+      ? 'il modello non ha fatto progressi'
+      : `esauriti i ${attempts} tentativi di auto-continue`;
+    const list = pending.slice(0, 5).map(step => `   ${step}`).join('\n');
+    tui.messages.push({
+      role: 'system',
+      text: `⚠ Piano incompleto: ${remaining} step ancora aperti (${why}).\n${list}`
+        + `${pending.length > 5 ? `\n   … e altri ${pending.length - 5}` : ''}`
+        + `\n   Scrivi "continua" per riprendere, oppure indica tu il passo successivo.`,
+      tools: [],
+      id: Date.now(),
+    });
+    tui.needsRender = true;
+  });
+
+  // The model kept announcing work instead of doing it, and the retries ran
+  // out. Same reason as autoContinueExhausted: say why the run stopped.
+  emitter.on('announcementStall', ({ attempts, announcement }) => {
+    tui.messages.push({
+      role: 'system',
+      text: `⚠ Il modello ha annunciato un'azione senza eseguirla${announcement ? ` ("${announcement}")` : ''}`
+        + ` anche dopo ${attempts} solleciti.\n`
+        + `   Scrivi "fallo" per insistere, oppure indica tu il comando/file esatto su cui lavorare.`,
+      tools: [],
+      id: Date.now(),
+    });
+    tui.needsRender = true;
+  });
+
+  // Auto-compact notifications. The compressor emits these any time it runs;
+  // without these handlers the user sees no feedback that compression happened.
+  emitter.on('compressPrivacyNotice', () => {
+    tui.messages.push({
+      role: 'system',
+      text: '▸ Auto-compact attivo: quando il contesto supera ~70% verrà riassunto con una chiamata LLM aggiuntiva. Disattivabile con /compress auto off.',
+      tools: [],
+      id: Date.now(),
+    });
+    tui.needsRender = true;
+  });
+
+  emitter.on('contextCompressed', ({ tokensBefore, tokensAfter, savedTokens }) => {
+    const pct = tokensBefore > 0 ? Math.round((savedTokens / tokensBefore) * 100) : 0;
+    const fmt = (n) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+    tui.messages.push({
+      role: 'system',
+      text: `▸ Contesto compresso: ~${fmt(tokensBefore)} → ~${fmt(tokensAfter)} tokens (-${pct}%)`,
+      tools: [],
+      id: Date.now(),
+    });
+    if (tui.streaming) tui.streaming.lastActivityAt = Date.now();
+    tui.needsRender = true;
+  });
+
+  emitter.on('compressionFallback', ({ reason }) => {
+    tui.messages.push({
+      role: 'system',
+      text: `⚠ Compressione degradata (riassunto fallback senza LLM): ${reason}`,
+      tools: [],
+      id: Date.now(),
+    });
     tui.needsRender = true;
   });
 
@@ -561,6 +710,13 @@ export async function startApp(options = {}) {
     tui.needsRender = true;
   });
 
+  emitter.on('toolRoute', ({ count, names, dynamic }) => {
+    tui.routedToolCount = Number(count) || 0;
+    tui.routedToolNames = Array.isArray(names) ? names : [];
+    tui.dynamicToolRouting = dynamic !== false;
+    tui.needsRender = true;
+  });
+
   emitter.on('usage', ({ inputTokens, outputTokens }) => {
     if (!inputTokens && !outputTokens) return;
     tui.inputTokensTotal  += inputTokens  || 0;
@@ -577,19 +733,72 @@ export async function startApp(options = {}) {
       tui.sessionCost += cost;
       tui.costKnown    = true;
     }
+    // Optional stderr trace for profiling. Same shape as the one-shot path
+    // (src/cli/index.js) so output is comparable across the two entry points.
+    if (options.verboseTokens) {
+      const costStr = NON_METERED_PROVIDERS.has(provider)
+        ? 'n/a'
+        : `$${tui.sessionCost.toFixed(4)}`;
+      process.stderr.write(
+        `📊 turn: in=${inputTokens || 0} out=${outputTokens || 0}  ·  session in=${tui.inputTokensTotal} out=${tui.outputTokensTotal} cost=${costStr}\n`,
+      );
+    }
     tui.needsRender = true;
   });
 
-uiBridge.on('fileChanged', ({ type, path, lines }) => {
+  // ConnectionManager fires this whenever a provider model list is fetched
+  // (boot refresh, TTL expiry, explicit /models refresh). Surface it in the
+  // transcript so the user knows the catalog has moved.
+  emitter.on('modelsRefreshed', ({ provider, count, ageMs, forced }) => {
+    const minutes = ageMs != null ? Math.round(ageMs / 60_000) : null;
+    const detail = minutes != null
+      ? `(cache was ${minutes}m old${forced ? ', forced' : ''})`
+      : '(initial fetch)';
+    tui.messages.push({
+      role: 'system',
+      text: `↻ Refreshed ${count} models for ${provider} ${detail}`,
+      tools: [],
+      id: Date.now(),
+    });
+    tui.needsRender = true;
+  });
+
+uiBridge.on('fileChanged', ({ type, path, lines, oldLines, newLines, diff }) => {
   const fileName = path.split('/').pop();
   const icon = type === 'write' ? '📝' : '✏️';
-  tui.messages.push({ role: 'system', text: `${icon} ${fileName} (${lines} lines)`, tools: [], id: Date.now() });
+  // `write` reports a single line count; `edit` reports the before/after pair.
+  // Reading `lines` for both is what produced "app.py (undefined lines)".
+  let detail;
+  if (Number.isFinite(lines)) {
+    detail = `${lines} lines`;
+  } else if (Number.isFinite(oldLines) && Number.isFinite(newLines)) {
+    const delta = Number.isFinite(diff) ? diff : newLines - oldLines;
+    detail = `${oldLines} → ${newLines} lines, ${delta > 0 ? '+' : ''}${delta}`;
+  } else {
+    detail = 'modificato';
+  }
+  tui.messages.push({ role: 'system', text: `${icon} ${fileName} (${detail})`, tools: [], id: Date.now() });
   tui.needsRender = true;
 });
 
-uiBridge.on('askUser', ({ question, options, resolve }) => {
-  const safeOptions = Array.isArray(options) ? options : [];
-  tui.askUser = { question, options: safeOptions, resolve };
+uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
+  // Defense in depth: even though every internal emitter passes string arrays,
+  // an LLM-driven ask_user tool call can hand us objects. Normalize so the TUI
+  // never renders "[object Object]" as an option label.
+  const safeOptions = Array.isArray(options)
+    ? options
+        .map((o) => {
+          if (o == null) return '';
+          if (typeof o === 'string') return o;
+          if (typeof o === 'object') {
+            const label = o.label ?? o.text ?? o.value ?? o.name;
+            return typeof label === 'string' ? label : '';
+          }
+          return String(o);
+        })
+        .filter(Boolean)
+    : [];
+  tui.askUser = { question, options: safeOptions, resolve, sensitive: Boolean(sensitive) };
   tui.askUserIdx = 0;
   tui.askUserInput = '';
   tui.needsRender = true;
@@ -631,8 +840,14 @@ uiBridge.on('askUser', ({ question, options, resolve }) => {
       // Tool calls can legitimately run for several minutes (large bash,
       // webfetch, big file reads). The model itself is expected to stream
       // tokens regularly, so a shorter timeout applies when waiting on it.
+      // Exception: MiniMax M2.7 emits no chunks during internal reasoning,
+      // so its model-wait phase needs the longer cap too.
       const waitKind = tui.streaming.waitKind || 'model';
-      const hardStallMs = waitKind === 'tool' ? 300_000 : 120_000;
+      const provider = connectionManager.activeProvider || '';
+      const modelId = connectionManager.activeModel || '';
+      const longReasoningModel = hasLongReasoningWindow(provider, modelId);
+      const modelStallMs = longReasoningModel ? 300_000 : 120_000;
+      const hardStallMs = waitKind === 'tool' ? 300_000 : modelStallMs;
       if (idleMs < hardStallMs) return;
       const reason = waitKind === 'tool'
         ? `tool fermo da ${Math.round(idleMs / 1000)}s`
@@ -747,7 +962,7 @@ uiBridge.on('askUser', ({ question, options, resolve }) => {
       tui.needsRender = true;
       return;
     }
-    const context = { commandSystem: { list: () => commandList }, config, version: '1.0.0', agent, history: [] };
+    const context = { commandSystem: { list: () => commandList }, config, version: '1.0.0', agent, history: [], emitter };
     try {
       const result = await cmd.handler(cmdArgs, context);
       if (result && typeof result === 'object' && result.action === 'exit') { autoSaveSessionMemory().finally(() => { cleanup(); process.exit(0); }); return; }
@@ -1012,10 +1227,12 @@ if (cmdName === 'models' || cmdName === 'use' || cmdName === 'select') {
       msg += `\n⚠️  This is a paid API — you'll be charged per token.`;
     }
     // Warn if the model may not support tool-use reliably.
-    if (tui.modelCapability === 'lite' || tui.modelCapability === 'unknown') {
-      const capLabel = tui.modelCapability === 'unknown' ? 'non confermato per tool-use' : 'lite';
-      msg += `\n⚠️  Modello ${capLabel} — solo chat semplice, niente coding tools (bash/read/write/edit).`;
+    if (tui.modelCapability === 'lite') {
+      msg += `\n⚠️  Modello lite — solo chat semplice, niente coding tools (bash/read/write/edit).`;
       msg += `\n   Usa /use per scegliere un modello FULL con tool-use.`;
+    } else if (tui.modelCapability === 'unknown') {
+      msg += `\n⚠️  Capability non confermata — i tool vengono inviati, ma il modello potrebbe non gestirli.`;
+      msg += `\n   Se l'output è incoerente, usa /use per un modello FULL.`;
     }
     tui.messages.push({ role: 'system', text: msg, tools: [], id: Date.now() });
   } else {
@@ -1079,7 +1296,17 @@ if (cmdName === 'connect') {
       return;
     }
     const cleanUserText = sanitizeModelText(text);
-    tui.messages.push({ role: 'user', text: cleanUserText, tools: [], id: Date.now() });
+    const imageRefs = extractImageReferences(cleanUserText);
+    let imageAttachments = [];
+    try {
+      imageAttachments = await loadImageAttachments(imageRefs.paths, { cwd: config.workdir });
+    } catch (error) {
+      tui.messages.push({ role: 'system', text: `Image error: ${error.message}`, tools: [], id: Date.now() });
+      tui.needsRender = true;
+      return;
+    }
+    const displayText = [imageRefs.text, ...imageAttachments.map(image => `📎 ${image.name}`)].filter(Boolean).join('\n');
+    tui.messages.push({ role: 'user', text: displayText, tools: [], id: Date.now() });
     tui.needsRender = true;
     if (!agent) {
       tui.messages.push({
@@ -1092,11 +1319,12 @@ if (cmdName === 'connect') {
       return;
     }
     tui.isRunning = true;
+    tui.turnState = 'started';
     tui.streaming = { text: '', tools: [], reasoning: '', waitKind: 'model', lastActivityAt: Date.now(), stallMs: STALL_MS };
     reasoningText = '';
     firstToolSeen = false;
     tui.needsRender = true;
-    agent.run(cleanUserText, emitter).then(async () => {
+    agent.run(imageRefs.text, emitter, { imageAttachments }).then(async () => {
       session.messages = agent.messages;
       await saveSession(session).catch(() => {});
     }).catch(() => {});
@@ -1112,7 +1340,17 @@ if (cmdName === 'connect') {
   const appendPastedText = (rawText) => {
     const normalized = String(rawText || '').replace(/\r\n/g, '\n').replace(/\r/g, '');
     if (!normalized) return;
-    tui.setInput((tui.input || '') + normalized);
+    if (tui.apiKeyInputMode) {
+      // API key/baseURL/model fields are single-line; drop pasted newlines.
+      const compact = normalized.replace(/\n/g, '');
+      if (!compact) return;
+      for (const ch of compact) tui.addApiKeyChar(ch);
+    } else if (tui.askUser) {
+      tui.askUserInput = (tui.askUserInput || '') + normalized.replace(/\n/g, '');
+      tui.needsRender = true;
+    } else {
+      tui.setInput((tui.input || '') + normalized);
+    }
     suppressKeypressUntil = Date.now() + 120;
   };
 
@@ -1226,8 +1464,14 @@ if (cmdName === 'connect') {
       if (key?.name === 'return' || key?.name === 'enter') {
         const answer = (tui.askUserInput || '').trim();
         if (!answer) return;
+        const sensitive = Boolean(tui.askUser.sensitive);
         const resolve = tui.askUser.resolve;
-        tui.messages.push({ role: 'system', text: `✓ Answered: ${answer}`, tools: [], id: Date.now() });
+        tui.messages.push({
+          role: 'system',
+          text: sensitive ? '✓ Answered securely' : `✓ Answered: ${answer}`,
+          tools: [],
+          id: Date.now(),
+        });
         tui.askUser = null;
         tui.askUserInput = '';
         tui.needsRender = true;
@@ -1468,7 +1712,14 @@ if (cmdName === 'connect') {
 
       // Collect user topics (keep a wider history window)
       const topics = userMsgs
-        .map(m => (typeof m.content === 'string' ? m.content : '').slice(0, 140).replace(/\n/g, ' ').trim())
+        .map(m => {
+          const content = typeof m.content === 'string'
+            ? m.content
+            : Array.isArray(m.content)
+              ? m.content.filter(block => block?.type === 'text').map(block => block.text || '').join(' ')
+              : '';
+          return content.slice(0, 140).replace(/\n/g, ' ').trim();
+        })
         .filter(Boolean)
         .slice(-20);
 

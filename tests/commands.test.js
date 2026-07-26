@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { builtinCommands } from '../src/commands/index.js';
@@ -22,7 +22,47 @@ test('help: shows first steps and grouped commands', async () => {
   assert.match(output, /\/connect/);
   assert.match(output, /Core commands/);
   assert.match(output, /\/doctor/);
+  assert.match(output, /\/caveman/);
   assert.match(output, /Use \/help <command>/);
+});
+
+test('caveman: enables selected level on agent', async () => {
+  const seen = [];
+  const agent = {
+    cavemanLevel: null,
+    setCavemanLevel(level) {
+      this.cavemanLevel = level;
+      seen.push(level);
+    },
+    clearCavemanLevel() {
+      this.cavemanLevel = null;
+    },
+  };
+
+  const output = await builtinCommands.caveman.handler(['ultra'], { agent });
+
+  assert.equal(agent.cavemanLevel, 'ultra');
+  assert.deepEqual(seen, ['ultra']);
+  assert.match(output, /Caveman mode: ON \(ultra\)/);
+});
+
+test('caveman: reports status and disables mode', async () => {
+  const agent = {
+    cavemanLevel: 'full',
+    setCavemanLevel(level) {
+      this.cavemanLevel = level;
+    },
+    clearCavemanLevel() {
+      this.cavemanLevel = null;
+    },
+  };
+
+  const before = await builtinCommands.caveman.handler([], { agent });
+  const off = await builtinCommands.caveman.handler(['off'], { agent });
+
+  assert.match(before, /Caveman mode: ON \(full\)/);
+  assert.match(off, /Caveman mode: OFF/);
+  assert.equal(agent.cavemanLevel, null);
 });
 
 test('help: shows command-specific usage', async () => {
@@ -154,6 +194,56 @@ test('use: shows quick select when provider is connected but no model provided',
   assert.match(output, /Quick select: \/use ollama llama3\.1/);
 });
 
+test('models refresh: forces a refresh on a single provider', async () => {
+  const calls = [];
+  const fakeManager = {
+    listConnections: () => [{ provider: 'ollama' }],
+    isConnected: () => true,
+    refreshModels: async (provider, opts) => {
+      calls.push([provider, opts]);
+      return { success: true, models: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] };
+    },
+  };
+  const output = await builtinCommands.models.handler(['refresh', 'ollama'], { connectionManager: fakeManager });
+  assert.deepEqual(calls, [['ollama', { force: true }]]);
+  assert.match(output, /↻ Refreshed 3 models for ollama/);
+});
+
+test('models refresh: refreshes every connected provider when no name given', async () => {
+  const refreshed = ['ollama', 'nvidia'];
+  const fakeManager = {
+    listConnections: () => refreshed.map(p => ({ provider: p })),
+    refreshModels: async (provider) => ({ success: provider === 'ollama', models: [{ id: provider }] }),
+  };
+  const output = await builtinCommands.models.handler(['refresh'], { connectionManager: fakeManager });
+  assert.match(output, /↻ Refreshed 1\/2 providers/);
+});
+
+test('models refresh: surfaces failures with the provider name', async () => {
+  const fakeManager = {
+    listConnections: () => [{ provider: 'nvidia' }],
+    isConnected: () => true,
+    refreshModels: async () => ({ success: false, error: 'HTTP 503' }),
+  };
+  const output = await builtinCommands.models.handler(['refresh', 'nvidia'], { connectionManager: fakeManager });
+  assert.match(output, /✗ Failed to refresh nvidia: HTTP 503/);
+});
+
+test('models stale: shows age and freshness for each connected provider', async () => {
+  const fakeManager = {
+    getModelsCacheStatus: () => [
+      { provider: 'ollama', modelsCount: 12, ageMs: 30_000, stale: false, fetchedAt: new Date().toISOString() },
+      { provider: 'nvidia', modelsCount: 240, ageMs: 600_000, stale: true, fetchedAt: new Date().toISOString() },
+      { provider: 'openai', modelsCount: 0, ageMs: null, stale: true, fetchedAt: null },
+    ],
+  };
+  const output = await builtinCommands.models.handler(['stale'], { connectionManager: fakeManager });
+  assert.match(output, /Model catalog cache/);
+  assert.match(output, /ollama: 12 models, just now \(fresh\)/);
+  assert.match(output, /nvidia: 240 models, 10m ago \(will refresh on next access\)/);
+  assert.match(output, /openai: 0 models, never fetched \(will refresh on next access\)/);
+});
+
 test('use: rejects unknown model before setting active', async () => {
   const calls = [];
   const fakeManager = {
@@ -194,9 +284,16 @@ test('doctor: reports local diagnostics and next steps', async () => {
   process.env.ETTORE_CONFIG_DIR = dir;
   process.env.OPENAI_API_KEY = 'sk-test-secret-1234567890';
   try {
+    await writeFile(join(dir, 'package.json'), '{}\n');
     const output = await builtinCommands.doctor.handler([], {
       version: '1.0.0',
-      config: { stream: true, workdir: process.cwd() },
+      config: { stream: true, workdir: dir },
+      connectionManager: {
+        listConnections: () => [],
+        getActive: () => null,
+        activeProvider: null,
+        activeModel: null,
+      },
     });
 
     assert.match(output, /ETTORE doctor/);
@@ -206,6 +303,8 @@ test('doctor: reports local diagnostics and next steps', async () => {
     assert.match(output, /Failures/);
     assert.match(output, /Next steps/);
     assert.match(output, /Node\.js/);
+    assert.match(output, new RegExp(`Working directory writable: ${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(output, new RegExp(`Project root detected: ${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     assert.match(output, /Config directory permissions:/);
     assert.match(output, /Environment API keys present for: openai/);
     assert.doesNotMatch(output, /sk-test-secret/);
@@ -214,6 +313,32 @@ test('doctor: reports local diagnostics and next steps', async () => {
     else process.env.ETTORE_CONFIG_DIR = previousConfigDir;
     if (previousOpenAIKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousOpenAIKey;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('doctor: uses injected connection manager state', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ettore-doctor-manager-'));
+  const previousConfigDir = process.env.ETTORE_CONFIG_DIR;
+  process.env.ETTORE_CONFIG_DIR = dir;
+  try {
+    const output = await builtinCommands.doctor.handler([], {
+      config: { workdir: dir, model: 'ctx-model' },
+      connectionManager: {
+        listConnections: () => [{ provider: 'fake', modelsCount: 1 }],
+        getActive: () => ({ provider: 'fake' }),
+        activeProvider: 'fake',
+        activeModel: 'fake-model',
+      },
+    });
+
+    assert.match(output, /Saved provider connections: 1/);
+    assert.match(output, /Active provider: fake/);
+    assert.match(output, /Active model: fake-model/);
+    assert.doesNotMatch(output, /No active provider\/model selected/);
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.ETTORE_CONFIG_DIR;
+    else process.env.ETTORE_CONFIG_DIR = previousConfigDir;
     await rm(dir, { recursive: true, force: true });
   }
 });

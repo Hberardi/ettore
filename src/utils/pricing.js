@@ -60,6 +60,7 @@ const PRICING = {
   'command-a':           { in: 2.50,  out: 10.00, ctx: 256000  },
   // MiniMax
   'minimax-text-01':     { in: 0.28,  out: 1.12,  ctx: 1000000 },
+  'minimax-m3':          { in: 0.30,  out: 1.20,  ctx: 128000  },
   'minimax-m2.7':        { in: 0.50,  out: 2.00,  ctx: 128000  },
   // Moonshot (Kimi)
   'kimi-k2':             { in: 0.60,  out: 2.50,  ctx: 131072  },
@@ -78,6 +79,40 @@ const PRICING = {
   'jamba-1.5-large':     { in: 2.00,  out: 8.00,  ctx: 256000  },
   'jamba-1.5-mini':      { in: 0.20,  out: 0.40,  ctx: 256000  },
 };
+
+// Approximate per-clip pricing (USD) for MiniMax Hailuo video generation.
+// Video is billed per generated clip, not per token — these are rough public
+// list estimates used only to warn the user before a costly batch. Verify the
+// exact figure against your MiniMax plan.
+const VIDEO_CLIP_PRICING = {
+  'S2V-01':            { base: 0.65 }, // subject-reference, ~6s
+  'MiniMax-Hailuo-2.3': { base: 0.28, '1080P': 0.49 },
+};
+
+export function estimateVideoCost({ model = 'S2V-01', resolution = '768P', count = 1 } = {}) {
+  const entry = VIDEO_CLIP_PRICING[model] || VIDEO_CLIP_PRICING['S2V-01'];
+  const perClip = entry[resolution] ?? entry.base;
+  if (perClip == null) return null;
+  return perClip * Math.max(0, Number(count) || 0);
+}
+
+// Official MiniMax "video points" deducted per single clip, by model /
+// resolution / duration (seconds). Source: platform.minimax.io/docs/guides/
+// pricing-video. This is the real unit the account is billed in. S2V-01 is the
+// legacy Video-01 series and is not in the points table (left undefined).
+export const VIDEO_POINT_COSTS = {
+  'MiniMax-Hailuo-2.3':      { '768P': { 6: 1, 10: 2 }, '1080P': { 6: 2 } },
+  'MiniMax-Hailuo-02':       { '512P': { 6: 0.3, 10: 0.5 }, '768P': { 6: 1, 10: 2 }, '1080P': { 6: 2 } },
+  'MiniMax-Hailuo-2.3-Fast': { '768P': { 6: 0.7, 10: 1.1 }, '1080P': { 6: 1.3 } },
+};
+
+// Video points required for a batch. Returns null when the model's per-clip
+// cost isn't in the official table (e.g. legacy S2V-01).
+export function estimateVideoPoints({ model, resolution = '768P', duration = 6, count = 1 } = {}) {
+  const perClip = VIDEO_POINT_COSTS[model]?.[resolution]?.[Number(duration)];
+  if (perClip == null) return null;
+  return { perClip, total: perClip * Math.max(0, Number(count) || 0) };
+}
 
 export function getModelPricing(modelId) {
   if (!modelId) return { in: null, out: null, ctx: 128000 };

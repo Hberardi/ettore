@@ -15,7 +15,6 @@
 
 ## TUI Architecture (important)
 - **Active TUI**: custom ANSI renderer in `src/app/tui-native.js` + `src/app/native-ui.js`
-- `src/app/index.js` — Ink/React renderer, **NOT used** by the CLI (ignore for TUI changes)
 - ANSI cursor positioning: `ANSI.move(col, row)` = `\x1b[${col};${row}H` (column first, row second)
 - Sidebar uses absolute cursor positioning per row (not concatenated to message lines)
 - Use `_visualLen(s)` to compute visual width (strips ANSI codes)

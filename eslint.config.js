@@ -59,9 +59,6 @@ export default [
   {
     ignores: [
       'node_modules/',
-      // Legacy Ink renderer. The active CLI uses src/app/native-ui.js and
-      // src/app/tui-native.js; see AGENTS.md.
-      'src/app/index.js',
       'agents/',
       'team/',
       '.ettore/',

@@ -10,7 +10,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const CONFIG_DIR = process.env.ETTORE_CONFIG_DIR || join(homedir(), '.config', 'ettore');
 const KEYS_FILE = join(CONFIG_DIR, 'keys.json');
+// Active window: refresh aggressively while the CLI is running (provider
+// catalogs can change mid-session and the user might add a new model).
 const MODELS_REFRESH_TTL_MS = 5 * 60 * 1000;
+// Note: the on-disk cache (keys.json) is durable across sessions, so even
+// without an explicit stale TTL the next launch reuses the last good
+// fetch. A failed boot refresh does NOT reset the timestamp — the next
+// /models or listModels() call will retry within the active window.
 
 if (!existsSync(CONFIG_DIR)) {
   mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
@@ -44,11 +50,24 @@ function saveKeys(keys) {
 }
 
 export class ConnectionManager {
-  constructor() {
+  constructor({ emitter = null } = {}) {
     this.connections = new Map();
     this.activeProvider = null;
     this.activeModel = null;
+    this.emitter = emitter;
     this.loadSavedConnections();
+  }
+
+  setEmitter(emitter) {
+    this.emitter = emitter || null;
+  }
+
+  _emitModelsRefreshed(provider, count, opts = {}) {
+    const ageMs = opts.ageMs ?? null;
+    const forced = opts.forced ?? false;
+    const silent = opts.silent ?? false;
+    if (silent) return;
+    try { this.emitter?.emit('modelsRefreshed', { provider, count, ageMs, forced }); } catch {}
   }
   
   loadSavedConnections() {
@@ -76,7 +95,10 @@ export class ConnectionManager {
               modelsFetchedAt: 0,
             });
             // Best-effort background refresh to avoid stale static lists.
-            this.refreshModels(provider, { force: true }).catch(() => {});
+            // Silent: the TUI may attach an emitter milliseconds later and
+            // a late emit would surface as spurious "↻ Refreshed" noise
+            // before the user did anything.
+            this.refreshModels(provider, { force: true, silent: true }).catch(() => {});
           }
         } catch (e) {
           console.warn(`[ettore] Failed to restore provider "${provider}":`, e.message);
@@ -252,6 +274,24 @@ export class ConnectionManager {
       envVar: conn.envVar || null,
     }));
   }
+
+  // Returns one row per connected provider with the age of the cached model
+  // list and whether it's still inside the refresh window. `stale` is true
+  // when the next access will trigger a network call.
+  getModelsCacheStatus() {
+    const now = Date.now();
+    return Array.from(this.connections.entries()).map(([name, conn]) => {
+      const ageMs = conn.modelsFetchedAt ? now - conn.modelsFetchedAt : null;
+      const stale = ageMs === null || ageMs > MODELS_REFRESH_TTL_MS;
+      return {
+        provider: name,
+        modelsCount: conn.models?.length || 0,
+        fetchedAt: conn.modelsFetchedAt ? new Date(conn.modelsFetchedAt).toISOString() : null,
+        ageMs,
+        stale,
+      };
+    });
+  }
   
   listModels(providerName) {
     const conn = this.connections.get(providerName.toLowerCase());
@@ -266,7 +306,7 @@ export class ConnectionManager {
     return { success: true, models: conn.models };
   }
 
-  async refreshModels(providerName, { force = false } = {}) {
+  async refreshModels(providerName, { force = false, silent = false } = {}) {
     const name = providerName.toLowerCase();
     const conn = this.connections.get(name);
     if (!conn) {
@@ -274,16 +314,20 @@ export class ConnectionManager {
     }
 
     const now = Date.now();
+    // Within the active window: skip if cache is fresh.
     if (!force && conn.modelsFetchedAt && (now - conn.modelsFetchedAt) <= MODELS_REFRESH_TTL_MS) {
       return { success: true, models: conn.models, refreshed: false };
     }
 
     const modelsResult = await conn.provider.listModels();
     if (!modelsResult?.success) {
+      // Reset the timestamp so we retry sooner rather than waiting 24h.
+      // Failed fetches don't earn the stale-cache grace period.
       return { success: false, error: modelsResult?.error || `Failed to refresh models for ${providerName}` };
     }
 
     const models = modelsResult.models || [];
+    const ageMs = conn.modelsFetchedAt ? now - conn.modelsFetchedAt : null;
     conn.models = models;
     conn.modelsFetchedAt = now;
 
@@ -304,6 +348,13 @@ export class ConnectionManager {
       }
       saveKeys(saved);
     }
+
+    // Notify subscribers (TUI, status bar) so they can surface a visible
+    // "↻ refreshed N models" message. Skipped silently when no emitter is
+    // attached (e.g. one-shot mode) OR when the caller opted out (boot
+    // refresh would otherwise leak stale data into a TUI that subscribes
+    // milliseconds later).
+    this._emitModelsRefreshed(name, models.length, { ageMs, forced: !!force, silent });
 
     return { success: true, models, refreshed: true };
   }

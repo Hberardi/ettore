@@ -130,6 +130,7 @@ const TOOL_COLORS = {
   write:        C.ok,        // green — writing files
   edit:         C.string,    // yellow — editing files
   bash:         C.warn,     // yellow — shell commands
+  bash_session: C.warn,     // yellow — persistent shell session
   glob:         C.dim,      // gray — file discovery
   grep:         C.dim,      // gray — searching
   list_dir:     C.dim,      // gray — directory listing
@@ -164,6 +165,11 @@ class TUI {
     this.scrollOffset = 0;
     this.needsRender = false;
     this.renderPending = false;
+    this.turnState = 'idle';
+    this.safetyProfile = 'balanced';
+    this.dynamicToolRouting = true;
+    this.routedToolCount = 0;
+    this.routedToolNames = [];
     
     // Enhanced animation state
     this.animationFrame = 0;
@@ -194,6 +200,14 @@ class TUI {
   _render() {
     const sidebarWidth = Math.min(this.sidebarWidth, Math.max(24, this.cols - 40));
     const mainWidth = Math.max(20, this.cols - sidebarWidth - 1);
+
+    // Render the input first so we know how many rows it occupies, then shrink
+    // the messages area to make room. Messages area must keep at least 2 rows.
+    const inputRows = this._renderInput(mainWidth);
+    const inputHeight = inputRows.length;
+    // Layout overhead: 1 header + 1 status + 2 input borders + 1 bottom margin = 5
+    this.availableHeight = Math.max(2, this.rows - 5 - inputHeight);
+
     const msgLines = this._renderMessages();
     const sideLines = this._renderSidebar(sidebarWidth);
     this.animationFrame = (this.animationFrame + 1) % 100;
@@ -211,15 +225,21 @@ class TUI {
     out += ANSI.move(mainWidth + 1, this.availableHeight + 2) + ` `;
     out += ANSI.move(mainWidth + 2, this.availableHeight + 2) + `\x1b[48;5;236m${this._padVisual(this._renderSidebarStatus(sidebarWidth), sidebarWidth)}${C.reset}`;
 
-    out += ANSI.move(1, this.availableHeight + 3) + this._renderInputBorder(true, mainWidth);
-    out += ANSI.move(1, this.availableHeight + 4) + this._renderInput(mainWidth);
-    out += ANSI.move(1, this.availableHeight + 5) + this._renderInputBorder(false, mainWidth);
-    out += ANSI.move(mainWidth + 1, this.availableHeight + 3) + ` `;
-    out += ANSI.move(mainWidth + 1, this.availableHeight + 4) + ` `;
-    out += ANSI.move(mainWidth + 1, this.availableHeight + 5) + ` `;
-    out += ANSI.move(mainWidth + 2, this.availableHeight + 3) + `\x1b[48;5;236m${' '.repeat(sidebarWidth)}${C.reset}`;
-    out += ANSI.move(mainWidth + 2, this.availableHeight + 4) + `\x1b[48;5;236m${' '.repeat(sidebarWidth)}${C.reset}`;
-    out += ANSI.move(mainWidth + 2, this.availableHeight + 5) + `\x1b[48;5;236m${' '.repeat(sidebarWidth)}${C.reset}`;
+    // Input area: top border, N input rows, bottom border.
+    const inputTop = this.availableHeight + 3;
+    out += ANSI.move(1, inputTop) + this._renderInputBorder(true, mainWidth);
+    out += ANSI.move(mainWidth + 1, inputTop) + ` `;
+    out += ANSI.move(mainWidth + 2, inputTop) + `\x1b[48;5;236m${' '.repeat(sidebarWidth)}${C.reset}`;
+    for (let i = 0; i < inputHeight; i++) {
+      const row = inputTop + 1 + i;
+      out += ANSI.move(1, row) + inputRows[i];
+      out += ANSI.move(mainWidth + 1, row) + ` `;
+      out += ANSI.move(mainWidth + 2, row) + `\x1b[48;5;236m${' '.repeat(sidebarWidth)}${C.reset}`;
+    }
+    const inputBottom = inputTop + 1 + inputHeight;
+    out += ANSI.move(1, inputBottom) + this._renderInputBorder(false, mainWidth);
+    out += ANSI.move(mainWidth + 1, inputBottom) + ` `;
+    out += ANSI.move(mainWidth + 2, inputBottom) + `\x1b[48;5;236m${' '.repeat(sidebarWidth)}${C.reset}`;
 
     // Overlays
     out += this._renderCommandPalette();
@@ -239,8 +259,15 @@ class TUI {
   }
 
   _padVisual(str, width) {
-    const clipped = this._truncateVisual(str, width);
-    const vlen = this._visualLen(clipped);
+    let clipped = this._truncateVisual(str, width);
+    let vlen = this._visualLen(clipped);
+    // If truncation lands exactly at `width` with an ellipsis as the last
+    // visible char, the ellipsis replaces the row's right border. Re-truncate
+    // to `width-1` so the trailing space from padding can take its place.
+    if (vlen >= width && this._stripAnsi(clipped).endsWith('…')) {
+      clipped = this._truncateVisual(str, width - 1);
+      vlen = this._visualLen(clipped);
+    }
     const pad  = Math.max(0, width - vlen);
     return clipped + ' '.repeat(pad);
   }
@@ -289,7 +316,7 @@ class TUI {
       lines.push(`  ${C.accent}/${C.reset}${C.text}help${C.reset}           ${C.dim}show guided command help${C.reset}`);
       lines.push('');
       lines.push(`${C.bold}${C.text}Work faster${C.reset}`);
-      lines.push(`  ${C.accent}@${C.reset}${C.text}src/file.js${C.reset}    ${C.dim}attach a file to your next prompt${C.reset}`);
+      lines.push(`  ${C.accent}@${C.reset}${C.text}shot.png${C.reset}      ${C.dim}attach an image to your next prompt${C.reset}`);
       lines.push(`  ${C.accent}!${C.reset}${C.text}npm test${C.reset}       ${C.dim}run a shell command${C.reset}`);
       lines.push(`  ${C.accent}Tab${C.reset}             ${C.dim}toggle ${modeColor}${this.mode.toUpperCase()}${C.reset}${C.dim} mode${C.reset}`);
       lines.push(`  ${C.accent}↑↓${C.reset}              ${C.dim}scroll conversation history${C.reset}`);
@@ -575,6 +602,7 @@ class TUI {
     let desc = '';
     switch (name) {
       case 'bash':
+      case 'bash_session':
         desc = (args.command || '').replace(/\n/g, ' ').trim();
         break;
       case 'read':
@@ -673,7 +701,8 @@ class TUI {
       }
       case 'git_diff':
         return s === '(no diff)' ? `[no diff]` : `[diff ${new TextEncoder().encode(s).length}b]`;
-      case 'bash': {
+      case 'bash':
+      case 'bash_session': {
         const firstLine = s.split('\n')[0];
         return `[${this._truncate(stripAllAnsi(firstLine), 50)}]`;
       }
@@ -834,32 +863,22 @@ class TUI {
       rows.push(`${C.dim}${dots}${C.reset}`);
     }
 
-    // Show tools with output previews
-    if (tools.length > 0) {
+    // Show only the tool currently running in the main agent output area.
+    if (runningTool) {
       rows.push('');
-      rows.push(`${C.dim}tools${C.reset}`);
-      const maxTools = Math.max(2, (this.availableHeight || 10) - 4);
-      const start = Math.max(0, tools.length - maxTools);
-      tools.slice(start).forEach(tool => {
-        const toolColor = TOOL_COLORS[tool.name] || C.dim;
-        const desc = this._describeToolCall(tool.name, tool.args, maxWidth - 18);
-        const descStr = desc ? ` ${C.dim}${desc}${C.reset}` : '';
-        const durStr = tool.durationMs != null
-          ? ` ${C.dim}${(tool.durationMs / 1000).toFixed(1)}s${C.reset}`
-          : '';
-        if (tool.status === 'done') {
-          const outStr = this._summarizeToolOutput(tool.name, tool.output, tool.args);
-          const outColor = tool.output ? C.text : C.dim;
-          const outPreview = outStr ? ` ${outColor}${outStr}${C.reset}` : '';
-          rows.push(`  ${C.ok}✔${C.reset} ${toolColor}${tool.name}${C.reset}${descStr}${outPreview}${durStr}`);
-        } else {
-          rows.push(`  ${toolColor}${pulse}${C.reset} ${toolColor}${C.bold}${tool.name}${C.reset}${descStr} ${C.dim}…${C.reset}`);
-        }
-        if (tool.diffPreview) {
-          const diffRows = this._renderDiffSideBySide(tool.diffPreview, Math.max(20, innerWidth - 2));
-          diffRows.forEach(r => rows.push(r));
-        }
-      });
+      rows.push(`${C.dim}tool attivo${C.reset}`);
+      const toolColor = TOOL_COLORS[runningTool.name] || C.dim;
+      const desc = this._describeToolCall(runningTool.name, runningTool.args, maxWidth - 18);
+      const descStr = desc ? ` ${C.dim}${desc}${C.reset}` : '';
+      const progress = runningTool.progress
+        ? ` ${C.dim}${this._truncateVisual(this._sanitizeForRender(runningTool.progress), Math.max(10, innerWidth - 24))}${C.reset}`
+        : '';
+      const line = `  ${toolColor}${pulse}${C.reset} ${toolColor}${C.bold}${runningTool.name}${C.reset}${descStr}${progress} ${C.dim}…${C.reset}`;
+      this._wrapText(line, innerWidth).forEach(w => rows.push(w));
+      if (runningTool.diffPreview) {
+        const diffRows = this._renderDiffSideBySide(runningTool.diffPreview, Math.max(20, innerWidth - 2));
+        diffRows.forEach(r => rows.push(r));
+      }
     }
 
     return this._renderAssistantBlock({
@@ -877,8 +896,16 @@ class TUI {
     const glowColor = GLOW_COLORS[glowIdx];
     const pulseIdx = Math.floor(this.animationFrame / 10) % PULSE_FRAMES.length;
     const pulse = PULSE_FRAMES[pulseIdx];
+    const runningStateLabel = this.turnState === 'tool_call'
+      ? 'tool'
+      : this.turnState === 'tool_result'
+        ? 'processing'
+        : this.turnState === 'failed'
+          ? 'failed'
+          : 'thinking';
+    const runningStateColor = this.turnState === 'failed' ? C.err : C.text;
     const state = this.isRunning
-      ? `${glowColor}${C.bold}${pulse}${C.reset} ${C.text}thinking${C.reset}`
+      ? `${glowColor}${C.bold}${pulse}${C.reset} ${runningStateColor}${runningStateLabel}${C.reset}`
       : `${C.ok}●${C.reset} ${C.dim}idle${C.reset}`;
     const scroll = this.scrollOffset > 0 ? `${C.warn}↑ scrolled${C.reset}${sep}` : '';
     const hint = this.isRunning
@@ -908,47 +935,113 @@ class TUI {
     return `${bc}${line}${C.reset}`;
   }
 
+  // Maximum number of visual rows the input box may occupy. The first row
+  // shows the prompt glyph (❯); subsequent rows are continuation lines.
+  static INPUT_MAX_ROWS = 6;
+
+  // Wrap raw user input (no ANSI) at a column boundary, walking codepoints so
+  // surrogate pairs aren't split. Honors INPUT_MAX_ROWS — anything past the
+  // cap is collapsed into the last row, which is then left-truncated so the
+  // tail (where the cursor sits) stays visible.
+  _wrapInputText(text, maxLen, maxRows) {
+    const rows = [];
+    if (!text) return [''];
+    let cur = '';
+    let curLen = 0;
+    for (const ch of String(text)) {
+      const cp = ch.codePointAt(0);
+      const w = (cp > 0x1100 && (
+        cp <= 0x115F || cp === 0x2329 || cp === 0x232A ||
+        (cp >= 0x2E80 && cp <= 0xA4CF && cp !== 0x303F) ||
+        (cp >= 0xAC00 && cp <= 0xD7A3) ||
+        (cp >= 0xF900 && cp <= 0xFAFF) ||
+        (cp >= 0xFE30 && cp <= 0xFE4F) ||
+        (cp >= 0xFF00 && cp <= 0xFF60) ||
+        (cp >= 0xFFE0 && cp <= 0xFFE6) ||
+        (cp >= 0x1F300 && cp <= 0x1FAFF)
+      )) ? 2 : 1;
+      if (curLen + w > maxLen) {
+        rows.push(cur);
+        cur = '';
+        curLen = 0;
+      }
+      cur += ch;
+      curLen += w;
+    }
+    rows.push(cur);
+    if (rows.length <= maxRows) return rows;
+    // Overflow: keep first (maxRows - 1) rows, then put the tail in the last
+    // visible row, left-truncated with an ellipsis so the cursor stays in view.
+    const kept = rows.slice(0, maxRows - 1);
+    const remainder = rows.slice(maxRows - 1).join('');
+    const tail = remainder.length > maxLen - 1
+      ? '…' + remainder.slice(remainder.length - (maxLen - 1))
+      : remainder;
+    kept.push(tail);
+    return kept;
+  }
+
+  // Render the input box as an array of fully-formatted rows (1..INPUT_MAX_ROWS).
+  // Only free-form user input (this.input) wraps onto multiple lines; all other
+  // modes (api-key, command palette, sub-menu, running, placeholder) stay
+  // single-line — they are short by construction.
   _renderInput(width = this.cols) {
     const bc     = this.isRunning ? C.warn : C.accent;
-    const prompt = this.isRunning ? `${C.warn}◌${C.reset}` : `${C.accent}❯${C.reset}`;
-    const maxLen = width - 10;
+    const promptGlyph = this.isRunning ? `${C.warn}◌${C.reset}` : `${C.accent}❯${C.reset}`;
+    const maxLen = Math.max(4, width - 6); // visible payload per row
 
-    let content;
+    // Helper: wrap one fully-formatted row to the input-box layout.
+    const wrapRow = (payload, isFirst) => {
+      const glyph = isFirst ? promptGlyph : ' ';
+      const clipped = this._truncateVisual(payload, maxLen);
+      const used = this._visualLen(` ${glyph} ${clipped}`);
+      const pad = ' '.repeat(Math.max(0, width - used - 1));
+      return `\x1b[48;5;235m ${bc}${glyph}${C.reset}\x1b[48;5;235m ${clipped}${pad}${C.reset}`;
+    };
+
+    // Single-line modes (most of them).
+    let singleLine = null;
     if (this.isRunning) {
-      content = `${C.dim}agent running… (ctrl+c to stop)${C.reset}`;
+      singleLine = `${C.dim}agent running… (ctrl+c to stop)${C.reset}`;
     } else if (this.apiKeyInputMode) {
       if (this.apiKeyConnecting) {
-        content = `${C.dim}Connecting to ${C.bold}${this.apiKeyProvider}${C.dim}…${C.reset}`;
+        singleLine = `${C.dim}Connecting to ${C.bold}${this.apiKeyProvider}${C.dim}…${C.reset}`;
       } else if (this.apiKeyError) {
-        content = `${C.err}${this.apiKeyError}${C.reset}`;
+        singleLine = `${C.err}${this.apiKeyError}${C.reset}`;
       } else if (this.apiKeyStep === 'baseUrl') {
         const hint = this.apiKeyBaseUrl.length === 0 ? `${C.dim}${this.apiKeyProviderMeta?.baseUrlHint || 'https://...'}${C.reset}` : '';
-        content = `${C.dim}Base URL: ${C.reset}${C.text}${this.apiKeyBaseUrl}${C.reset}${hint}${C.dim}▋${C.reset}`;
+        singleLine = `${C.dim}Base URL: ${C.reset}${C.text}${this.apiKeyBaseUrl}${C.reset}${hint}${C.dim}▋${C.reset}`;
       } else if (this.apiKeyStep === 'model') {
         const hint = this.apiKeyModelValue.length === 0 ? `${C.dim}${this.apiKeyProviderMeta?.modelHint || 'model-name'}${C.reset}` : '';
-        content = `${C.dim}Model: ${C.reset}${C.text}${this.apiKeyModelValue}${C.reset}${hint}${C.dim}▋${C.reset}`;
+        singleLine = `${C.dim}Model: ${C.reset}${C.text}${this.apiKeyModelValue}${C.reset}${hint}${C.dim}▋${C.reset}`;
       } else {
         const masked = this.apiKeyValue.length > 0 ? '•'.repeat(Math.min(this.apiKeyValue.length, 30)) : '';
-        content = `${C.dim}API key for ${C.bold}${this.apiKeyProviderMeta?.name || this.apiKeyProvider}${C.dim}: ${C.reset}${C.text}${masked}▋${C.reset}`;
+        singleLine = `${C.dim}API key for ${C.bold}${this.apiKeyProviderMeta?.name || this.apiKeyProvider}${C.dim}: ${C.reset}${C.text}${masked}▋${C.reset}`;
       }
     } else if (this.commandPaletteOpen) {
-      content = this.commandFilter
+      singleLine = this.commandFilter
         ? `${C.accent}/${C.reset}${C.text}${this.commandFilter}▋${C.reset}`
         : `${C.accent}/${C.reset}${C.dim}Search commands…${C.reset}${C.dim}▋${C.reset}`;
     } else if (this.subMenuOpen) {
-      content = `${C.accent}/${C.reset}${C.dim}${this.subMenuTitle}${C.reset} ${C.text}▋${C.reset}`;
-    } else if (this.input) {
-      content = `${C.text}${this._truncate(this.input, maxLen - 1)}▋${C.reset}`;
-    } else {
+      singleLine = `${C.accent}/${C.reset}${C.dim}${this.subMenuTitle}${C.reset} ${C.text}▋${C.reset}`;
+    } else if (!this.input) {
       const connected = Boolean(connectionManager.getActive());
-      content = connected
-        ? `${C.dim}Message ETTORE…  / commands  @ attach  ! shell${C.reset}`
+      singleLine = connected
+        ? `${C.dim}Message ETTORE…  / commands  @ image  ! shell${C.reset}`
         : `${C.dim}Type /connect to start, or /help for commands${C.reset}`;
     }
 
-    const inner  = `${content}`;
-    const clipped = this._truncateVisual(inner, Math.max(0, width - 6));
-    return `\x1b[48;5;235m ${bc}${prompt}${C.reset}\x1b[48;5;235m ${clipped}${' '.repeat(Math.max(0, width - this._visualLen(` ${prompt} ${clipped}`) - 1))}${C.reset}`;
+    if (singleLine !== null) {
+      return [wrapRow(singleLine, true)];
+    }
+
+    // Multi-line: wrap user input. Reserve 1 column for the cursor glyph.
+    const rows = this._wrapInputText(this.input, maxLen - 1, TUI.INPUT_MAX_ROWS);
+    return rows.map((rowText, idx) => {
+      const isLast = idx === rows.length - 1;
+      const payload = `${C.text}${rowText}${isLast ? '▋' : ''}${C.reset}`;
+      return wrapRow(payload, idx === 0);
+    });
   }
 
   _renderSidebar(width) {
@@ -967,6 +1060,11 @@ class TUI {
     const state = this.isRunning ? `${C.warn}running${C.reset}` : `${C.ok}idle${C.reset}`;
     lines.push(`${C.dim}State${C.reset} ${state}`);
     lines.push(`${C.dim}Cap${C.reset} ${this.modelCapability === 'full' ? `${C.ok}FULL${C.reset}` : this.modelCapability === 'lite' ? `${C.warn}LITE${C.reset}` : `${C.dim}?${C.reset}`}`);
+    lines.push(`${C.dim}Safety${C.reset} ${C.text}${String(this.safetyProfile || 'balanced').toUpperCase()}${C.reset}`);
+    const routeText = this.dynamicToolRouting
+      ? `${this.routedToolCount || 0} dynamic`
+      : 'all tools';
+    lines.push(`${C.dim}Route${C.reset} ${C.text}${routeText}${C.reset}`);
     lines.push(`${C.dim}Cost${C.reset} ${this._statusCostText()}`);
     lines.push(`${C.dim}Ctx${C.reset} ${this._statusCtxText()}`);
     lines.push(`${C.dim}Msgs${C.reset} ${C.text}${this.messages.filter(m => m.role !== 'todos').length}${C.reset}`);
@@ -1016,7 +1114,7 @@ class TUI {
 
     lines.push(`${C.bold}${C.dim}Quick keys${C.reset}`);
     lines.push(`${C.accent}/${C.reset} ${C.dim}commands${C.reset}`);
-    lines.push(`${C.accent}@${C.reset} ${C.dim}attach file${C.reset}`);
+    lines.push(`${C.accent}@${C.reset} ${C.dim}attach image${C.reset}`);
     lines.push(`${C.accent}!${C.reset} ${C.dim}shell cmd${C.reset}`);
     lines.push(`${C.accent}tab${C.reset} ${C.dim}build/plan${C.reset}`);
 
@@ -1910,7 +2008,7 @@ class TUI {
   // ─── Ask User rendering ───────────────────────────────────────────────────
   _renderAskUser() {
     if (!this.askUser) return '';
-    const { question, options } = this.askUser;
+    const { question, options, sensitive } = this.askUser;
     const hasOptions = Array.isArray(options) && options.length > 0;
     const modalRows = hasOptions ? (options.length + 4) : 7;
     const BG_MODAL = '\x1b[48;5;238m';
@@ -1966,7 +2064,8 @@ class TUI {
       out += BG_MODAL;
       const answer = this.askUserInput || '';
       const maxAnswerLen = Math.max(8, width - 14);
-      const shown = this._truncate(answer, maxAnswerLen);
+      const rawShown = sensitive ? '•'.repeat(answer.length) : answer;
+      const shown = this._truncate(rawShown, maxAnswerLen);
       const inputLine = keepBg(` ${C.dim}Answer:${C.reset} ${C.text}${shown}${C.reset}${C.dim}▋${C.reset}`, BG_MODAL);
       out += inputLine;
       out += ' '.repeat(Math.max(0, width - this._visualLen(inputLine)));

@@ -1,12 +1,18 @@
 import { getConfig, saveConfig } from '../config/index.js';
+import { safeHistoryKeepStart } from './message-ledger.js';
 
 const DEFAULT_THRESHOLD = 8000;
 const DEFAULT_KEEP_LAST = 10;
-const MAX_COMPRESSIONS_PER_SESSION = 5;
-const DYNAMIC_THRESHOLD_RATIO = 0.7;
-const MIN_DYNAMIC_THRESHOLD = 6000;
+// Was 5: each compression does cost one LLM call but saves exponentially
+// more on subsequent turns. Letting it run further keeps the session cost
+// curve flat for long coding sessions.
+const MAX_COMPRESSIONS_PER_SESSION = 8;
+// Was 0.7: every tool result is re-sent on every subsequent turn, so the
+// marginal cost of an extra 1000 history tokens compounds. 0.3 means we
+// compress well before the model is at risk of forgetting recent context.
+const DYNAMIC_THRESHOLD_RATIO = 0.3;
+const MIN_DYNAMIC_THRESHOLD = 4000;
 const HARD_GUARD_RATIO = 0.92;
-const MIN_HARD_GUARD = 12000;
 
 const COMPRESSION_PROMPT = `You are a context compression assistant. Analyze the conversation below and produce a dense, structured summary for an AI coding assistant to continue the session seamlessly.
 
@@ -41,13 +47,30 @@ const INJECTION_PATTERNS = [
   /<\|.*?\|>/g,
 ];
 
-export function estimateTokens(messages) {
-  return messages.reduce((acc, m) => {
+export function estimateTokens(messages, tools = []) {
+  const messageTokens = messages.reduce((acc, m) => {
     const text = typeof m.content === 'string'
       ? m.content
-      : m.content ? JSON.stringify(m.content) : '';
-    return acc + Math.ceil(text.length / 4);
+      : Array.isArray(m.content)
+        ? m.content.map(block => block?.type === 'text' ? block.text || '' : '[image]').join(' ')
+        : m.content ? JSON.stringify(m.content) : '';
+    let tokens = Math.ceil(text.length / 4);
+    if (Array.isArray(m.content)) tokens += m.content.filter(block => block?.type === 'image' || block?.type === 'image_url').length * 1200;
+    // Include tool_calls payload (function name + arguments) which can be
+    // substantial and is otherwise invisible to the estimator.
+    if (Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) {
+        const fn = tc.function;
+        if (fn) tokens += Math.ceil(((fn.name?.length || 0) + (fn.arguments?.length || 0)) / 4);
+      }
+    }
+    return acc + tokens;
   }, 0);
+  const toolTokens = (tools || []).reduce((acc, tool) => {
+    const serialized = JSON.stringify(tool || {});
+    return acc + Math.ceil(serialized.length / 4);
+  }, 0);
+  return messageTokens + toolTokens;
 }
 
 function sanitizeToolResult(content) {
@@ -68,23 +91,13 @@ function serializeForCompression(messages) {
       const calls = m.tool_calls.map(tc => `${tc.function?.name}(${tc.function?.arguments?.slice(0, 100) || ''})`).join(', ');
       return `[assistant called tools: ${calls}]`;
     }
-    const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+    const content = typeof m.content === 'string'
+      ? m.content
+      : Array.isArray(m.content)
+        ? m.content.map(block => block?.type === 'text' ? block.text || '' : '[image attachment]').join(' ')
+        : JSON.stringify(m.content);
     return `[${m.role}]: ${content.slice(0, 500)}`;
   }).join('\n');
-}
-
-// Ensure we never split a tool_call / tool pair across the keep boundary
-function safeKeepCount(messages, keepLast) {
-  let count = keepLast;
-  while (count < messages.length) {
-    const firstKept = messages[messages.length - count];
-    if (firstKept?.role === 'tool') {
-      count++; // expand to include the matching assistant turn
-    } else {
-      break;
-    }
-  }
-  return count;
 }
 
 export class ContextCompressor {
@@ -93,7 +106,9 @@ export class ContextCompressor {
     this.contextWindow = Number(config.contextWindow) || null;
     this.threshold = config.threshold || getConfig('compressionThreshold') || this._deriveThreshold(this.contextWindow);
     this.keepLast = DEFAULT_KEEP_LAST;
-    this.autoEnabled = getConfig('compressionAutoEnabled') || false;
+    // Default ON: only an explicit false in config disables auto-compact.
+    // The privacy notice fires once per profile via [[compressPrivacyNotice]].
+    this.autoEnabled = getConfig('compressionAutoEnabled') !== false;
     this._sessionCount = 0;
     this._totalSaved = 0;
     this._history = [];
@@ -106,10 +121,17 @@ export class ContextCompressor {
     return Math.max(MIN_DYNAMIC_THRESHOLD, Math.floor(contextWindow * DYNAMIC_THRESHOLD_RATIO));
   }
 
-  getHardGuardLimit(contextWindowOverride = null) {
+  getHardGuardLimit(contextWindowOverride = null, outputReserve = 8192) {
     const ctx = Number(contextWindowOverride) || this.contextWindow;
     if (!Number.isFinite(ctx) || ctx <= 0) return null;
-    return Math.max(MIN_HARD_GUARD, Math.floor(ctx * HARD_GUARD_RATIO));
+    const reserve = Math.min(
+      Math.max(1024, Number(outputReserve) || 8192),
+      Math.floor(ctx * 0.5),
+    );
+    return Math.max(1000, Math.min(
+      Math.floor(ctx * HARD_GUARD_RATIO),
+      ctx - reserve,
+    ));
   }
 
   updateContextWindow(contextWindow) {
@@ -122,23 +144,61 @@ export class ContextCompressor {
     }
   }
 
+  // No __compressed short-circuit here: after a compression the token count
+  // drops below threshold on its own, and climbs again only as new messages
+  // accumulate — at which point a further compression (up to the session cap)
+  // is exactly what we want. A permanent marker check would disable every
+  // compression after the first.
   needsCompression(messages, thresholdOverride = null) {
     if (this._sessionCount >= MAX_COMPRESSIONS_PER_SESSION) return false;
-    // No __compressed short-circuit here: after a compression the token count
-    // drops below threshold on its own, and climbs again only as new messages
-    // accumulate — at which point a further compression (up to the session cap)
-    // is exactly what we want. A permanent marker check would disable every
-    // compression after the first.
     const threshold = Number.isFinite(thresholdOverride) && thresholdOverride > 0
       ? thresholdOverride
       : this.threshold;
     return estimateTokens(messages) > threshold;
   }
 
+  // Heuristic, zero-cost token reduction applied opportunistically between
+  // turns, well before the full LLM-based compression is justified.
+  //
+  // Strategy: for tool-result messages older than the last `keepLast` turns,
+  // replace the body with a 200-char head + metadata so the model still has
+  // the function name, key arguments, and a hint of what came back, but the
+  // body of the result (often the bulk of a session) is gone.
+  //
+  // Activates at half the compression threshold — keeps the LLM-driven
+  // compressor as the heavier hammer for when this isn't enough.
+  lossyShrink(messages, { keepLast = this.keepLast, maxChars = 200, headTail = 150 } = {}) {
+    const halfThreshold = Math.max(2000, Math.floor(this.threshold / 2));
+    if (estimateTokens(messages) <= halfThreshold) return messages;
+
+    const sys = messages[0];
+    const rest = messages.slice(1);
+    if (rest.length <= keepLast + 2) return messages;
+
+    const head = rest.slice(0, rest.length - keepLast);
+    const tail = rest.slice(-keepLast);
+
+    const shrunkenHead = head.map((m) => {
+      if (m.role !== 'tool') return m;
+      const text = String(m.content || '');
+      if (text.length <= maxChars * 2) return m;
+      const firstNL = text.indexOf('\n');
+      const firstLine = firstNL >= 0 ? text.slice(0, firstNL) : text.slice(0, headTail);
+      return {
+        ...m,
+        content: `[elided — original ${text.length} chars] ${firstLine.slice(0, headTail)}…`,
+        __lossyShrunk: true,
+      };
+    });
+
+    return [sys, ...shrunkenHead, ...tail];
+  }
+
   async buildPreview(messages) {
     const tokensBefore = estimateTokens(messages);
     const rest = messages.slice(1);
-    const keepCount = safeKeepCount(rest, this.keepLast);
+    const keepStart = safeHistoryKeepStart(rest, this.keepLast);
+    const keepCount = rest.length - keepStart;
     const eligible = rest.length > keepCount + 2;
     return {
       eligible,
@@ -158,9 +218,9 @@ export class ContextCompressor {
 
     const system = messages[0];
     const rest = messages.slice(1);
-    const keepCount = safeKeepCount(rest, this.keepLast);
-    const toCompress = rest.slice(0, rest.length - keepCount);
-    const toKeep = rest.slice(rest.length - keepCount);
+    const keepStart = safeHistoryKeepStart(rest, this.keepLast);
+    const toCompress = rest.slice(0, keepStart);
+    const toKeep = rest.slice(keepStart);
 
     if (toCompress.length === 0) return messages;
 
@@ -197,6 +257,12 @@ export class ContextCompressor {
       role: 'user',
       content: `[COMPRESSED CONTEXT — previous conversation]\n${summary.trim()}\n[END COMPRESSED CONTEXT]`,
       __compressed: true,
+      // Hint to Anthropic's prompt cache: the summary is identical across the
+      // remaining turns of the session, so caching it cuts input tokens for
+      // every subsequent model call. The OpenAI-compatible path ignores this
+      // field (the messages normalizer doesn't forward it), so it's free for
+      // providers that don't use cache_control.
+      _cacheControl: { type: 'ephemeral' },
     };
     const ackMsg = {
       role: 'assistant',

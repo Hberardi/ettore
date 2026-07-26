@@ -63,3 +63,64 @@ test('Agent matches every tool_call_id when ask_user appears with sibling tools'
     uiBridge.off('askUser', handler);
   }
 });
+
+test('Agent preserves tool result order when ask_user is not the first tool call', async () => {
+  const turns = [];
+  const client = {
+    async turn(messages) {
+      turns.push(messages.map(m => ({
+        role: m.role,
+        tool_call_id: m.tool_call_id,
+        content: typeof m.content === 'string' ? m.content : '[complex]',
+      })));
+
+      if (turns.length === 1) {
+        const write = {
+          id: 'call_write_1',
+          function: {
+            name: 'write',
+            arguments: JSON.stringify({ file_path: '/tmp/x.txt', content: 'x' }),
+          },
+        };
+        const ask = {
+          id: 'call_ask_1',
+          function: {
+            name: 'ask_user',
+            arguments: JSON.stringify({ question: 'Proceed?', options: ['yes', 'no'] }),
+          },
+        };
+        return {
+          type: 'tool_calls',
+          tool_calls: [write, ask],
+          message: { role: 'assistant', content: '', tool_calls: [write, ask] },
+        };
+      }
+
+      const toolMsgs = messages.filter(m => m.role === 'tool');
+      assert.equal(toolMsgs.length, 2);
+      assert.equal(toolMsgs[0].tool_call_id, 'call_write_1');
+      assert.equal(toolMsgs[1].tool_call_id, 'call_ask_1');
+      assert.match(String(toolMsgs[0].content), /Deferred:/);
+      assert.match(String(toolMsgs[1].content), /yes/i);
+      return { type: 'text', content: 'done' };
+    },
+  };
+
+  const handler = ({ resolve }) => resolve('yes');
+  uiBridge.on('askUser', handler);
+  try {
+    const agent = new Agent(client, {
+      provider: 'test',
+      model: 'gpt-4o',
+      modelCapability: 'full',
+      workdir: process.cwd(),
+      contextWindow: 128000,
+    }, 'build');
+
+    const result = await agent.run('modifica il progetto', new EventEmitter());
+    assert.equal(result, 'done');
+    assert.equal(turns.length, 2);
+  } finally {
+    uiBridge.off('askUser', handler);
+  }
+});

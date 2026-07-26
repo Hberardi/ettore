@@ -2,6 +2,7 @@ export const PROVIDER_ENV_VARS = {
   anthropic: ['ANTHROPIC_API_KEY'],
   openai: ['OPENAI_API_KEY'],
   openrouter: ['OPENROUTER_API_KEY'],
+  openprovider: ['OPENPROVIDER_API_KEY'],
   nvidia: ['NVIDIA_API_KEY', 'NVIDIA_NIM_API_KEY'],
   groq: ['GROQ_API_KEY'],
   google: ['GOOGLE_API_KEY', 'GEMINI_API_KEY'],

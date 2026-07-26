@@ -115,6 +115,21 @@ export async function loadConfig(options = {}) {
   const active = connectionManager.getActive();
   const localConfig = await loadLocalConfig();
 
+  // LLM model parameters (opzionali, provider-agnostici). undefined = omesso dalla request.
+  // Precedenza: options (CLI) > localConfig (.ettore/config.json) > store (Conf globale).
+  const numFrom = (key) => {
+    const v = options[key] ?? localConfig[key] ?? store.get(key);
+    return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+  };
+  const boolFrom = (key, fallback) => {
+    const value = options[key] ?? localConfig[key] ?? store.get(key);
+    return typeof value === 'boolean' ? value : fallback;
+  };
+  const stringFrom = (key, fallback) => {
+    const value = options[key] ?? localConfig[key] ?? store.get(key);
+    return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+  };
+
   // Determina provider e modello con priorità:
   // 1. Opzioni CLI > 2. Config locale > 3. Connection manager > 4. Config globale > 5. Defaults
   let provider = options.provider
@@ -137,6 +152,20 @@ export async function loadConfig(options = {}) {
     apiKey: connectionManager.isConnected(provider)
       ? connectionManager.getProvider(provider)?.getClient()?.apiKey
       : null,
+    // LLM model parameters (opzionali; undefined = omesso dalle request)
+    temperature: numFrom('temperature'),
+    top_p: numFrom('top_p'),
+    maxTokens: numFrom('maxTokens'),
+    // Safety limit on tool-calls per turn. Raise in .ettore/config.json for
+    // complex multi-file tasks; lower to surface runaway loops earlier.
+    maxToolCallsPerTurn: numFrom('maxToolCallsPerTurn'),
+    // Dynamic routing reduces tool-schema tokens and malformed calls by only
+    // exposing tools relevant to the current request.
+    dynamicToolRouting: boolFrom('dynamicToolRouting', true),
+    maxToolsPerRequest: numFrom('maxToolsPerRequest'),
+    // safe: workspace-only; balanced: external paths require approval;
+    // autonomous: external reads allowed, external writes still approved.
+    safetyProfile: stringFrom('safetyProfile', 'balanced'),
     // Flag per indicare se c'è config locale
     hasLocalConfig: Object.keys(localConfig).length > 0,
     projectRoot: await detectProjectRoot(process.cwd()),

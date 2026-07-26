@@ -42,6 +42,15 @@ export const PROVIDER_REGISTRY = [
     Class: makeOpenAICompatProvider('openrouter', 'https://openrouter.ai/api/v1'),
   },
   {
+    id: 'openprovider',
+    name: 'OpenProvider',
+    description: 'Community OpenAI-compatible endpoint (Mimika)',
+    icon: '🛰️',
+    requiresKey: true,
+    keyHint: 'user API key',
+    Class: makeOpenAICompatProvider('openprovider', 'https://openprovider.mimika.in/v1'),
+  },
+  {
     id: 'nvidia',
     name: 'NVIDIA NIM',
     description: 'Llama 3.1/3.3, Mistral, Nemotron, DeepSeek via NVIDIA cloud',
@@ -199,7 +208,7 @@ export const PROVIDER_REGISTRY = [
   {
     id: 'minimax',
     name: 'MiniMax (Token Plan)',
-    description: 'MiniMax-M2.7, M2.5 — Coding Plan subscription',
+    description: 'MiniMax-M3 — Coding Plan subscription',
     icon: '🎯',
     requiresKey: true,
     keyHint: 'Token Plan API key',

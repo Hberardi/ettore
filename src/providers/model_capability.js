@@ -46,7 +46,7 @@ const FULL_PATTERNS = [
   /\byi[-_]?(large|34b|lightning)\b/,
   /\bglm[-_]?4(?![-_]?(air|flash))\b/,
   /\bnova[-_]?(pro|premier)\b/,
-  /\bminimax[-_]?m2(?:\.(?:1|5|7))?(?:[-_]?highspeed)?\b/,
+  /\bminimax[-_]?m[23](?:\.(?:1|5|7))?(?:[-_]?highspeed)?\b/,
 ];
 
 // ─── LITE patterns (checked AFTER FULL) ──────────────────────────────────────

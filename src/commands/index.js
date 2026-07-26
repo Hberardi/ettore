@@ -5,7 +5,8 @@ import { homedir } from 'os';
 import { connectionManager, ConnectionManager } from '../providers/index.js';
 import { PROVIDER_REGISTRY } from '../providers/registry.js';
 import { getProviderEnvVars, listConfiguredEnvProviders } from '../providers/env.js';
-import { clearInstallSessionApprovals, listInstallSessionApprovals } from '../tools/index.js';
+import { clearInstallSessionApprovals, listInstallSessionApprovals, setAutoApprove, getAutoApprove } from '../tools/index.js';
+import { saveConfig } from '../config/index.js';
 import { redactSecrets } from '../utils/secrets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -123,9 +124,16 @@ function modelDescription(model) {
   return tags.length ? ` - ${tags.join(', ')}` : '';
 }
 
-async function refreshProviderModels(manager, provider) {
+const CAVEMAN_LEVELS = ['lite', 'full', 'ultra', 'wenyan-lite', 'wenyan-full', 'wenyan-ultra'];
+
+function cavemanStatus(agent) {
+  const level = agent?.cavemanLevel;
+  return level ? `Caveman mode: ON (${level})` : 'Caveman mode: OFF';
+}
+
+async function refreshProviderModels(manager, provider, { force = false } = {}) {
   if (typeof manager.refreshModels !== 'function') return null;
-  return manager.refreshModels(provider).catch(() => null);
+  return manager.refreshModels(provider, { force }).catch(() => null);
 }
 
 export const builtinCommands = {
@@ -170,7 +178,7 @@ First steps
 `;
 
       output += group('Core commands', ['help', 'status', 'doctor', 'providers', 'models', 'connect', 'use', 'disconnect']);
-      output += group('Session and project', ['clear', 'new', 'sessions', 'resume', 'init', 'memory', 'compress', 'agent', 'approvals', 'history', 'team']);
+      output += group('Session and project', ['clear', 'new', 'sessions', 'resume', 'init', 'memory', 'compress', 'agent', 'caveman', 'approvals', 'history', 'team']);
       output += group('Configuration', ['keys', 'config', 'theme', 'system', 'version', 'exit']);
       output += '\nUse /help <command> for details, for example /help connect.';
 
@@ -201,29 +209,39 @@ ${setupHint()}`;
     description: 'Diagnose local setup, config, and provider state',
     usage: 'doctor',
     aliases: ['diag'],
-    handler: async (_args, context) => {
+    handler: async (_args, context = {}) => {
       const { access, stat } = await import('fs/promises');
       const { constants } = await import('fs');
-      const { detectProjectRoot, hasLocalConfig, getEffectiveConfig } = await import('../config/index.js');
+      const { detectProjectRoot } = await import('../config/index.js');
 
       const ok = [];
       const warn = [];
       const fail = [];
+      const manager = context.connectionManager || connectionManager;
+      const cwd = context.config?.workdir || process.cwd();
       const configDir = process.env.ETTORE_CONFIG_DIR || join(homedir(), '.config', 'ettore');
       const keysFile = join(configDir, 'keys.json');
-      const connections = connectionManager.listConnections();
-      const active = connectionManager.getActive();
+      const connections = manager.listConnections();
+      const active = manager.getActive();
       const envProviders = listConfiguredEnvProviders();
       const nodeMajor = Number(process.versions.node.split('.')[0]);
+      const pathExists = async (path) => {
+        try {
+          await access(path, constants.F_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      };
 
       if (nodeMajor >= 18) ok.push(`Node.js ${process.versions.node}`);
       else fail.push(`Node.js ${process.versions.node} is unsupported; install Node.js 18+`);
 
       try {
-        await access(process.cwd(), constants.R_OK | constants.W_OK);
-        ok.push(`Working directory writable: ${process.cwd()}`);
+        await access(cwd, constants.R_OK | constants.W_OK);
+        ok.push(`Working directory writable: ${cwd}`);
       } catch {
-        fail.push(`Working directory is not writable: ${process.cwd()}`);
+        fail.push(`Working directory is not writable: ${cwd}`);
       }
 
       try {
@@ -246,13 +264,13 @@ ${setupHint()}`;
         warn.push(`No saved keys file yet: ${keysFile}`);
       }
 
-      const projectRoot = await detectProjectRoot(process.cwd());
+      const projectRoot = await detectProjectRoot(cwd);
       if (projectRoot) ok.push(`Project root detected: ${projectRoot}`);
       else warn.push('No project root detected from current directory');
 
-      const localConfig = await hasLocalConfig();
-      const effectiveConfig = await getEffectiveConfig().catch(() => ({}));
-      if (localConfig) ok.push('Project-local config found: .ettore/config.json');
+      const localConfigPath = projectRoot ? join(projectRoot, '.ettore', 'config.json') : null;
+      const localConfig = localConfigPath ? await pathExists(localConfigPath) : false;
+      if (localConfig) ok.push(`Project-local config found: ${localConfigPath}`);
       else warn.push('No project-local config; using global/default settings');
 
       if (connections.length > 0) {
@@ -268,8 +286,8 @@ ${setupHint()}`;
       }
 
       if (active) {
-        ok.push(`Active provider: ${connectionManager.activeProvider}`);
-        ok.push(`Active model: ${connectionManager.activeModel || effectiveConfig.activeModel || context.config?.model || 'default'}`);
+        ok.push(`Active provider: ${manager.activeProvider}`);
+        ok.push(`Active model: ${manager.activeModel || context.config?.model || 'default'}`);
       } else {
         warn.push('No active provider/model selected');
       }
@@ -535,30 +553,65 @@ ${setupHint()}`;
   
   models: {
     description: 'List available models for current/all providers',
-    usage: 'models [provider]',
+    usage: 'models [provider|refresh [provider]|stale]',
     aliases: ['lsmodels', 'listmodels'],
     handler: async (args, context = {}) => {
       const manager = context.connectionManager || connectionManager;
-      const [provider] = args;
-      
-      if (provider) {
+      const [first, second] = args;
+
+      // Subcommand: models refresh [provider] — force-refresh the catalog
+      // without listing every model. Useful when the user suspects the
+      // catalog changed and just wants confirmation that the fetch worked.
+      if (first === 'refresh') {
+        const connections = manager.listConnections();
+        if (connections.length === 0) return 'No connected providers. Use /connect <provider> <api-key>, or /connect ollama.';
+        if (second) {
+          if (!manager.isConnected(second)) return `Not connected to ${second}. Run /connect first.`;
+          const r = await manager.refreshModels(second, { force: true });
+          return r.success
+            ? `↻ Refreshed ${r.models.length} models for ${second}.`
+            : `✗ Failed to refresh ${second}: ${r.error}`;
+        }
+        const results = await Promise.all(
+          connections.map(c => manager.refreshModels(c.provider, { force: true })),
+        );
+        const ok = results.filter(r => r.success).length;
+        return `↻ Refreshed ${ok}/${results.length} providers.`;
+      }
+
+      // Subcommand: models stale — show how old each provider's cache is.
+      if (first === 'stale') {
+        const rows = manager.getModelsCacheStatus ? manager.getModelsCacheStatus() : [];
+        if (!rows.length) return 'No connected providers.';
+        return 'Model catalog cache:\n' + rows.map(r => {
+          const ageStr = r.ageMs == null
+            ? 'never fetched'
+            : r.ageMs < 60_000 ? 'just now'
+            : `${Math.round(r.ageMs / 60_000)}m ago`;
+          const flag = r.stale ? ' (will refresh on next access)' : ' (fresh)';
+          return `  ${r.provider}: ${r.modelsCount} models, ${ageStr}${flag}`;
+        }).join('\n');
+      }
+
+      if (first) {
+        const provider = first;
         if (!manager.isConnected(provider)) {
           const meta = providerMeta(provider);
           if (!meta) return `Provider not found: ${provider}\nRun /providers to list supported providers.`;
           const hint = meta.requiresKey ? `/connect ${provider} <api-key>` : `/connect ${provider}`;
           return `Not connected to ${provider}. Use ${hint} first.`;
         }
-        await refreshProviderModels(manager, provider);
+        await refreshProviderModels(manager, provider, { force: true });
         const models = manager.listModels(provider);
         if (!models.success) return `${models.error}\nRun /doctor if the provider should be connected.`;
-        return `Models for ${provider}:\n` + models.models.map(m => 
+        return `Models for ${provider}:\n` + models.models.map(m =>
           `  ${modelId(m)}${modelDescription(m)}`
         ).join('\n');
       }
       
       const connections = manager.listConnections();
       if (connections.length === 0) return 'No connected providers. Use /connect <provider> <api-key>, or /connect ollama.';
-      await Promise.all(connections.map(c => refreshProviderModels(manager, c.provider)));
+      await Promise.all(connections.map(c => refreshProviderModels(manager, c.provider, { force: true })));
       
       let output = 'Available models:\n';
       for (const conn of connections) {
@@ -585,17 +638,54 @@ ${setupHint()}`;
     aliases: [],
     handler: async (args) => {
       const [themeName] = args;
-      
+
       if (!themeName) {
         return `Available themes: default, midnight, matrix, forest\nUsage: /theme <name>`;
       }
-      
+
       const validThemes = ['default', 'midnight', 'matrix', 'forest'];
       if (!validThemes.includes(themeName.toLowerCase())) {
         return `Invalid theme. Available: ${validThemes.join(', ')}`;
       }
-      
+
       return { action: 'setTheme', theme: themeName.toLowerCase() };
+    }
+  },
+
+  'auto-approve': {
+    description: 'Skip approval prompts for edits and/or project installs',
+    usage: 'auto-approve [on|off|edits on|off|installs on|off|status]',
+    aliases: ['aa'],
+    handler: async (args) => {
+      const fmt = (s) => `auto-approve  edits: ${s.edits ? 'on' : 'off'}  installs: ${s.installs ? 'on' : 'off'}\n(System installs like sudo/apt/brew and destructive commands like rm -rf / git push --force always still prompt.)`;
+
+      if (args.length === 0 || /^(status|show)$/i.test(args[0] || '')) {
+        return fmt(getAutoApprove());
+      }
+
+      const first = String(args[0]).toLowerCase();
+      const second = args[1] ? String(args[1]).toLowerCase() : null;
+
+      const parseBool = (v) => {
+        if (v === 'on' || v === 'true' || v === '1' || v === 'yes' || v === 'si' || v === 'sì') return true;
+        if (v === 'off' || v === 'false' || v === '0' || v === 'no') return false;
+        return null;
+      };
+
+      let next;
+      if (first === 'edits' || first === 'installs') {
+        const v = parseBool(second);
+        if (v === null) return `Usage: /auto-approve ${first} on|off`;
+        next = { ...getAutoApprove(), [first]: v };
+      } else {
+        const v = parseBool(first);
+        if (v === null) return `Usage: /auto-approve on|off  (or: /auto-approve edits on|off, /auto-approve installs on|off)`;
+        next = { edits: v, installs: v };
+      }
+
+      setAutoApprove(next);
+      try { saveConfig('autoApprove', next); } catch {}
+      return `✓ ${fmt(next)}`;
     }
   },
   
@@ -643,7 +733,10 @@ theme: ${localConfig.theme || 'not set'}`;
 provider: ${context.provider || config.provider || 'none'}
 model: ${config.model}
 stream: ${config.stream}
-workdir: ${config.workdir}`;
+workdir: ${config.workdir}
+safetyProfile: ${config.safetyProfile}
+dynamicToolRouting: ${config.dynamicToolRouting}
+maxToolsPerRequest: ${config.maxToolsPerRequest || 16}`;
 
         if (hasLocal) {
           output += '\n\nLocal config (.ettore/config.json): ✓ active';
@@ -698,6 +791,40 @@ workdir: ${config.workdir}`;
         }
       }
 
+      if (key === 'safety' && value) {
+        const profile = String(value).toLowerCase();
+        if (!['safe', 'balanced', 'autonomous'].includes(profile)) {
+          return 'Invalid safety profile. Use: safe, balanced, autonomous';
+        }
+        if (isLocal) await saveConfigAsync('safetyProfile', profile, { local: true });
+        else saveConfig('safetyProfile', profile);
+        if (context.agent) context.agent.safetyProfile = profile;
+        return `Safety profile set to: ${profile}${isLocal ? ' (project-local)' : ' (global)'}`;
+      }
+
+      if (key === 'tool-routing' && value) {
+        const normalized = String(value).toLowerCase();
+        if (!['on', 'off', 'true', 'false'].includes(normalized)) {
+          return 'Usage: /config tool-routing on|off [--local]';
+        }
+        const enabled = normalized === 'on' || normalized === 'true';
+        if (isLocal) await saveConfigAsync('dynamicToolRouting', enabled, { local: true });
+        else saveConfig('dynamicToolRouting', enabled);
+        if (context.agent) context.agent.dynamicToolRouting = enabled;
+        return `Dynamic tool routing: ${enabled ? 'ON' : 'OFF'}${isLocal ? ' (project-local)' : ' (global)'}`;
+      }
+
+      if (key === 'max-tools' && value) {
+        const count = Number.parseInt(value, 10);
+        if (!Number.isInteger(count) || count < 4 || count > 28) {
+          return 'Invalid max-tools value. Use an integer from 4 to 28.';
+        }
+        if (isLocal) await saveConfigAsync('maxToolsPerRequest', count, { local: true });
+        else saveConfig('maxToolsPerRequest', count);
+        if (context.agent) context.agent.maxToolsPerRequest = count;
+        return `Max tools per request set to: ${count}${isLocal ? ' (project-local)' : ' (global)'}`;
+      }
+
       return `Usage: /config [key] [value] [--local|-l]
 
 Available keys:
@@ -705,6 +832,9 @@ Available keys:
   provider <name>  Set the LLM provider
   stream <bool>    Enable/disable streaming
   theme <name>     Set the UI theme
+  safety <profile> safe|balanced|autonomous
+  tool-routing <on|off> Enable dynamic tool selection
+  max-tools <4-28> Maximum schemas sent per request
 
 Flags:
   --local, -l      Save configuration in project directory (.ettore/config.json)
@@ -970,6 +1100,9 @@ Cache entries      : ${snapshot.cacheEntries}
 Cache hits         : ${snapshot.cacheHits}
 Summarized outputs : ${snapshot.summarizedOutputs}
 Duplicate skips    : ${snapshot.duplicateSkips}
+Ledger repairs     : ${snapshot.ledgerRepairs}
+Turn state         : ${snapshot.turnState}
+Routed tools       : ${(snapshot.routedTools || []).join(', ') || 'none'}
 Workspace revision : ${snapshot.workspaceRevision}
 
 Tool calls
@@ -977,6 +1110,35 @@ ${toolRows}`;
       }
 
       return 'Usage: /agent [stats|memory|clear]';
+    }
+  },
+
+  caveman: {
+    description: 'Toggle compressed caveman reply style',
+    usage: 'caveman [lite|full|ultra|wenyan-lite|wenyan-full|wenyan-ultra|off|status]',
+    aliases: ['normal'],
+    handler: async (args, context) => {
+      const agent = context.agent;
+      if (!agent?.setCavemanLevel || !agent?.clearCavemanLevel) {
+        return 'Caveman mode is not available in this session.';
+      }
+
+      const requested = String(args[0] || 'status').toLowerCase();
+      if (requested === 'status') {
+        return cavemanStatus(agent);
+      }
+
+      if (requested === 'off' || requested === 'normal') {
+        agent.clearCavemanLevel();
+        return 'Caveman mode: OFF';
+      }
+
+      if (!CAVEMAN_LEVELS.includes(requested)) {
+        return `${cavemanStatus(agent)}\nUsage: /caveman [${CAVEMAN_LEVELS.join('|')}|off|status]`;
+      }
+
+      agent.setCavemanLevel(requested);
+      return `Caveman mode: ON (${requested})`;
     }
   },
 
@@ -1215,6 +1377,28 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         return `Session reinitialized.\nMemory loaded: ${memInfo.projectName}\nConversation reset — all messages cleared.`;
       } else {
         return `Session reinitialized.\nNo project memory found — conversation reset.`;
+      }
+    }
+  },
+
+  video_music: {
+    description: 'Apri lo studio web per generare un video musicale da un mp3 + foto del personaggio',
+    usage: 'video_music',
+    aliases: ['videomusic', 'musicvideo', 'mv'],
+    handler: async (_args, _context) => {
+      try {
+        const { startMusicVideoStudio } = await import('../web/music-video-studio.js');
+        const { url, reused } = await startMusicVideoStudio({ open: true });
+        const notes = [];
+        if (!connectionManager.activeProvider) notes.push('⚠ Nessun modello attivo: usa /connect + /use (serve per lo storyboard automatico).');
+        if (!process.env.MINIMAX_API_KEY) notes.push('⚠ MINIMAX_API_KEY non impostata: serve per generare le clip video.');
+        return [
+          `🎬 Music Video Studio ${reused ? 'già attivo' : 'avviato'}: ${url}`,
+          reused ? '(riapro il browser sulla pagina esistente)' : 'Ho aperto il browser. Se non si apre, incolla l\'URL manualmente.',
+          ...notes,
+        ].join('\n');
+      } catch (e) {
+        return `Errore nell'avvio dello studio: ${e.message}`;
       }
     }
   },
