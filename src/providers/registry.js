@@ -3,6 +3,7 @@ import { OllamaProvider } from './ollama.js';
 import { OpenAIProvider } from './openai.js';
 import { AnthropicProvider } from './anthropic.js';
 import { MiniMaxProvider } from './minimax.js';
+import { ClaudeCodeProvider } from './claude-code.js';
 
 export const PROVIDER_REGISTRY = [
   {
@@ -22,6 +23,15 @@ export const PROVIDER_REGISTRY = [
     requiresKey: true,
     keyHint: 'sk-ant-...',
     Class: AnthropicProvider,
+  },
+  {
+    id: 'claude-code',
+    name: 'Claude (subscription)',
+    description: 'Claude via your Anthropic account — uses the Claude Code login, no API key',
+    icon: '🔐',
+    requiresKey: false,
+    keyHint: '',
+    Class: ClaudeCodeProvider,
   },
   {
     id: 'openai',

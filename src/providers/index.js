@@ -30,6 +30,17 @@ for (const entry of PROVIDER_REGISTRY) {
   providers[entry.id] = entry.Class;
 }
 
+// Providers that authenticate without an API key — either a local runtime
+// (Ollama) or an existing login elsewhere on the machine (Claude Code). They
+// are constructed with no argument and never persist a key.
+const KEYLESS_PROVIDERS = new Set(
+  PROVIDER_REGISTRY.filter(entry => entry.requiresKey === false).map(entry => entry.id),
+);
+
+export function isKeylessProvider(name) {
+  return KEYLESS_PROVIDERS.has(String(name || '').toLowerCase());
+}
+
 function loadKeys() {
   try {
     if (existsSync(KEYS_FILE)) {
@@ -74,12 +85,12 @@ export class ConnectionManager {
     const saved = loadKeys();
     for (const [provider, data] of Object.entries(saved)) {
       if (provider === '_active') continue; // metadata field
-      if ((provider === 'ollama' || data.key) && data.valid) {
+      if ((isKeylessProvider(provider) || data.key) && data.valid) {
         try {
           const ProviderClass = providers[provider];
           if (ProviderClass) {
             let instance;
-            if (provider === 'ollama') {
+            if (isKeylessProvider(provider)) {
               instance = new ProviderClass();
             } else if (provider === 'openai-compat') {
               instance = new ProviderClass(data.baseUrl || '', data.key);
@@ -130,7 +141,7 @@ export class ConnectionManager {
   loadEnvConnections() {
     for (const entry of PROVIDER_REGISTRY) {
       const name = entry.id;
-      if (name === 'ollama' || this.connections.has(name)) continue;
+      if (isKeylessProvider(name) || this.connections.has(name)) continue;
       const envKey = getProviderEnvKey(name);
       if (!envKey) continue;
       try {
@@ -164,7 +175,7 @@ export class ConnectionManager {
     }
 
     let provider;
-    if (name === 'ollama') {
+    if (isKeylessProvider(name)) {
       provider = new ProviderClass();
     } else if (name === 'openai-compat') {
       const baseURL = options.baseURL || '';
@@ -191,7 +202,7 @@ export class ConnectionManager {
 
     const conn = {
       provider,
-      key: name === 'ollama' ? null : apiKey,
+      key: isKeylessProvider(name) ? null : apiKey,
       valid: true,
       models,
       modelsFetchedAt: Date.now(),
@@ -201,7 +212,7 @@ export class ConnectionManager {
 
     const saved = loadKeys();
     const savedEntry = {
-      key: name === 'ollama' ? null : apiKey,
+      key: isKeylessProvider(name) ? null : apiKey,
       valid: true,
       models: models.map(m => typeof m === 'string' ? m : m.id),
     };

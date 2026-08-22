@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { spawn } from 'child_process';
 import { setMaxListeners as setTargetMaxListeners } from 'events';
 import { connectionManager } from '../providers/index.js';
 import { canonicalizeToolTurn } from '../agents/message-ledger.js';
@@ -149,6 +150,11 @@ export function createClient(config) {
     });
   }
 
+  if (usesClaudeCodeTransport(provider)) {
+    // No key to look up: the local `claude` binary carries the account login.
+    return new ClaudeCodeClient(model);
+  }
+
   // For all OpenAI-compatible providers (ollama, openai, nvidia, groq, openrouter,
   // minimax, etc.) reuse the pre-configured client from the connection manager —
   // it already points at the correct baseURL (MiniMax → /v1).
@@ -169,6 +175,10 @@ export function createClient(config) {
 
 export function usesAnthropicTransport(provider) {
   return provider === 'anthropic';
+}
+
+export function usesClaudeCodeTransport(provider) {
+  return provider === 'claude-code';
 }
 
 export function normalizeMessagesForAnthropic(messages) {
@@ -552,5 +562,340 @@ export class AnthropicClient {
       .map(b => b.text)
       .join('');
     return { type: 'text', content, usage: usageObj };
+  }
+}
+
+// ── Claude Code bridge ───────────────────────────────────────────────────────
+// Drives the locally installed, already-logged-in `claude` binary in headless
+// mode so Ettore can reach the user's Anthropic account without an API key.
+// Claude Code runs as a *raw model*: its own tools, MCP servers, settings and
+// slash commands are all switched off, and Ettore's system prompt replaces the
+// built-in one. Since that transport exposes no structured tool schema, tools
+// are declared in the prompt and called back through the textual `<tool_call>`
+// protocol the stream parser already understands.
+//
+// Trade-offs vs. the API-key transports: no prompt caching (each turn is a
+// fresh headless session carrying the whole transcript), no temperature /
+// max_tokens control, and image attachments are dropped.
+
+// Claude Code adds process startup plus its own internal retries on top of the
+// model's own pauses, so it gets the long idle window.
+const CLAUDE_CODE_IDLE_MS = STREAMING_IDLE_MS_LONG_REASONING;
+
+const CLAUDE_CODE_TOOL_PROTOCOL = `## Tool calling protocol
+
+This transport has no native tool API. To call a tool, emit a block shaped
+exactly like this and nothing else around it:
+
+<tool_call>{"name": "TOOL_NAME", "arguments": {"arg": "value"}}</tool_call>
+
+Rules:
+- The block body must be valid JSON. No markdown fences, no comments, no trailing text inside the block.
+- To run several tools at once, emit the blocks back to back.
+- Stop generating right after the last block: results come back as the next turn.
+- Only the tools listed below exist. Never invent a tool or a parameter.
+- When no tool is needed, just answer normally and emit no block.`;
+
+const CLAUDE_CODE_CONTINUATION = `Continue the conversation above: produce only the next assistant turn. `
+  + `Do not repeat or summarise earlier turns, and do not re-emit a tool call whose result is already present.`;
+
+function flattenContentForClaudeCode(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return String(content ?? '');
+  return content
+    .map(block => {
+      if (typeof block === 'string') return block;
+      if (block?.type === 'text') return String(block.text || '');
+      // The CLI takes a single text prompt — image blocks cannot be forwarded.
+      if (block?.type === 'image' || block?.type === 'image_url') {
+        return '[image attachment omitted — not supported by the Claude Code bridge]';
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+export function buildClaudeCodeSystemPrompt(systemText, tools) {
+  const base = String(systemText || '').trim();
+  if (!tools?.length) return base;
+  const catalog = tools
+    .map(t => {
+      const fn = t.function || {};
+      const schema = JSON.stringify(fn.parameters ?? { type: 'object', properties: {} });
+      return `### ${fn.name}\n${fn.description || ''}\ninput schema: ${schema}`;
+    })
+    .join('\n\n');
+  return [base, CLAUDE_CODE_TOOL_PROTOCOL, `## Available tools\n\n${catalog}`]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+/**
+ * Headless `claude -p` is stateless, so the whole conversation travels in the
+ * prompt. Assistant tool calls are replayed in the same textual shape the model
+ * is asked to produce, keeping the transcript self-consistent.
+ */
+export function serializeTranscriptForClaudeCode(messages) {
+  const parts = [];
+
+  for (const msg of messages || []) {
+    if (!msg || msg.role === 'system') continue;
+
+    if (msg.role === 'user') {
+      parts.push(`<user>\n${flattenContentForClaudeCode(msg.content)}\n</user>`);
+      continue;
+    }
+
+    if (msg.role === 'tool') {
+      const id = String(msg.tool_call_id || '');
+      parts.push(`<tool_result id="${id}">\n${String(msg.content ?? '')}\n</tool_result>`);
+      continue;
+    }
+
+    if (msg.role === 'assistant') {
+      const text = flattenContentForClaudeCode(msg.content);
+      const calls = (Array.isArray(msg.tool_calls) ? msg.tool_calls : [])
+        .filter(tc => tc?.function?.name)
+        .map(tc => {
+          let args = {};
+          try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
+          return `<tool_call>${JSON.stringify({ id: tc.id, name: tc.function.name, arguments: args })}</tool_call>`;
+        })
+        .join('\n');
+      const body = [text, calls].filter(Boolean).join('\n');
+      parts.push(`<assistant>\n${body}\n</assistant>`);
+    }
+  }
+
+  return `<conversation>\n${parts.join('\n')}\n</conversation>\n\n${CLAUDE_CODE_CONTINUATION}`;
+}
+
+const CLAUDE_CODE_TOOL_CALL_RE = /<\s*(tool_call|tool_use)\s*>([\s\S]*?)<\s*\/\s*\1\s*>/gi;
+
+/**
+ * Pulls textual tool calls out of a completed reply. Returns the OpenAI-shaped
+ * calls plus the visible text with the blocks removed.
+ */
+export function parseClaudeCodeToolCalls(text) {
+  const raw = String(text || '');
+  const calls = [];
+  let index = 0;
+
+  for (const match of raw.matchAll(CLAUDE_CODE_TOOL_CALL_RE)) {
+    // Models occasionally wrap the JSON in a markdown fence despite the rules.
+    const body = match[2].trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
+    let parsed;
+    try { parsed = JSON.parse(body); } catch { continue; }
+    const name = String(parsed?.name || parsed?.tool || '').trim();
+    if (!name) continue;
+    const args = parsed.arguments ?? parsed.parameters ?? parsed.input ?? {};
+    calls.push({
+      id: String(parsed.id || '').trim() || `toolu_cc_${Date.now().toString(36)}_${index}`,
+      type: 'function',
+      function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) },
+    });
+    index++;
+  }
+
+  const content = raw.replace(CLAUDE_CODE_TOOL_CALL_RE, '').trim();
+  return { calls, content };
+}
+
+export function buildClaudeCodeArgs(model, systemPrompt) {
+  return [
+    '--print',
+    '--verbose',
+    '--output-format', 'stream-json',
+    '--include-partial-messages',
+    '--no-session-persistence',
+    '--disable-slash-commands',
+    // Isolation: no user/project settings, no MCP servers, no built-in tools —
+    // Claude Code must behave as a bare model, not as a second coding agent.
+    '--setting-sources', '',
+    '--strict-mcp-config',
+    '--mcp-config', '{"mcpServers":{}}',
+    '--tools', '',
+    '--model', String(model || 'sonnet'),
+    '--system-prompt', String(systemPrompt || ''),
+  ];
+}
+
+/**
+ * Drops the session variables Claude Code exports to its own children. Without
+ * this, running Ettore from inside a Claude Code session would leak that
+ * session's identity into the bridge. The OAuth token is deliberately kept —
+ * it is a credential, not session state.
+ */
+export function sanitizeClaudeEnv(env = process.env) {
+  const out = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (key === 'CLAUDECODE') continue;
+    if (key.startsWith('CLAUDE_CODE_') && key !== 'CLAUDE_CODE_OAUTH_TOKEN') continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+export class ClaudeCodeClient {
+  constructor(model, options = {}) {
+    this.model = model || 'sonnet';
+    this.bin = options.bin || process.env.ETTORE_CLAUDE_BIN || 'claude';
+    this.cwd = options.cwd || process.cwd();
+    this._idleMs = options.idleMs || CLAUDE_CODE_IDLE_MS;
+    this._spawn = options.spawn || spawn;
+  }
+
+  async turn(messages, tools, onToken, signal) {
+    const system = buildClaudeCodeSystemPrompt(
+      messages.find(m => m.role === 'system')?.content || '',
+      tools,
+    );
+    const prompt = serializeTranscriptForClaudeCode(messages);
+
+    raiseSignalListenerCap(signal);
+    if (signal?.aborted) {
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      throw err;
+    }
+
+    const child = this._spawn(this.bin, buildClaudeCodeArgs(this.model, system), {
+      cwd: this.cwd,
+      env: sanitizeClaudeEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let content = '';
+    let usage = null;
+    let resultError = null;
+    let inThinking = false;
+    let stderrTail = '';
+    let buffer = '';
+
+    const emit = token => { if (token) onToken?.(token); };
+
+    const handleEvent = obj => {
+      if (obj.type === 'stream_event') {
+        const event = obj.event;
+        if (event?.type !== 'content_block_delta') return;
+        const delta = event.delta || {};
+        if (delta.type === 'thinking_delta' && delta.thinking) {
+          if (!inThinking) { emit('<think>'); inThinking = true; }
+          emit(delta.thinking);
+          return;
+        }
+        if (delta.type === 'text_delta' && delta.text) {
+          if (inThinking) { emit('</think>'); inThinking = false; }
+          emit(delta.text);
+          content += delta.text;
+        }
+        return;
+      }
+
+      if (obj.type === 'result') {
+        const u = obj.usage || {};
+        usage = {
+          inputTokens:  u.input_tokens ?? 0,
+          outputTokens: u.output_tokens ?? 0,
+          cacheCreate:  u.cache_creation_input_tokens ?? 0,
+          cacheRead:    u.cache_read_input_tokens ?? 0,
+        };
+        if (obj.is_error) {
+          resultError = String(obj.result || obj.subtype || 'Claude Code returned an error');
+        }
+      }
+    };
+
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      let idleTimer = null;
+
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(idleTimer);
+        signal?.removeEventListener('abort', onAbort);
+        if (error) reject(error); else resolve();
+      };
+
+      const kill = () => { try { child.kill('SIGTERM'); } catch {} };
+
+      const armIdle = () => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          kill();
+          finish(new Error(`Streaming idle timeout — no token for ${this._idleMs / 1000}s`));
+        }, this._idleMs);
+        idleTimer.unref?.();
+      };
+
+      function onAbort() {
+        kill();
+        const err = new Error('Aborted');
+        err.name = 'AbortError';
+        finish(err);
+      }
+
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      child.stdout.setEncoding('utf-8');
+      child.stdout.on('data', chunk => {
+        armIdle();
+        buffer += chunk;
+        let newline;
+        while ((newline = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+          try { handleEvent(JSON.parse(line)); } catch { /* non-JSON noise */ }
+        }
+      });
+
+      child.stderr?.setEncoding('utf-8');
+      child.stderr?.on('data', chunk => {
+        stderrTail = (stderrTail + chunk).slice(-2000);
+      });
+
+      child.on('error', err => {
+        finish(new Error(
+          `Failed to run the Claude Code CLI ("${this.bin}"): ${err.message}. `
+          + 'Install it with `npm i -g @anthropic-ai/claude-code`, or set ETTORE_CLAUDE_BIN.',
+        ));
+      });
+
+      child.on('close', code => {
+        if (buffer.trim()) {
+          try { handleEvent(JSON.parse(buffer.trim())); } catch { /* partial line */ }
+        }
+        if (code === 0) return finish();
+        finish(new Error(
+          `Claude Code exited with code ${code}${stderrTail ? `: ${stderrTail.trim()}` : ''}`,
+        ));
+      });
+
+      armIdle();
+      child.stdin.on('error', () => {}); // child may exit before the prompt lands
+      child.stdin.end(prompt);
+    });
+
+    if (inThinking) emit('</think>');
+    if (resultError) throw new Error(`Claude Code: ${resultError}`);
+
+    const { calls, content: visible } = parseClaudeCodeToolCalls(content);
+    if (calls.length) {
+      const canonical = canonicalizeToolTurn({
+        tool_calls: calls,
+        message: { role: 'assistant', content: visible },
+      });
+      return {
+        type: 'tool_calls',
+        tool_calls: canonical.calls,
+        message: canonical.message,
+        usage,
+      };
+    }
+
+    return { type: 'text', content: visible, usage };
   }
 }

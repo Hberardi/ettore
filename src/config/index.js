@@ -150,7 +150,8 @@ export async function loadConfig(options = {}) {
     workdir: options.context || process.cwd(),
     provider,
     apiKey: connectionManager.isConnected(provider)
-      ? connectionManager.getProvider(provider)?.getClient()?.apiKey
+      // Keyless providers (ollama, claude-code) expose no SDK client at all.
+      ? connectionManager.getProvider(provider)?.getClient?.()?.apiKey
       : null,
     // LLM model parameters (opzionali; undefined = omesso dalle request)
     temperature: numFrom('temperature'),

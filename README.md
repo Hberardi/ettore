@@ -70,7 +70,7 @@ Run `/help` inside the TUI for the full list. Most-used commands:
 
 | Command | Description |
 |---------|-------------|
-| `/connect <provider> [key]` | Connect a provider (`openai`, `anthropic`, `ollama`, `openai-compat`, `minimax`, ...) |
+| `/connect <provider> [key]` | Connect a provider (`openai`, `anthropic`, `claude-code`, `ollama`, `openai-compat`, `minimax`, ...) |
 | `/use [provider] [model]` | List connections, then set the active provider/model |
 | `/disconnect [provider]` | Drop a saved connection |
 | `/providers` | List supported providers and their default models |
@@ -109,6 +109,7 @@ ettore "Hello, create a hello world in Python"
 ettore /connect openai sk-...
 ettore /connect anthropic sk-ant-...
 ettore /connect ollama                # local, no key
+ettore /connect claude-code           # Claude subscription, no key
 
 # Select active model
 ettore /use openai gpt-4o
@@ -136,10 +137,33 @@ ettore
 Prefer environment variables or `/connect` over `--api-key`; command-line
 arguments can be exposed in shell history and process lists.
 
+### Claude without an API key
+
+The `claude-code` provider reaches your Anthropic account through the Claude
+Code CLI that is already logged in on this machine, so no key is stored and
+usage draws on your Claude subscription instead of API credit.
+
+```bash
+npm i -g @anthropic-ai/claude-code   # if not installed yet
+claude                               # sign in once, then quit
+ettore /connect claude-code
+ettore /use claude-code sonnet        # or opus / haiku
+```
+
+ETTORE drives `claude --print` as a bare model: its own tools, MCP servers,
+settings and slash commands are disabled, and ETTORE's system prompt and tools
+replace them. On a headless machine, `claude setup-token` or
+`CLAUDE_CODE_OAUTH_TOKEN` work too; point `ETTORE_CLAUDE_BIN` at the binary if
+it is not on `PATH`.
+
+Limitations of this transport, compared with an API key: no prompt caching
+(each turn re-sends the transcript to a fresh headless session), no
+`temperature`/`max_tokens` control, and image attachments are dropped.
+
 ## Requirements
 
 - Node.js 18+
-- An API key for OpenAI, Anthropic, or another supported provider (Ollama works locally with no key)
+- An API key for OpenAI, Anthropic, or another supported provider (Ollama runs locally and `claude-code` reuses your Claude login — both without a key)
 
 ## Development
 

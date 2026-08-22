@@ -12,7 +12,7 @@ import { cleanOutput } from '../utils/output.js';
 // token counts we still log but whose cost we can't price from the public
 // per-million tables. Keeping the list local avoids a circular import with
 // the TUI module.
-const NON_METERED_PROVIDERS = new Set(['ollama', 'nvidia', 'minimax']);
+const NON_METERED_PROVIDERS = new Set(['ollama', 'nvidia', 'minimax', 'claude-code']);
 
 // Attaches a listener that writes a per-turn usage line to stderr. Extracted
 // from runPrompt so it can be unit-tested in isolation without spinning up a
