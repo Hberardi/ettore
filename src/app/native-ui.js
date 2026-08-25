@@ -13,9 +13,34 @@ import { builtinCommands } from '../commands/index.js';
 import { getModelPricing, calcCost } from '../utils/pricing.js';
 import { stripAllAnsi } from '../utils/ansi.js';
 import { getModelCapability } from '../providers/model_capability.js';
-import { extractImageReferences, loadImageAttachments } from '../utils/images.js';
+import { extractImageReferences } from '../utils/images.js';
+import { buildAttachmentPrompt, loadAttachments } from '../utils/attachments.js';
+import { chooseFiles } from '../utils/file-picker.js';
+import * as loops from '../loops/index.js';
+import { MissionControl } from '../mission/index.js';
+import { autoResumeDecision, DEFAULT_MAX_AUTO_RESUMES } from './auto-resume.js';
 
-const NON_METERED_PROVIDERS = new Set(['ollama', 'nvidia', 'minimax']);
+const NON_METERED_PROVIDERS = new Set(['ollama', 'nvidia', 'minimax', 'claude-code']);
+
+// Commands that can change which provider/model is active. After one runs, the
+// TUI has to re-read the connection manager: the header, the cost meter and the
+// agent instance all cache the previous provider otherwise.
+export const CONNECTION_COMMANDS = new Set(['connect', 'use', 'select', 'disconnect']);
+
+/**
+ * `/connect <provider>` typed inline should behave like picking that provider
+ * from the palette — connect it, make it active, rebuild the agent, open the
+ * model picker — instead of printing a text summary and leaving the session on
+ * the previous provider. Returns the provider id to route, or null to let the
+ * generic command handler take it (unknown provider, or an inline API key).
+ *
+ * Exported for tests: the TUI command dispatcher itself is a closure.
+ */
+export function connectProviderToRoute(cmdArgs = [], registry = PROVIDER_REGISTRY) {
+  if (cmdArgs.length !== 1) return null;
+  const requested = String(cmdArgs[0] || '').trim().toLowerCase();
+  return registry.some(entry => entry.id === requested) ? requested : null;
+}
 
 function hasLongReasoningWindow(provider, modelId) {
   const p = String(provider || '').toLowerCase();
@@ -79,7 +104,10 @@ const ANSI = {
 
 function modelLabel(m) {
   const id = typeof m === 'string' ? m : m.id;
-  return m.free ? `${id} [FREE]` : id;
+  if (m.free) return `${id} [FREE]`;
+  // Providers use `note` for a caveat that must be visible at pick time, e.g. a
+  // model the account cannot reach without buying usage credits.
+  return m.note ? `${id} [${m.note}]` : id;
 }
 
 const SUBMENU_COMMANDS = {
@@ -173,6 +201,12 @@ export async function startApp(options = {}) {
   process.stdout.write(ANSI.altScreen + ANSI.clear + ANSI.home + ANSI.hide + ANSI.bracketedPasteOn);
 
   const tui = new TUI();
+  const mission = new MissionControl();
+  tui.mission = mission.snapshot();
+  const syncMission = () => {
+    tui.mission = mission.snapshot();
+    tui.needsRender = true;
+  };
   tui.updateSize();
   const originalMessagesPush = tui.messages.push.bind(tui.messages);
   tui.messages.push = (...items) => {
@@ -199,6 +233,12 @@ export async function startApp(options = {}) {
       config.model = connectionManager.activeModel || config.model;
       config.modelCapability = tui.modelCapability || 'unknown';
       config.contextWindow = resolveContextWindow();
+      // Wire the plugin registry into the agent so plugin tools and
+      // handlers are merged with the built-in set. The agent caches the
+      // merged view, so a fresh `new Agent(...)` is required whenever
+      // the plugin set changes — which is exactly what /plugins does by
+      // calling this rebuildAgent.
+      config.pluginRegistry = pluginRegistry;
       const client = createClient(config);
       agent = new Agent(client, config, tui.mode || 'build');
       if (announceMemory) {
@@ -238,8 +278,187 @@ export async function startApp(options = {}) {
   tui.provider  = p;
   tui.model     = m;
 
+  // Plugin runtime: one process-wide registry+runtime pair shared with the
+  // command dispatcher. boot() is best-effort: a broken plugin is logged
+  // and ignored so the rest of the session starts cleanly. The runtime
+  // exposes enable/disable/reload that the agent picks up via
+  // `rebuildAgent()` so the new tool set is in effect on the next turn.
+  // The registry is seeded with the actual built-in tool list so plugin
+  // tools merge with — not replace — the core set.
+  const { toolDefinitions, toolHandlers } = await import('../tools/index.js');
+  const { PluginRegistry, PluginRuntime } = await import('../plugins/index.js');
+  const pluginRegistry = new PluginRegistry({
+    builtInTools: toolDefinitions,
+    builtInHandlers: toolHandlers,
+    builtInCommands: {},
+  });
+  const pluginRuntime = new PluginRuntime({ registry: pluginRegistry });
+  try {
+    const bootReport = await pluginRuntime.boot();
+    if (bootReport.enabled.length > 0 || bootReport.failed.length > 0) {
+      // Surface plugin boot result to the user so a broken plugin is
+      // visible without /plugins being invoked explicitly.
+      if (bootReport.enabled.length > 0) {
+        tui.messages.push({
+          role: 'system',
+          text: `🔌 Plugins loaded (${bootReport.enabled.length}): ${bootReport.enabled.join(', ')}`,
+          tools: [], id: Date.now(),
+        });
+      }
+      for (const f of bootReport.failed) {
+        tui.messages.push({
+          role: 'system',
+          text: `⚠ Plugin "${f.name}" failed to load: ${f.error}`,
+          tools: [], id: Date.now(),
+        });
+      }
+      tui.needsRender = true;
+    }
+  } catch (err) {
+    tui.messages.push({
+      role: 'system',
+      text: `⚠ Plugin system error: ${err.message}`,
+      tools: [], id: Date.now(),
+    });
+    tui.needsRender = true;
+  }
+
   const emitter = new EventEmitter();
   connectionManager.setEmitter(emitter);
+
+  // Auto-resume state. When the agent's run() ends with an unfinished plan
+  // (`autoContinueExhausted`) or with the model announcing-but-not-acting
+  // (`announcementStall`), the TUI used to push a "Scrivi 'continua' per
+  // riprendere" message and wait for the user. That made long workflows
+  // feel like a confirmation dialog — every multi-step task needed a manual
+  // nudge. Instead, we silently kick off another turn with a continuation
+  // prompt, up to MAX_AUTO_RESUMES per session. The cap is a safety net
+  // against a genuinely stuck model that would otherwise loop forever.
+  let autoResumeCount = 0;
+  // 10 was too tight: a multi-file task routinely burns that many resumes and
+  // then parks on `Scrivi "continua"`. The cap only exists to bound a model
+  // that is genuinely stuck — the repeat guard in `autoResumeDecision` catches
+  // that case far earlier — so the budget can be generous and configurable.
+  const MAX_AUTO_RESUMES = Math.max(1, Number(config.maxAutoResumes) || DEFAULT_MAX_AUTO_RESUMES);
+  let pendingAutoResume = null;
+  // Fingerprint of the last auto-resumed turn, so a model repeating itself
+  // verbatim without running anything stops instead of looping.
+  let lastResumeSignature = null;
+  // A loop step can legitimately require more tool calls than a normal
+  // interactive turn. Keep the global safety cap unchanged, but give loop
+  // steps additional headroom and restore the user's value afterwards.
+  const LOOP_MAX_TOOL_CALLS_PER_TURN = 160;
+  let loopToolCallLimitBefore = null;
+
+  // Drive the agent with the given prompt. Resets the TUI's streaming
+  // state, pushes a user message, calls agent.run(), and lets the normal
+  // 'complete' / 'error' / 'cancelled' handlers clean up. Used by both
+  // `handleInput` (the real prompt) and the auto-resume path (synthetic
+  // continuation), so the two flows stay in lockstep.
+  async function runAgent(text, imageAttachments = [], displayText = text, { continuation = false } = {}) {
+    if (!agent || tui.isRunning) return;
+    mission.startTurn(text, { continuation });
+    syncMission();
+    tui.messages.push({ role: 'user', text: displayText, tools: [], id: Date.now() });
+    tui.isRunning = true;
+    tui.turnState = 'started';
+    tui.streaming = { text: '', tools: [], reasoning: '', waitKind: 'model', lastActivityAt: Date.now(), stallMs: STALL_MS };
+    reasoningText = '';
+    firstToolSeen = false;
+    tui.needsRender = true;
+    try {
+      await agent.run(text, emitter, { imageAttachments });
+    } catch {
+      // Errors are surfaced via the 'error' event; nothing to do here.
+    }
+    session.messages = agent.messages;
+    await saveSession(session).catch(() => {});
+  }
+
+  // ── /loop runtime ───────────────────────────────────────────────────────
+  // A loop is a pre-generated list of prompts that get fed to the agent
+  // sequentially in the same conversation. Static plan: the prompts are
+  // decided once, then executed mechanically. State lives in the loops
+  // module so the /loop command can introspect it via /loop status.
+  //
+  // startLoop({ plan, name }) is exposed on the command context. The
+  // `complete` event handler below advances the queue: when the current
+  // step finishes, the next prompt is run automatically via setImmediate
+  // so the current event tick finishes (final UI updates render first).
+  //
+  // The TUI is the only writer to loopRuntime (in the loops module). All
+  // mutations go through loops.startLoopRuntime / advanceLoopRuntime /
+  // stopLoopRuntime — keeping the mirror-and-module pattern in one place
+  // so the /loop status command and the TUI never disagree.
+
+  const startLoop = ({ plan, name }) => {
+    if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) {
+      throw new Error('Loop plan is empty');
+    }
+    if (tui.isRunning) {
+      throw new Error('Cannot start a loop while the agent is running. Wait for the current turn to finish or press Esc to cancel.');
+    }
+    if (agent && loopToolCallLimitBefore === null) {
+      loopToolCallLimitBefore = agent.maxToolCallsPerTurn;
+      agent.maxToolCallsPerTurn = Math.max(
+        Number(agent.maxToolCallsPerTurn) || 0,
+        LOOP_MAX_TOOL_CALLS_PER_TURN,
+      );
+    }
+    loops.startLoopRuntime({ plan, name });
+    // Mirror to the TUI so the sidebar can render the active loop status.
+    tui.loopStatus = loops.getLoopStatus();
+    tui.loopStatusRev = (tui.loopStatusRev || 0) + 1;
+    tui.messages.push({
+      role: 'system',
+      text: `▶ Loop avviato${name ? ` (${name})` : ''}: ${plan.steps.length} step.\n`
+        + `  Step 1/${plan.steps.length}: ${plan.steps[0]?.title || 'step 1'}\n`
+        + `  /loop status per i dettagli, /loop stop per fermare dopo lo step corrente.`,
+      tools: [],
+      id: Date.now(),
+    });
+    tui.needsRender = true;
+    // Kick off the first step. The `complete` event handler will keep
+    // draining the queue from there.
+    const firstPrompt = plan.steps[0]?.prompt;
+    if (firstPrompt) {
+      setImmediate(() => { runAgent(firstPrompt, []); });
+    }
+  };
+
+  const restoreLoopToolCallLimit = () => {
+    if (loopToolCallLimitBefore === null || !agent) return;
+    agent.maxToolCallsPerTurn = loopToolCallLimitBefore;
+    loopToolCallLimitBefore = null;
+  };
+
+  const stopLoop = () => {
+    const wasActive = loops.stopLoopRuntime();
+    restoreLoopToolCallLimit();
+    if (wasActive) {
+      tui.messages.push({
+        role: 'system',
+        text: '⏹ Loop fermato. Lo step corrente è stato completato.',
+        tools: [],
+        id: Date.now(),
+      });
+      tui.needsRender = true;
+    }
+    // Keep loopStatus in the TUI so the sidebar shows "✓ N/N step" briefly
+    // even after a manual stop — the user can confirm the run reached the
+    // end. Refresh from the loops module (it now has active=false).
+    tui.loopStatus = loops.getLoopStatus();
+    tui.loopStatusRev = (tui.loopStatusRev || 0) + 1;
+    return wasActive;
+  };
+
+  // Refresh the TUI's loopStatus from the canonical loops module state.
+  // Called after every advance so the sidebar progress dots stay in sync
+  // with the chat's auto-continue and completion messages.
+  const refreshTuiLoopStatus = () => {
+    tui.loopStatus = loops.getLoopStatus();
+    tui.loopStatusRev = (tui.loopStatusRev || 0) + 1;
+  };
 
   let renderPending = false;
   let lastRenderTime = 0;
@@ -315,6 +534,8 @@ export async function startApp(options = {}) {
       read_server_console: ['Capire errori/runtime dell’app', 'Prossimo passo: leggo i log della console server'],
       dev_server: ['Gestire il dev server locale', 'Prossimo passo: avvio/controllo stato o log del server di sviluppo'],
       browser_check: ['Verificare rapidamente una pagina web', 'Prossimo passo: controllo HTTP, titolo e testi attesi della pagina'],
+      browser_app: ['Usare l’app web nel browser per trovare gli errori', args.url ? `Prossimo passo: apro ${sanitizeIntentText(args.url)} e leggo la console del browser` : 'Prossimo passo: interagisco con la pagina e leggo la console del browser'],
+      desktop_app: ['Usare l’app desktop per trovare gli errori', args.command ? `Prossimo passo: avvio ${sanitizeIntentText(args.command)} e leggo il suo output` : 'Prossimo passo: interagisco con la finestra e leggo l’output dell’app'],
       dep_inspect: ['Analizzare lo stato delle dipendenze del progetto', 'Prossimo passo: controllo pacchetti outdated e possibili vulnerabilità'],
       repo_map: ['Mappare rapidamente la struttura del repository', 'Prossimo passo: costruisco una panoramica dei file chiave ed entrypoint'],
       repo_find_symbol: ['Individuare rapidamente dove vive un simbolo', 'Prossimo passo: cerco occorrenze e definizioni del simbolo richiesto'],
@@ -394,7 +615,29 @@ export async function startApp(options = {}) {
     scheduleRender();
   });
 
+  emitter.on('plan', (plan) => {
+    mission.setPlan(plan);
+    syncMission();
+  });
+
+  emitter.on('decision', (entry) => {
+    mission.decision(entry);
+    syncMission();
+  });
+
+  emitter.on('toolWaveStart', (wave) => {
+    mission.startWave(wave);
+    syncMission();
+  });
+
+  emitter.on('toolWaveEnd', (wave) => {
+    mission.endWave(wave);
+    syncMission();
+  });
+
   emitter.on('toolStart', ({ id, name, args }) => {
+    mission.toolStart({ id, name, args });
+    syncMission();
     firstToolSeen = true;
     ensureStreaming();
     tui.streaming.waitKind = 'tool';
@@ -432,6 +675,8 @@ export async function startApp(options = {}) {
   });
 
   emitter.on('toolEnd', ({ id, name: _name, output }) => {
+    mission.toolEnd({ id, name: _name, output });
+    syncMission();
     if (tui.streaming?.tools) {
       const tool = tui.streaming.tools.find(t => t.id === id);
       if (tool) {
@@ -464,6 +709,21 @@ export async function startApp(options = {}) {
   uiBridge.on('toolProgress', ({ name, key, message }) => {
     if (!tui.streaming) return;
     tui.streaming.lastActivityAt = Date.now();
+    // Surface agent-level recovery events (e.g. "tool-args-retry") as system
+    // messages so the user sees WHY the turn paused instead of staring at
+    // a model that just said "let me retry". Without this, the only signal
+    // of a malformed tool-call retry is the model's own text, which can
+    // look indistinguishable from a real hang.
+    if (name === 'tool-args-retry' || name === 'loop-recovery' || name === 'auto-continue') {
+      tui.messages.push({
+        role: 'system',
+        text: `⚠ ${message}`,
+        tools: [],
+        id: Date.now(),
+      });
+      tui.needsRender = true;
+      return;
+    }
     const running = tui.streaming.tools.find(t => t.status === 'running' && t.name === name);
     if (running) {
       running.progress = String(message || '').slice(0, 200);
@@ -511,6 +771,8 @@ export async function startApp(options = {}) {
   };
 
   emitter.on('complete', (content) => {
+    mission.endTurn();
+    syncMission();
     tui.isRunning = false;
     tui.turnState = 'completed';
     flushTokenBuffer();
@@ -524,9 +786,102 @@ export async function startApp(options = {}) {
     lastToolIntent = '';
     tokenBuffer = '';
     tui.needsRender = true;
+    // If a recovery event set pendingAutoResume before the turn finished,
+    // fire the continuation now that isRunning is back to false. Defer with
+    // setImmediate so the current event loop tick finishes (any final UI
+    // updates from the just-completed turn get rendered first).
+    if (pendingAutoResume) {
+      const text = pendingAutoResume;
+      pendingAutoResume = null;
+      setImmediate(() => { runAgent(text, [], text, { continuation: true }); });
+      return;
+    }
+    // Auto-resume on a *normal* turn end when the model was clearly mid-work:
+    // it ran tools, left plan steps open, announced a next action it never
+    // performed, or named work still to do — and stopped anyway, which is what
+    // used to force the user to type "continua" after every step. The policy
+    // (including the completion check that must not fire on a mid-task
+    // "Fatto.") lives in ./auto-resume.js so it is testable on its own. The
+    // continuation prompt explicitly lets the model answer "task completo" and
+    // stop, so genuinely one-shot tasks don't loop.
+    const pendingTodos = Array.isArray(tui.todos)
+      ? tui.todos.filter(t => t && t.status === 'pending').length
+      : 0;
+    const decision = autoResumeDecision({
+      text,
+      toolCount: Array.isArray(tools) ? tools.length : 0,
+      pendingTodos,
+      attempts: autoResumeCount,
+      maxAttempts: MAX_AUTO_RESUMES,
+      lastSignature: lastResumeSignature,
+      mode: tui.mode,
+    });
+    if (decision.resume) {
+      autoResumeCount++;
+      lastResumeSignature = decision.signature;
+      tui.messages.push({
+        role: 'system',
+        text: `▸ Auto-resume ${autoResumeCount}/${MAX_AUTO_RESUMES}: ${decision.why}.`,
+        tools: [],
+        id: Date.now(),
+      });
+      setImmediate(() => {
+        runAgent(
+          'continua con il prossimo passo. Se il task è davvero completo, rispondi solo "task completo" e fermati.',
+          [],
+          undefined,
+          { continuation: true },
+        );
+      });
+      return;
+    }
+    // Stopping is fine; stopping without saying why is what makes the CLI feel
+    // frozen. `nothing_pending` and `model_done` are ordinary turn ends and
+    // stay quiet — the other reasons interrupted work in progress.
+    if (decision.reason === 'budget_exhausted' || decision.reason === 'repeated_without_progress') {
+      tui.messages.push({
+        role: 'system',
+        text: `⚠ Mi fermo qui: ${decision.why}.`
+          + `\n   Scrivi "continua" per riprendere, oppure indica tu il passo successivo.`,
+        tools: [],
+        id: Date.now(),
+      });
+      tui.needsRender = true;
+    }
+    // /loop: after the agent has fully closed the current turn (auto-resume
+    // exhausted or model said "done"), advance the queue and feed the next
+    // step to the agent. Runs LAST so intra-step auto-resume gets a chance
+    // to finish a half-done step before we move on.
+    if (loops.getLoopStatus().active) {
+      const beforeTotal = loops.getLoopStatus().totalSteps;
+      const next = loops.advanceLoopRuntime();
+      refreshTuiLoopStatus();
+      if (next) {
+        setImmediate(() => { runAgent(next, [], next, { continuation: true }); });
+      } else {
+        restoreLoopToolCallLimit();
+        tui.messages.push({
+          role: 'system',
+          text: `✓ Loop completato: ${beforeTotal} step eseguiti.`,
+          tools: [],
+          id: Date.now(),
+        });
+        tui.needsRender = true;
+      }
+      return;
+    }
   });
 
   emitter.on('cancelled', () => {
+    const loopWasActive = loops.getLoopStatus().active;
+    if (loopWasActive) {
+      loops.stopLoopRuntime();
+      tui.loopStatus = loops.getLoopStatus();
+      tui.loopStatusRev = (tui.loopStatusRev || 0) + 1;
+    }
+    restoreLoopToolCallLimit();
+    mission.fail('cancelled');
+    syncMission();
     tui.isRunning = false;
     tui.turnState = 'cancelled';
     flushTokenBuffer();
@@ -543,6 +898,15 @@ export async function startApp(options = {}) {
   });
 
   emitter.on('error', (msg) => {
+    const loopWasActive = loops.getLoopStatus().active;
+    if (loopWasActive) {
+      loops.stopLoopRuntime();
+      tui.loopStatus = loops.getLoopStatus();
+      tui.loopStatusRev = (tui.loopStatusRev || 0) + 1;
+    }
+    restoreLoopToolCallLimit();
+    mission.fail(msg);
+    syncMission();
     tui.isRunning   = false;
     tui.turnState = 'failed';
     tui.streaming   = null;
@@ -554,6 +918,8 @@ export async function startApp(options = {}) {
   });
 
   emitter.on('todoList', (items) => {
+    mission.setTodos(items);
+    syncMission();
     tui.todos = items.map(text => ({ text, status: 'pending' }));
     tui.currentPlan = [...tui.todos];
     let prevIdx = -1;
@@ -566,6 +932,8 @@ export async function startApp(options = {}) {
   });
 
   emitter.on('todoDone', (idx) => {
+    mission.completeTodo(idx);
+    syncMission();
     tui.todos.forEach((t, i) => { if (i <= idx) t.status = 'done'; });
     tui.currentPlan = [...tui.todos];
     tui.needsRender = true;
@@ -594,32 +962,57 @@ export async function startApp(options = {}) {
   // on whatever the model last said — usually an announcement of work it never
   // did — and the CLI looks like it froze.
   emitter.on('autoContinueExhausted', ({ reason, remaining, attempts, pending = [] }) => {
-    const why = reason === 'no_progress'
-      ? 'il modello non ha fatto progressi'
-      : `esauriti i ${attempts} tentativi di auto-continue`;
-    const list = pending.slice(0, 5).map(step => `   ${step}`).join('\n');
+    if (autoResumeCount >= MAX_AUTO_RESUMES) {
+      const why = reason === 'no_progress'
+        ? 'il modello non ha fatto progressi'
+        : `esauriti i ${attempts} tentativi di auto-continue`;
+      const list = pending.slice(0, 5).map(step => `   ${step}`).join('\n');
+      tui.messages.push({
+        role: 'system',
+        text: `⚠ Piano incompleto: ${remaining} step ancora aperti (${why}).\n${list}`
+          + `${pending.length > 5 ? `\n   … e altri ${pending.length - 5}` : ''}`
+          + `\n   Auto-resume esaurito (${MAX_AUTO_RESUMES}). Scrivi "continua" per riprendere manualmente, oppure indica il passo successivo.`,
+        tools: [],
+        id: Date.now(),
+      });
+      tui.needsRender = true;
+      return;
+    }
+    autoResumeCount++;
+    const list = pending.slice(0, 3).map(step => `   ${step}`).join('\n');
     tui.messages.push({
       role: 'system',
-      text: `⚠ Piano incompleto: ${remaining} step ancora aperti (${why}).\n${list}`
-        + `${pending.length > 5 ? `\n   … e altri ${pending.length - 5}` : ''}`
-        + `\n   Scrivi "continua" per riprendere, oppure indica tu il passo successivo.`,
+      text: `▸ Auto-resume ${autoResumeCount}/${MAX_AUTO_RESUMES}: ${remaining} step dal piano ancora aperti. Continuo automaticamente.\n${list}`,
       tools: [],
       id: Date.now(),
     });
+    pendingAutoResume = 'continua con il prossimo step del piano — esegui, non annunciare';
     tui.needsRender = true;
   });
 
   // The model kept announcing work instead of doing it, and the retries ran
   // out. Same reason as autoContinueExhausted: say why the run stopped.
   emitter.on('announcementStall', ({ attempts, announcement }) => {
+    if (autoResumeCount >= MAX_AUTO_RESUMES) {
+      tui.messages.push({
+        role: 'system',
+        text: `⚠ Il modello ha annunciato un'azione senza eseguirla${announcement ? ` ("${announcement}")` : ''}`
+          + ` anche dopo ${attempts} solleciti.\n`
+          + `   Auto-resume esaurito (${MAX_AUTO_RESUMES}). Scrivi "fallo" per insistere, oppure indica tu il comando/file esatto su cui lavorare.`,
+        tools: [],
+        id: Date.now(),
+      });
+      tui.needsRender = true;
+      return;
+    }
+    autoResumeCount++;
     tui.messages.push({
       role: 'system',
-      text: `⚠ Il modello ha annunciato un'azione senza eseguirla${announcement ? ` ("${announcement}")` : ''}`
-        + ` anche dopo ${attempts} solleciti.\n`
-        + `   Scrivi "fallo" per insistere, oppure indica tu il comando/file esatto su cui lavorare.`,
+      text: `▸ Auto-resume ${autoResumeCount}/${MAX_AUTO_RESUMES} dopo annuncio non eseguito. Forzo esecuzione (era: "${String(announcement || '').slice(0, 80)}").`,
       tools: [],
       id: Date.now(),
     });
+    pendingAutoResume = 'esegui il prossimo passo concreto con un tool — smetti di annunciare cosa farai';
     tui.needsRender = true;
   });
 
@@ -706,6 +1099,8 @@ export async function startApp(options = {}) {
   await rebuildAgent({ announceMemory: true });
 
   emitter.on('tokenCount', (n) => {
+    mission.setTokenCount(n);
+    syncMission();
     tui.tokenCount = n;
     tui.needsRender = true;
   });
@@ -719,6 +1114,8 @@ export async function startApp(options = {}) {
 
   emitter.on('usage', ({ inputTokens, outputTokens }) => {
     if (!inputTokens && !outputTokens) return;
+    mission.addUsage({ inputTokens, outputTokens });
+    syncMission();
     tui.inputTokensTotal  += inputTokens  || 0;
     tui.outputTokensTotal += outputTokens || 0;
     // Update context estimate from latest input tokens
@@ -764,6 +1161,8 @@ export async function startApp(options = {}) {
   });
 
 uiBridge.on('fileChanged', ({ type, path, lines, oldLines, newLines, diff }) => {
+  mission.fileChanged({ type, path });
+  syncMission();
   const fileName = path.split('/').pop();
   const icon = type === 'write' ? '📝' : '✏️';
   // `write` reports a single line count; `edit` reports the before/after pair.
@@ -821,6 +1220,14 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
       if (tui.needsRender || tui.isRunning) {
         tui.render();
         tui.needsRender = false;
+        // While waiting on a tool, every frame is "activity" — the user sees
+        // the screen updating (pulse + elapsed time), so the stall watchdog
+        // shouldn't fire on silent tools that don't emit toolProgress. Without
+        // this, a 5-minute read on a slow disk triggers the watchdog at 300s
+        // even though the user is seeing the UI tick.
+        if (tui.isRunning && tui.streaming?.waitKind === 'tool') {
+          tui.streaming.lastActivityAt = Date.now();
+        }
       }
     }, 16); // Always 60fps when active
   };
@@ -846,15 +1253,36 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
       const provider = connectionManager.activeProvider || '';
       const modelId = connectionManager.activeModel || '';
       const longReasoningModel = hasLongReasoningWindow(provider, modelId);
-      const modelStallMs = longReasoningModel ? 300_000 : 120_000;
+      // Default thresholds tightened from the old 300/120s. Real-world signal
+      // shows the model genuinely never responds in 5 minutes — better to
+      // fail fast and let the user retry or switch model than to make them
+      // stare at a frozen screen. Override with ETTORE_STALL_TIMEOUT_MS env.
+      const overrideMs = Number(process.env.ETTORE_STALL_TIMEOUT_MS) || 0;
+      const modelStallMs = overrideMs > 0
+        ? overrideMs
+        : (longReasoningModel ? 180_000 : 90_000);
       const hardStallMs = waitKind === 'tool' ? 300_000 : modelStallMs;
+      // Soft warning at 60s (model) / 120s (tool) — push a system message
+      // so the user knows to consider ESC. Doesn't cancel anything; just
+      // makes the wait actionable instead of mysterious.
+      const softWarnMs = waitKind === 'tool' ? 120_000 : 60_000;
+      if (idleMs >= softWarnMs && idleMs < softWarnMs + 1500 && !tui.streaming._softWarned) {
+        tui.streaming._softWarned = true;
+        const idleSec = Math.round(idleMs / 1000);
+        const msg = waitKind === 'tool'
+          ? `⚠ Tool fermo da ${idleSec}s — se sembra bloccato, premi ESC per annullare.`
+          : `⚠ Modello senza risposta da ${idleSec}s — se continua, premi ESC per annullare o cambia modello con /use.`;
+        tui.messages.push({ role: 'system', text: msg, tools: [], id: Date.now() });
+        tui.needsRender = true;
+      }
       if (idleMs < hardStallMs) return;
       const reason = waitKind === 'tool'
         ? `tool fermo da ${Math.round(idleMs / 1000)}s`
         : `nessun token dal modello da ${Math.round(idleMs / 1000)}s`;
       tui.messages.push({
         role: 'assistant',
-        text: `Error: stallo rilevato (${reason}). Operazione annullata automaticamente.`,
+        text: `Error: stallo rilevato (${reason}). Operazione annullata automaticamente.\n` +
+              `Suggerimenti: (1) riprova con /use per cambiare modello, (2) riduci il contesto con /compress, (3) imposta ETTORE_STALL_TIMEOUT_MS per cambiare la soglia.`,
         tools: [],
         id: Date.now(),
       });
@@ -879,6 +1307,16 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
     aliases:     cmd.aliases || [],
   })).sort((a, b) => a.name.localeCompare(b.name));
   let pendingSlashArgs = [];
+  let commandPaletteInput = '';
+
+  const updateCommandPaletteInput = (value) => {
+    commandPaletteInput = String(value || '');
+    tui.commandInput = commandPaletteInput;
+    const parts = commandPaletteInput.trim().split(/\s+/).filter(Boolean);
+    const commandName = parts.shift() || '';
+    pendingSlashArgs = parts;
+    tui.filterCommands(commandName);
+  };
 
   const suggestCommand = (input) => {
     const normalized = input.toLowerCase();
@@ -927,7 +1365,9 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
         return;
       }
 
-      await Promise.all(connections.map(c => connectionManager.refreshModels(c.provider).catch(() => null)));
+      // Opening the model picker is an explicit request for the current
+      // catalog, so bypass the normal five-minute cache window.
+      await Promise.all(connections.map(c => connectionManager.refreshModels(c.provider, { force: true }).catch(() => null)));
 
       let items = SUBMENU_COMMANDS.models();
       if (providerArg) {
@@ -942,6 +1382,14 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
 
       tui.openSubMenu('models', items);
       return;
+    }
+
+    if (cmdName === 'connect') {
+      const routed = connectProviderToRoute(cmdArgs);
+      if (routed) {
+        await handleConnectProvider(routed);
+        return;
+      }
     }
 
     // Gestione comandi con slash: /team/doganale → team handler con args ['doganale']
@@ -962,9 +1410,16 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
       tui.needsRender = true;
       return;
     }
-    const context = { commandSystem: { list: () => commandList }, config, version: '1.0.0', agent, history: [], emitter };
+    const context = { commandSystem: { list: () => commandList }, config, version: '1.0.0', agent, history: [], emitter, mission, pluginRuntime, rebuildAgent: () => rebuildAgent(), startLoop, stopLoop };
     try {
       const result = await cmd.handler(cmdArgs, context);
+      syncMission();
+      if (CONNECTION_COMMANDS.has(cmdName)) {
+        tui.provider = connectionManager.activeProvider || tui.provider;
+        tui.model = connectionManager.activeModel || tui.model;
+        _initModelMeta();
+        await rebuildAgent();
+      }
       if (result && typeof result === 'object' && result.action === 'exit') { autoSaveSessionMemory().finally(() => { cleanup(); process.exit(0); }); return; }
       if (result && typeof result === 'object' && result.action === 'clear') { tui.messages.length = 0; tui.needsRender = true; return; }
       if (result && typeof result === 'object' && result.action === 'setTheme') { setTheme(result.theme); tui.needsRender = true; return; }
@@ -976,6 +1431,28 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
       showCommandOutput(cmdName, `Error: ${e.message}`);
       tui.needsRender = true;
     }
+  };
+
+  // Hand the terminal over to a provider's interactive sign-in and take it back
+  // afterwards. The TUI owns the alternate screen and raw mode, so both have to
+  // be released or the child process never sees a keystroke.
+  const runInteractiveLogin = async ({ bin, args }) => {
+    const { spawn } = await import('child_process');
+    tui.render();
+    process.stdin.pause();
+    try { process.stdin.setRawMode(false); } catch (_) {}
+    process.stdout.write(ANSI.bracketedPasteOff + ANSI.show + ANSI.normalScreen);
+    const code = await new Promise(resolve => {
+      const child = spawn(bin, args, { stdio: 'inherit' });
+      child.on('error', () => resolve(-1));
+      child.on('close', c => resolve(c ?? -1));
+    });
+    process.stdout.write(ANSI.altScreen + ANSI.clear + ANSI.home + ANSI.hide + ANSI.bracketedPasteOn);
+    try { process.stdin.setRawMode(true); } catch (_) {}
+    process.stdin.resume();
+    tui.updateSize();
+    tui.needsRender = true;
+    return code === 0;
   };
 
   // Handle connect: provider selected -> ask for API key or connect directly
@@ -1013,7 +1490,18 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
       tui.messages.push({ role: 'system', text: `Connecting to ${meta.name}…`, tools: [], id: Date.now() });
       tui.needsRender = true;
 
-const result = await connectionManager.connect(providerName);
+let result = await connectionManager.connect(providerName);
+  // No account signed in yet: this is exactly the moment to ask for one,
+  // instead of telling the user to go and run another CLI themselves.
+  if (!result.success && result.needsLogin) {
+    const login = typeof meta.Class === 'function' ? new meta.Class().loginCommand?.() : null;
+    if (login) {
+      tui.messages.push({ role: 'system', text: `↗ Signing in to ${meta.name} — the terminal is yours until the browser flow finishes…`, tools: [], id: Date.now() });
+      tui.needsRender = true;
+      await runInteractiveLogin(login);
+      result = await connectionManager.connect(providerName);
+    }
+  }
   if (result.success) {
     tui.provider = providerName;
     const firstModel = result.models[0] || '';
@@ -1031,6 +1519,8 @@ const models = connectionManager.listModels(providerName);
       return { value: `${providerName} ${modelId}`, label: modelLabel(m), description: providerName + (isActive ? ' ← active' : '') };
     });
     let msg = `✓ Connected to ${meta.name}! ${result.models.length} models available.`;
+    const note = connectionManager.getProvider(providerName)?.connectionNote?.();
+    if (note) msg += `\n${note}`;
     if (meta.requiresKey && !NON_METERED_PROVIDERS.has(providerName)) {
       msg += `\n⚠️ This is a paid API — you'll be charged per token.`;
     }
@@ -1039,6 +1529,8 @@ tui.messages.push({ role: 'system', text: msg, tools: [], id: Date.now() });
   tui.openSubMenu('models', modelItems);
 } else {
   let msg = `✓ Connected to ${meta.name}!`;
+  const note = connectionManager.getProvider(providerName)?.connectionNote?.();
+  if (note) msg += `\n${note}`;
   if (meta.requiresKey && !NON_METERED_PROVIDERS.has(providerName)) {
     msg += `\n⚠️ This is a paid API — you'll be charged per token.`;
   }
@@ -1177,7 +1669,7 @@ const handleCommandSelect = async (cmdName, presetArgs = []) => {
     if (SUBMENU_COMMANDS[cmdName]) {
       if (cmdName === 'models' || cmdName === 'use' || cmdName === 'select') {
         const connected = connectionManager.listConnections();
-        await Promise.all(connected.map(c => connectionManager.refreshModels(c.provider).catch(() => null)));
+        await Promise.all(connected.map(c => connectionManager.refreshModels(c.provider, { force: true }).catch(() => null)));
       }
       const items = SUBMENU_COMMANDS[cmdName]();
       if (items.length > 0 && items[0].value !== '__none') {
@@ -1279,36 +1771,63 @@ if (cmdName === 'connect') {
   };
 
   const handleInput = async (text) => {
-    if (!running || !text) return;
+    if (!running || (!text && tui.attachments.length === 0)) return;
     if (text.startsWith('/')) {
-      // Slash commands are form-first: never execute directly from input.
-      // Open command palette with prefilled filter so the user always
-      // confirms via the dedicated UI form/submenu.
+      // Typed slash commands normally enter through the palette; this branch
+      // also handles commands pasted into the regular input.
       const typed = text.slice(1).trim();
       const parts = typed.length ? typed.split(/\s+/) : [];
       const rawCmd = parts[0] || '';
       const cmdTokens = rawCmd ? rawCmd.split('/').filter(Boolean) : [];
       const cmdName = cmdTokens[0] || '';
       const inlineArgs = cmdTokens.slice(1);
-      pendingSlashArgs = [...inlineArgs, ...parts.slice(1)];
+      const args = [...inlineArgs, ...parts.slice(1)];
+
+      // A full command pasted into the input never passes through the
+      // keypress path that opens the palette on `/`. Execute known commands
+      // directly so the first Enter behaves like a typed command's Enter.
+      if (cmdName && builtinCommands[cmdName]) {
+        pendingSlashArgs = [];
+        await executeCommand(cmdName, args);
+        return;
+      }
+
+      pendingSlashArgs = args;
+
+      // Skill Studio is a web action, not a command that needs a palette
+      // confirmation. Execute it on the first Enter so `/skills create`
+      // behaves like the user expects and opens the page immediately.
+      const directSkillCreate = (cmdName === 'skills' || cmdName === 'skill')
+        && ['create', 'new'].includes(String(pendingSlashArgs[0] || '').toLowerCase());
+      if (directSkillCreate) {
+        const args = pendingSlashArgs;
+        pendingSlashArgs = [];
+        tui.closeCommandPalette();
+        await executeCommand(cmdName === 'skill' ? 'skills' : cmdName, args);
+        return;
+      }
+
       tui.openCommandPalette(commandList);
-      if (cmdName) tui.filterCommands(cmdName);
+      updateCommandPaletteInput([cmdName, ...pendingSlashArgs].filter(Boolean).join(' '));
       return;
     }
     const cleanUserText = sanitizeModelText(text);
     const imageRefs = extractImageReferences(cleanUserText);
-    let imageAttachments = [];
+    const selectedPaths = tui.attachments.map(file => file.path);
+    let attachments = [];
     try {
-      imageAttachments = await loadImageAttachments(imageRefs.paths, { cwd: config.workdir });
+      attachments = await loadAttachments([...imageRefs.paths, ...selectedPaths], { cwd: config.workdir });
     } catch (error) {
-      tui.messages.push({ role: 'system', text: `Image error: ${error.message}`, tools: [], id: Date.now() });
+      tui.messages.push({ role: 'system', text: `Attachment error: ${error.message}`, tools: [], id: Date.now() });
       tui.needsRender = true;
       return;
     }
-    const displayText = [imageRefs.text, ...imageAttachments.map(image => `📎 ${image.name}`)].filter(Boolean).join('\n');
-    tui.messages.push({ role: 'user', text: displayText, tools: [], id: Date.now() });
-    tui.needsRender = true;
+    const imageAttachments = attachments.filter(file => file.kind === 'image');
+    const agentText = buildAttachmentPrompt(imageRefs.text, attachments);
+    const displayText = [imageRefs.text, ...attachments.map(file => `📎 ${file.name}`)].filter(Boolean).join('\n');
+    tui.clearAttachments();
     if (!agent) {
+      tui.messages.push({ role: 'user', text: displayText, tools: [], id: Date.now() });
       tui.messages.push({
         role: 'assistant',
         text: 'Not connected yet.\nUse /connect to choose a provider, or /providers to inspect available options.',
@@ -1318,16 +1837,32 @@ if (cmdName === 'connect') {
       tui.needsRender = true;
       return;
     }
-    tui.isRunning = true;
-    tui.turnState = 'started';
-    tui.streaming = { text: '', tools: [], reasoning: '', waitKind: 'model', lastActivityAt: Date.now(), stallMs: STALL_MS };
-    reasoningText = '';
-    firstToolSeen = false;
-    tui.needsRender = true;
-    agent.run(imageRefs.text, emitter, { imageAttachments }).then(async () => {
-      session.messages = agent.messages;
-      await saveSession(session).catch(() => {});
-    }).catch(() => {});
+    // A new user prompt is the most decisive signal that the user is back
+    // in control. Wipe the auto-resume budget so a model that was looping
+    // gets a clean budget tied to this new turn, not the previous one's
+    // stall count.
+    autoResumeCount = 0;
+    pendingAutoResume = null;
+    lastResumeSignature = null;
+    await runAgent(agentText, imageAttachments, displayText);
+  };
+
+  const openAttachmentPicker = async () => {
+    if (tui.isRunning) return;
+    tui.openFilePicker({ selecting: true });
+    try {
+      const selectedPaths = await chooseFiles({ cwd: config.workdir, multiple: true });
+      if (selectedPaths.length === 0) {
+        tui.closeFilePicker();
+        return;
+      }
+      const files = await loadAttachments(selectedPaths, { cwd: config.workdir });
+      for (const file of files) tui.addAttachment(file);
+      tui.closeFilePicker();
+    } catch (error) {
+      if (tui.filePicker) tui.filePicker.error = error.message;
+      tui.needsRender = true;
+    }
   };
 
   emitKeypressEvents(process.stdin);
@@ -1348,6 +1883,12 @@ if (cmdName === 'connect') {
     } else if (tui.askUser) {
       tui.askUserInput = (tui.askUserInput || '') + normalized.replace(/\n/g, '');
       tui.needsRender = true;
+    } else if (tui.commandPaletteOpen) {
+      // Keep pasted slash commands in the palette state. Otherwise the first
+      // Enter only opens the palette again instead of executing the command.
+      const pasted = normalized.replace(/\n/g, ' ');
+      const value = commandPaletteInput ? commandPaletteInput + pasted : pasted.replace(/^\/+/, '');
+      updateCommandPaletteInput(value);
     } else {
       tui.setInput((tui.input || '') + normalized);
     }
@@ -1394,7 +1935,11 @@ if (cmdName === 'connect') {
   process.stdin.on('keypress', async (str, key) => {
     if (!running) return;
     if (inBracketedPaste) return;
-    if (Date.now() < suppressKeypressUntil) return;
+    // Pasting can generate duplicate keypress events for the pasted
+    // characters, but Enter must remain responsive so a pasted `/loop` can
+    // be submitted immediately.
+    if (Date.now() < suppressKeypressUntil
+      && key?.name !== 'return' && key?.name !== 'enter') return;
 
     if (key?.ctrl && key.name === 'c') {
       if (tui.askUser) {
@@ -1407,6 +1952,7 @@ if (cmdName === 'connect') {
         return;
       }
       if (tui.apiKeyInputMode) { tui.closeApiKeyInput(); return; }
+      if (tui.filePicker) { tui.closeFilePicker(); return; }
       if (tui.subMenuOpen) { tui.closeSubMenu(); tui.closeCommandPalette(); return; }
       if (tui.commandPaletteOpen) { tui.closeCommandPalette(); return; }
       if (tui.isRunning) { agent?.cancel(); } else { autoSaveSessionMemory().finally(() => { cleanup(); process.exit(0); }); }
@@ -1424,6 +1970,7 @@ if (cmdName === 'connect') {
         return;
       }
       if (tui.apiKeyInputMode) { tui.closeApiKeyInput(); return; }
+      if (tui.filePicker) { tui.closeFilePicker(); return; }
       if (tui.subMenuOpen) { tui.closeSubMenu(); tui.closeCommandPalette(); return; }
       if (tui.commandPaletteOpen) { pendingSlashArgs = []; tui.closeCommandPalette(); return; }
       if (tui.exitConfirmMode) { tui.exitConfirmMode = false; tui.needsRender = true; return; }
@@ -1601,6 +2148,8 @@ if (cmdName === 'connect') {
         if (cmd) {
           tui.commandPaletteOpen = false;
           tui.commandFilter = '';
+          tui.commandInput = '';
+          commandPaletteInput = '';
           const args = pendingSlashArgs;
           pendingSlashArgs = [];
           await handleCommandSelect(cmd.name, args);
@@ -1635,9 +2184,8 @@ if (cmdName === 'connect') {
         return;
       }
       if (key?.name === 'backspace') {
-        if (tui.commandFilter.length > 0) {
-          tui.commandFilter = tui.commandFilter.slice(0, -1);
-          tui.filterCommands(tui.commandFilter);
+        if (commandPaletteInput.length > 0) {
+          updateCommandPaletteInput(commandPaletteInput.slice(0, -1));
         } else {
           pendingSlashArgs = [];
           tui.closeCommandPalette();
@@ -1645,8 +2193,7 @@ if (cmdName === 'connect') {
         return;
       }
       if (str && !key?.ctrl && !key?.meta && str.codePointAt(0) >= 32) {
-        tui.commandFilter += str;
-        tui.filterCommands(tui.commandFilter);
+        updateCommandPaletteInput(commandPaletteInput + str);
         return;
       }
       return;
@@ -1667,6 +2214,15 @@ if (cmdName === 'connect') {
     // Normal mode
     if (key?.ctrl && key.name === 'u') { tui.clearInput(); return; }
 
+    if (key?.ctrl && key.name === 'o') {
+      if (!tui.filePicker) await openAttachmentPicker();
+      return;
+    }
+
+    if (tui.filePicker) {
+      return;
+    }
+
     if (key?.name === 'return' || key?.name === 'enter') {
       const text = tui.input.trim();
       tui.clearInput();
@@ -1675,7 +2231,14 @@ if (cmdName === 'connect') {
       return;
     }
 
-    if (key?.name === 'backspace') { tui.removeChar(); return; }
+    if (key?.name === 'backspace') {
+      if (!tui.input && tui.attachments.length > 0) {
+        tui.removeLastAttachment();
+        return;
+      }
+      tui.removeChar();
+      return;
+    }
     if (key?.name === 'tab') {
       syncModeWithAgent(tui, agent);
       return;
@@ -1687,6 +2250,7 @@ if (cmdName === 'connect') {
 
     if (str === '/' && tui.input === '' && !tui.isRunning) {
       pendingSlashArgs = [];
+      commandPaletteInput = '';
       tui.openCommandPalette(commandList);
       return;
     }

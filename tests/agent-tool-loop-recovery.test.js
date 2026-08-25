@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Agent } from '../src/agents/index.js';
 import { toolHandlers } from '../src/tools/index.js';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function toolTurn(id, url) {
   const call = {
@@ -99,4 +102,74 @@ test('last iteration is reserved for a final answer without tools', async () => 
   } finally {
     toolHandlers.webfetch = original;
   }
+});
+
+test('provider tool call on final recovery turn completes instead of failing', async () => {
+  const original = toolHandlers.webfetch;
+  toolHandlers.webfetch = async ({ url }) => `content from ${url}`;
+  try {
+    let turn = 0;
+    const client = {
+      async turn(_messages, tools) {
+        turn++;
+        if (turn === 3) assert.equal(tools.length, 0);
+        return toolTurn(`call_${turn}`, `https://example.com/${turn}`);
+      },
+    };
+    const emitter = new EventEmitter();
+    const errors = [];
+    const completed = [];
+    emitter.on('error', message => errors.push(message));
+    emitter.on('complete', message => completed.push(message));
+    const agent = new Agent(client, config({ maxIterations: 3, maxReadOnlyToolBatches: 20 }));
+
+    const answer = await agent.run('research online', emitter);
+
+    assert.match(answer, /limite di 3 passaggi/);
+    assert.equal(errors.length, 0);
+    assert.equal(completed.at(-1), answer);
+  } finally {
+    toolHandlers.webfetch = original;
+  }
+});
+
+
+test('identical reads of an unchanged file are refused after their budget', async () => {
+  // `read` is deliberately outside the strict duplicate guard (re-reading a
+  // different range is normal), so it needs a budget of its own — otherwise a
+  // stuck model spends the whole per-turn tool-call allowance on one file.
+  const dir = await mkdtemp(join(tmpdir(), 'ettore-read-budget-'));
+  const file = join(dir, 'app.js');
+  await writeFile(file, 'const a = 1;\n');
+  const agent = new Agent({ async turn() { return { type: 'text', content: 'ok' }; } }, config());
+  const args = { file_path: file, offset: 0, limit: 200 };
+
+  assert.equal(await agent._shouldSkipDuplicateTool('read', args), null);
+  await agent._recordToolExecution('read', args, 'const a = 1;');
+  // Second identical read still goes through (the cache makes it cheap).
+  assert.equal(await agent._shouldSkipDuplicateTool('read', args), null);
+  await agent._recordToolExecution('read', args, 'const a = 1;');
+
+  const blocked = await agent._shouldSkipDuplicateTool('read', args);
+  assert.ok(blocked, 'the third identical read must be refused');
+  assert.match(blocked.reason, /already ran 2 times/);
+  assert.match(blocked.reason, /read a different range, or act on it/);
+
+  // A different range is different work, not a loop.
+  assert.equal(await agent._shouldSkipDuplicateTool('read', { ...args, offset: 200 }), null);
+
+  // The file changing out from under us (a shell command, an external editor)
+  // makes the same read legitimate again, even though workspaceRevision only
+  // tracks write/edit/apply_patch.
+  await writeFile(file, 'const a = 1;\nconst b = 2;\nconst c = 3;\n');
+  assert.equal(await agent._shouldSkipDuplicateTool('read', args), null);
+});
+
+test('strictly guarded tools still dedupe on the second identical call', async () => {
+  const agent = new Agent({ async turn() { return { type: 'text', content: 'ok' }; } }, config());
+  const args = { pattern: 'TODO', path: '.' };
+  assert.equal(await agent._shouldSkipDuplicateTool('grep', args), null);
+  await agent._recordToolExecution('grep', args, 'no matches');
+  const blocked = await agent._shouldSkipDuplicateTool('grep', args);
+  assert.match(blocked.reason, /Skipped duplicate grep call/);
 });

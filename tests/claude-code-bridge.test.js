@@ -13,7 +13,12 @@ import {
   serializeTranscriptForClaudeCode,
   usesClaudeCodeTransport,
 } from '../src/llm/client.js';
-import { detectClaudeAuth } from '../src/providers/claude-code.js';
+import {
+  CLAUDE_CODE_MODELS,
+  describeAccount,
+  detectClaudeAuth,
+  parseAuthStatus,
+} from '../src/providers/claude-code.js';
 import { isKeylessProvider } from '../src/providers/index.js';
 
 // ── routing ─────────────────────────────────────────────────────────────────
@@ -47,6 +52,54 @@ test('detectClaudeAuth prefers an explicit token, then the on-disk login', () =>
 test('detectClaudeAuth assumes the macOS keychain holds the login', () => {
   const home = mkdtempSync(join(tmpdir(), 'ettore-cc-'));
   assert.equal(detectClaudeAuth({}, home, 'darwin').ok, true);
+});
+
+test('parseAuthStatus reads the account out of `claude auth status --json`', () => {
+  const account = parseAuthStatus(JSON.stringify({
+    loggedIn: true,
+    authMethod: 'claude.ai',
+    email: 'user@example.com',
+    subscriptionType: 'pro',
+  }));
+  assert.deepEqual(account, {
+    loggedIn: true,
+    email: 'user@example.com',
+    plan: 'pro',
+    method: 'claude.ai',
+  });
+  assert.equal(parseAuthStatus('{"loggedIn":false}').loggedIn, false);
+  assert.equal(parseAuthStatus('not json'), null);
+  assert.equal(parseAuthStatus('"a string"'), null);
+});
+
+test('describeAccount names the account so the user sees what is being spent', () => {
+  assert.match(
+    describeAccount({ loggedIn: true, email: 'user@example.com', plan: 'max' }),
+    /user@example\.com · max plan/,
+  );
+  // An environment credential has no email attached to it.
+  assert.match(describeAccount({ source: 'CLAUDE_CODE_OAUTH_TOKEN' }), /via CLAUDE_CODE_OAUTH_TOKEN/);
+  assert.equal(describeAccount(null), null);
+});
+
+// ── model catalog ───────────────────────────────────────────────────────────
+
+test('the model catalog leads with aliases and keeps ids unique', () => {
+  const ids = CLAUDE_CODE_MODELS.map(m => m.id);
+  assert.deepEqual(ids.slice(0, 3), ['sonnet', 'opus', 'haiku']);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.ok(ids.includes('claude-opus-5'));
+  assert.ok(ids.includes('claude-sonnet-4-6'));
+  assert.ok(CLAUDE_CODE_MODELS.every(m => typeof m.description === 'string' && m.description));
+});
+
+test('models a subscription cannot reach carry a visible note', () => {
+  // Probed against the real CLI: both are refused on a plain Pro plan.
+  for (const id of ['claude-fable-5', 'sonnet[1m]']) {
+    const model = CLAUDE_CODE_MODELS.find(m => m.id === id);
+    assert.ok(model, id);
+    assert.match(model.note, /usage credits/);
+  }
 });
 
 // ── subprocess isolation ────────────────────────────────────────────────────

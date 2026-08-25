@@ -1,6 +1,6 @@
 const MUTATION_TOOLS = new Set(['write', 'edit', 'apply_patch_structured']);
 const EXPLORATION_TOOLS = new Set(['glob', 'grep', 'list_dir', 'file_info', 'read', 'repo_find_symbol']);
-const STATEFUL_TOOLS = new Set(['bash_session', 'dev_server']);
+const STATEFUL_TOOLS = new Set(['bash_session', 'dev_server', 'browser_app', 'desktop_app']);
 
 export function userLikelyRequestedWorkspaceEdit(prompt) {
   const text = String(prompt || '').toLowerCase();
@@ -37,6 +37,9 @@ export function responseAnnouncesUnexecutedAction(text) {
   if (/(?:^|\n|\.\s+)\s*(?:ora\s+|adesso\s+)?(scrivo|creo|aggiorno|modifico|implemento|sistemo|applico|procedo|sostituisco|aggiungo|rimuovo|inserisco|riscrivo)\b/i.test(body)) {
     return true;
   }
+  if (/(?:^|\n|\.\s+)\s*(?:ora\s+|adesso\s+)?(diagnostico|verifico|controllo|analizzo|esamino|ispeziono|indago|leggo|apro|esploro|mappo|cerco(?!\s+di\b))\b(?:\s+(?:subito|ora|adesso))?/i.test(body)) {
+    return true;
+  }
   if (/(?:^|\n|\.\s+)\s*(now\s+i'?ll|next\s+i'?ll|let\s+me\s+(?:write|create|update|modify|fix|edit|add|implement)|i'?ll\s+(?:write|create|update|modify|fix|edit|add|implement)|i'?m\s+going\s+to\s+(?:write|create|update|modify)|about\s+to\s+(?:write|create|update|modify))/i.test(body)) {
     return true;
   }
@@ -66,6 +69,30 @@ export function toolBatchNeedsSequential(validTools = []) {
   if (names.includes('repo_map') && names.some(name => EXPLORATION_TOOLS.has(name))) return true;
   if (names.some(name => MUTATION_TOOLS.has(name))) return true;
   return false;
+}
+
+// Return execution waves for a tool batch. Most read-only calls share one
+// wave and run concurrently. Repository mapping remains a first wave when it
+// is mixed with exploration, preserving the model-facing repo_map-first rule
+// while allowing the remaining reads to run together. Stateful tools and
+// mutations stay one-per-wave because their order can affect later calls.
+export function toolBatchExecutionGroups(validTools = []) {
+  if (validTools.length <= 1) return validTools.length ? [validTools] : [];
+  const names = validTools.map(t => t.name);
+
+  if (names.some(name => STATEFUL_TOOLS.has(name)) || names.some(name => MUTATION_TOOLS.has(name))) {
+    return validTools.map(tool => [tool]);
+  }
+
+  const hasRepoMap = names.includes('repo_map');
+  const hasOtherExploration = names.some(name => EXPLORATION_TOOLS.has(name) && name !== 'repo_map');
+  if (hasRepoMap && hasOtherExploration) {
+    const repoMaps = validTools.filter(tool => tool.name === 'repo_map');
+    const rest = validTools.filter(tool => tool.name !== 'repo_map');
+    return rest.length ? [repoMaps, rest] : [repoMaps];
+  }
+
+  return [validTools];
 }
 
 export function createTurnRecoveryState() {

@@ -1,10 +1,10 @@
 import { exec, execFile, spawn } from 'child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { getBashSession } from './bash-session.js';
 import { sanitizeOutput } from '../utils/output.js';
 import { promisify } from 'util';
-import { readFile, writeFile, readdir, stat, access, mkdtemp, rm, readlink } from 'fs/promises';
+import { readFile, writeFile, readdir, stat, access, readlink } from 'fs/promises';
 import { join, extname, dirname } from 'path';
-import { tmpdir } from 'os';
 import { glob as globby } from 'glob';
 import { uiBridge } from './bridge.js';
 import { transcribeVideo, renderTranscript } from './video-transcript.js';
@@ -12,6 +12,9 @@ import { describeVideo } from './video-describe.js';
 import { fetchWebImage } from './web-image.js';
 import { generateSceneImage, generateSceneClip, assembleMusicVideo, lyricsToSrt } from './music-video.js';
 import { readAudio, renderAudioResult } from './audio-read.js';
+import { extractPdfTextWithSuperOcr, isLikelyUsablePdfText } from './pdf-ocr.js';
+import * as browser from './browser-driver.js';
+import * as desktop from './desktop-app.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -27,10 +30,18 @@ const MAX_SERVER_LOG_LINES = 2000;
 const MAX_SERVER_LOG_CHARS = 200000;
 const DEV_SERVER_LOG_MAX = 2000;
 let activeToolAbortSignal = null;
+const toolAbortStorage = new AsyncLocalStorage();
 const devServers = new Map();
 
 export function setToolAbortSignal(signal) {
   activeToolAbortSignal = signal || null;
+}
+
+// Keep cancellation scoped to one tool invocation. The legacy global signal
+// remains as a fallback for callers outside the agent, while parallel tools
+// get isolated signals through AsyncLocalStorage.
+export function runWithToolAbortSignal(signal, fn) {
+  return toolAbortStorage.run(signal || null, fn);
 }
 
 // Sink registered by Agent.run() so the todo_write tool can update the
@@ -44,7 +55,7 @@ export function setAgentTodoSink(sink) {
 }
 
 function getToolAbortSignal(timeoutMs = null) {
-  const signal = activeToolAbortSignal;
+  const signal = toolAbortStorage.getStore() || activeToolAbortSignal;
   if (!signal && !timeoutMs) return undefined;
   if (!timeoutMs) return signal;
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
@@ -742,43 +753,6 @@ async function captureTmuxPane({ target, maxLines }) {
   return String(stdout || '');
 }
 
-async function extractPdfTextWithOcr({ filePath, pageFrom, pageTo, lang, dpi, maxChars }) {
-  const tempRoot = await mkdtemp(join(tmpdir(), 'ettore-pdf-ocr-'));
-  try {
-    emitToolProgress('read_pdf', { file_path: filePath }, 'Rendering PDF pages…');
-    const outPrefix = join(tempRoot, 'page');
-    const ppArgs = ['-f', String(pageFrom), '-r', String(dpi)];
-    if (pageTo != null) ppArgs.push('-l', String(pageTo));
-    ppArgs.push('-png', filePath, outPrefix);
-    await execFileAsync('pdftoppm', ppArgs, { maxBuffer: 20 * 1024 * 1024 });
-
-    const pageImages = (await readdir(tempRoot))
-      .filter(name => /^page-\d+\.png$/i.test(name))
-      .sort((a, b) => a.localeCompare(b));
-
-    if (!pageImages.length) return '';
-
-    const total = pageImages.length;
-    const chunks = [];
-    let i = 0;
-    for (const image of pageImages) {
-      i++;
-      emitToolProgress('read_pdf', { file_path: filePath }, `OCR page ${i}/${total}…`);
-      const imagePath = join(tempRoot, image);
-      const { stdout } = await execFileAsync('tesseract', [imagePath, 'stdout', '-l', lang], {
-        maxBuffer: 20 * 1024 * 1024,
-        signal: getToolAbortSignal(120000),
-      });
-      const text = String(stdout || '').trim();
-      if (text) chunks.push(text);
-      if (chunks.join('\n\n').length > maxChars) break;
-    }
-    return chunks.join('\n\n').trim();
-  } finally {
-    await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
-  }
-}
-
 async function listDirEntries(basePath, recursive, maxEntries, prefix = '') {
   const dirents = await readdir(basePath, { withFileTypes: true });
   const sorted = dirents.sort((a, b) => {
@@ -1149,6 +1123,473 @@ export const toolHandlers = {
     }
   },
 
+  // Drive a web app in a real browser: open it, click through it, and read
+  // the browser console (errors, exceptions, failed requests) while doing so.
+  async browser_app({
+    action = 'status',
+    id = 'default',
+    url,
+    selector,
+    text,
+    key,
+    expression,
+    port,
+    file_path,
+    level = 'info',
+    limit = 80,
+    since_last = false,
+    only_failed = true,
+    headless = null,
+    timeout_ms = 30000,
+    full_page = false,
+    max_chars = 4000,
+    ms = 1000,
+    submit = false,
+    replace = true,
+    width = 1280,
+    height = 800,
+  } = {}) {
+    const act = String(action || 'status').toLowerCase();
+    const sessionId = String(id || 'default');
+    const timeout = Math.max(1000, Math.min(Number(timeout_ms) || 30000, 300000));
+
+    const requireSession = () => {
+      const session = browser.getSession(sessionId);
+      if (!session) {
+        throw new Error(`no browser session "${sessionId}". Start one with action=open (url=...) or attach to a debugging port with action=attach.`);
+      }
+      if (session.client.closed) {
+        throw new Error(`browser session "${sessionId}" lost its connection (the browser was probably closed). Reopen it with action=open.`);
+      }
+      return session;
+    };
+    // Report what just broke, right where it broke.
+    const withErrors = (session, head) => {
+      const errors = browser.takeNewErrors(session);
+      if (!errors.length) return head;
+      return [
+        head,
+        `${errors.length} new console error(s):`,
+        ...errors.map(e => browser.formatEventLine(e, session.startedAt)),
+      ].join('\n');
+    };
+    // After a navigation, only the messages that navigation produced are
+    // interesting — replaying the whole buffer just repeats old failures.
+    const consoleSnapshot = (session, { minLevel = 'warning', max = 30, from = 0 } = {}) => {
+      const out = browser.summarizeConsole(session.events.slice(from), {
+        minLevel,
+        limit: max,
+        startedAt: session.startedAt,
+      });
+      browser.syncCursors(session);
+      return out;
+    };
+    const shotPath = () => file_path || join('.ettore', 'screenshots', `${sessionId}-${Date.now()}.png`);
+
+    try {
+      if (act === 'list') {
+        const rows = browser.listSessions();
+        if (!rows.length) return 'No browser session open.';
+        return rows
+          .map(s => `${s.id}: ${s.url} — port ${s.port}, ${s.headless ? 'headless' : 'visible'}${s.attached ? ', attached' : ''}, ${s.events} console message(s), ${s.errors} error(s)`)
+          .join('\n');
+      }
+
+      if (act === 'open') {
+        emitToolProgress('browser_app', { action: act, id: sessionId }, 'Launching the browser…');
+        const session = await browser.launchSession({ id: sessionId, headless, width, height });
+        const lines = [`Browser session "${sessionId}" open (${session.headless ? 'headless' : 'visible'}, debug port ${session.port}).`];
+        if (url) {
+          emitToolProgress('browser_app', { action: act, id: sessionId }, `Opening ${url}…`);
+          const from = session.events.length;
+          const loaded = await browser.navigate(session, String(url), { timeoutMs: timeout });
+          lines.push(`Loaded ${url}${loaded ? '' : ' (load event did not fire within the timeout)'}.`);
+          lines.push(consoleSnapshot(session, { from }));
+        }
+        return lines.join('\n');
+      }
+
+      if (act === 'attach') {
+        emitToolProgress('browser_app', { action: act, id: sessionId }, `Attaching to port ${port}…`);
+        const session = await browser.attachSession({ id: sessionId, port: Number(port) });
+        return [
+          `Attached to the debugging port ${session.port} as session "${sessionId}" (current page: ${session.url}).`,
+          consoleSnapshot(session),
+        ].join('\n');
+      }
+
+      if (act === 'close') {
+        const closed = await browser.closeSession(sessionId);
+        return closed ? `Browser session "${sessionId}" closed.` : `No browser session "${sessionId}".`;
+      }
+
+      if (act === 'status') {
+        const session = browser.getSession(sessionId);
+        if (!session) return `No browser session "${sessionId}".`;
+        const errors = session.events.filter(e => browser.levelRank(e.level) >= 3).length;
+        return [
+          `id: ${sessionId}`,
+          `url: ${session.url}`,
+          `mode: ${session.attached ? 'attached' : (session.headless ? 'headless' : 'visible')}`,
+          `debug_port: ${session.port}`,
+          `console_messages: ${session.events.length} (${errors} error(s))`,
+          `requests: ${session.requests.size}`,
+          `started_at: ${new Date(session.startedAt).toISOString()}`,
+        ].join('\n');
+      }
+
+      const session = requireSession();
+
+      if (act === 'goto' || act === 'navigate') {
+        if (!url) return 'Error: browser_app goto requires "url".';
+        emitToolProgress('browser_app', { action: act, id: sessionId }, `Opening ${url}…`);
+        const from = session.events.length;
+        const loaded = await browser.navigate(session, String(url), { timeoutMs: timeout });
+        return [
+          `Loaded ${url}${loaded ? '' : ' (load event did not fire within the timeout)'}.`,
+          consoleSnapshot(session, { from }),
+        ].join('\n');
+      }
+
+      if (act === 'reload') {
+        const from = session.events.length;
+        await session.client.send('Page.reload', { ignoreCache: true });
+        await new Promise(done => { setTimeout(done, Math.max(300, Math.min(Number(ms) || 1000, 15000))); });
+        return [`Reloaded ${session.url}.`, consoleSnapshot(session, { from })].join('\n');
+      }
+
+      if (act === 'console') {
+        return browser.readConsole(session, {
+          minLevel: String(level || 'info'),
+          limit: Math.max(1, Math.min(Number(limit) || 80, 400)),
+          sinceLast: Boolean(since_last),
+        });
+      }
+
+      if (act === 'errors') {
+        return browser.readConsole(session, {
+          minLevel: 'error',
+          limit: Math.max(1, Math.min(Number(limit) || 80, 400)),
+          sinceLast: Boolean(since_last),
+        });
+      }
+
+      if (act === 'network') {
+        return browser.readNetwork(session, {
+          onlyFailed: only_failed !== false,
+          limit: Math.max(1, Math.min(Number(limit) || 40, 200)),
+        });
+      }
+
+      if (act === 'click') {
+        if (!selector) return 'Error: browser_app click requires "selector" (CSS, or text=Label).';
+        emitToolProgress('browser_app', { action: act, id: sessionId }, `Clicking ${selector}…`);
+        const box = await browser.clickElement(session, String(selector));
+        await new Promise(done => { setTimeout(done, 350); });
+        return withErrors(session, `Clicked <${box.tag}> "${box.text || selector}".`);
+      }
+
+      if (act === 'type') {
+        if (text === undefined || text === null) return 'Error: browser_app type requires "text".';
+        emitToolProgress('browser_app', { action: act, id: sessionId }, 'Typing…');
+        const report = await browser.typeInto(session, selector ? String(selector) : null, String(text), {
+          replace: replace !== false,
+          submit: Boolean(submit),
+        });
+        await new Promise(done => { setTimeout(done, 350); });
+        // The typed text is never echoed back: on a login form it is the
+        // credential, and this string reaches the transcript and the logs.
+        // What the model needs is *where* it landed — exactly what it used to
+        // get wrong without noticing.
+        const resolved = report.resolvedFrom ? ` (matched ${report.resolvedFrom}, filled its field)` : '';
+        return withErrors(
+          session,
+          `Typed ${report.length} character(s) into ${report.target}${resolved}${submit ? ' and pressed Enter' : ''}.`,
+        );
+      }
+
+      if (act === 'press') {
+        if (!key) return 'Error: browser_app press requires "key" (Enter, Tab, Escape, ArrowDown, …).';
+        await browser.pressKey(session, String(key));
+        await new Promise(done => { setTimeout(done, 300); });
+        return withErrors(session, `Pressed ${key}.`);
+      }
+
+      if (act === 'eval') {
+        if (!expression) return 'Error: browser_app eval requires "expression".';
+        const value = await browser.evaluate(session, String(expression), { timeoutMs: timeout });
+        let rendered;
+        try { rendered = typeof value === 'string' ? value : JSON.stringify(value, null, 2); }
+        catch { rendered = String(value); }
+        return withErrors(session, `Result: ${String(rendered ?? 'undefined').slice(0, Math.max(200, Math.min(Number(max_chars) || 4000, 40000)))}`);
+      }
+
+      if (act === 'text') {
+        const body = await browser.pageText(session, Number(max_chars) || 4000);
+        return body.trim() ? body : '(the page has no visible text)';
+      }
+
+      if (act === 'snapshot') {
+        const snap = await browser.snapshot(session, Number(limit) || 40);
+        const rows = (snap.elements || []).map(el => {
+          const label = el.label ? ` "${el.label}"` : '';
+          const type = el.type ? `[${el.type}]` : '';
+          const kind = el.field ? ' (input field)' : '';
+          const flags = `${el.required ? ' (required)' : ''}${el.disabled ? ' (disabled)' : ''}`;
+          return `- ${el.tag}${type}${label}${kind} → ${el.selector}${flags}`;
+        });
+        return [`${snap.title || '(no title)'} — ${snap.url}`, `${rows.length} interactive element(s):`, ...rows].join('\n');
+      }
+
+      if (act === 'check') {
+        emitToolProgress('browser_app', { action: act, id: sessionId }, 'Checking the page elements…');
+        if (selector) {
+          const probe = await browser.probe(session, String(selector), { field: false });
+          if (probe.problem && probe.ok === false && !probe.describe) {
+            return `✗ ${selector}: ${probe.problem}`;
+          }
+          const lines = [
+            `${probe.ok ? '✓' : '✗'} ${selector} → ${probe.describe} at (${probe.x}, ${probe.y})`
+            + `${probe.ok ? ' — usable' : ` — ${probe.problem}`}`,
+          ];
+          if (!probe.field) {
+            // What "type" would actually do with this locator, before the
+            // model finds out by filling the wrong box.
+            const asField = await browser.probe(session, String(selector), { field: true, point: false });
+            lines.push(asField.describe
+              ? `   typing here would fill: ${asField.describe}${asField.problem ? ` (${asField.problem})` : ''}`
+              : `   typing here would fail: ${asField.problem}`);
+          }
+          return withErrors(session, lines.join('\n'));
+        }
+        const report = await browser.probeAll(session, Number(limit) || 40);
+        const items = report.elements || [];
+        const broken = items.filter(item => !item.ok);
+        const fields = items.filter(item => item.field);
+        const lines = [
+          `${report.title || '(no title)'} — ${report.url}`,
+          `${items.length} interactive element(s), ${fields.length} input field(s), ${broken.length} with problems.`,
+        ];
+        for (const item of broken.slice(0, 20)) {
+          lines.push(`✗ ${item.describe || item.locator}${item.label ? ` "${item.label}"` : ''} → ${item.problem}`);
+        }
+        for (const item of fields.filter(f => f.ok).slice(0, 20)) {
+          lines.push(`✓ ${item.describe}${item.label ? ` "${item.label}"` : ''} → fillable at (${item.x}, ${item.y})`);
+        }
+        return withErrors(session, lines.join('\n'));
+      }
+
+      if (act === 'wait') {
+        if (selector) {
+          await browser.waitForSelector(session, String(selector), timeout);
+          return withErrors(session, `Element ${selector} is visible.`);
+        }
+        const pause = Math.max(50, Math.min(Number(ms) || 1000, 60000));
+        await new Promise(done => { setTimeout(done, pause); });
+        return withErrors(session, `Waited ${pause}ms.`);
+      }
+
+      if (act === 'screenshot') {
+        const target = shotPath();
+        emitToolProgress('browser_app', { action: act, id: sessionId }, 'Capturing the page…');
+        const shot = await browser.screenshot(session, target, { fullPage: Boolean(full_page) });
+        return `Screenshot saved to ${shot.path} (${formatBytes(shot.bytes)}).`;
+      }
+
+      return `Error: unsupported action "${action}". Use open|attach|goto|click|type|press|eval|text|snapshot|check|console|errors|network|wait|screenshot|reload|status|list|close.`;
+    } catch (error) {
+      return `Error: ${error.message}`;
+    }
+  },
+
+  // Launch and drive a desktop (GUI) app: keep its stdout/stderr, list and
+  // screenshot its windows, click and type into it.
+  async desktop_app({
+    action = 'status',
+    id = 'default',
+    command,
+    workdir,
+    file_path,
+    x,
+    y,
+    button = 1,
+    text,
+    keys,
+    window_id,
+    title,
+    lines = 200,
+    only_errors = false,
+    timeout_ms = 15000,
+    virtual_display = null,
+    debug_port = null,
+    ms = 1000,
+  } = {}) {
+    const act = String(action || 'status').toLowerCase();
+    const appId = String(id || 'default');
+    const timeout = Math.max(500, Math.min(Number(timeout_ms) || 15000, 300000));
+
+    const requireApp = () => {
+      const app = desktop.getApp(appId);
+      if (!app) throw new Error(`no desktop app "${appId}". Start one with action=open (command="…").`);
+      return app;
+    };
+    const shotPath = () => file_path || join('.ettore', 'screenshots', `${appId}-${Date.now()}.png`);
+
+    try {
+      if (act === 'capabilities') {
+        const caps = desktop.describeCapabilities();
+        return [
+          `display: ${caps.display || '(none — a virtual display will be started with Xvfb)'}`,
+          `session: ${caps.wayland ? 'wayland' : 'x11'}`,
+          `windows: ${caps.windowManagerTool || 'unavailable (install wmctrl or xdotool)'}`,
+          `screenshot: ${caps.screenshotTool || 'unavailable (install imagemagick, gnome-screenshot, scrot…)'}`,
+          `input: ${caps.inputTool || 'unavailable — ' + desktop.inputUnavailableMessage()}`,
+          `virtual display: ${caps.virtualDisplayTool || 'unavailable (install xvfb)'}`,
+        ].join('\n');
+      }
+
+      if (act === 'list') {
+        const rows = desktop.listApps();
+        if (!rows.length) return 'No desktop app started.';
+        return rows
+          .map(a => `${a.id}: ${a.command} — pid ${a.pid}, ${a.running ? 'running' : `exited (code ${a.exitCode ?? 'n/a'})`}, display ${a.display || 'n/a'}, ${a.logLines} log line(s)`)
+          .join('\n');
+      }
+
+      if (act === 'open') {
+        if (!command) return 'Error: desktop_app open requires "command".';
+        emitToolProgress('desktop_app', { action: act, id: appId }, 'Launching the app…');
+        const app = await desktop.openApp({
+          id: appId,
+          command: String(command),
+          workdir: workdir || process.cwd(),
+          virtual_display,
+          debug_port,
+        });
+        await new Promise(done => { setTimeout(done, Math.max(300, Math.min(Number(ms) || 1000, 30000))); });
+        const out = [
+          `Desktop app "${appId}" started (pid ${app.pid}) on display ${app.display || 'n/a'}.`,
+          `command: ${app.command}`,
+        ];
+        if (!app.running) out.push(`WARNING: the process already exited with code ${app.exitCode ?? 'n/a'}.`);
+        if (app.debugPort) {
+          out.push(`DevTools port ${app.debugPort} requested: read its renderer console with browser_app action=attach port=${app.debugPort}.`);
+        } else if (desktop.looksLikeElectron(app.command)) {
+          out.push('This looks like an Electron app: restart it with debug_port=9222 to read its renderer console via browser_app action=attach.');
+        }
+        const logs = desktop.readLogs(app, { lines: 40 });
+        out.push('--- output ---', logs);
+        const problems = desktop.detectAppErrors(app.logs);
+        if (problems.length) out.push(`${problems.length} suspicious line(s) — inspect them with action=errors.`);
+        return out.join('\n');
+      }
+
+      if (act === 'stop') {
+        const stopped = await desktop.stopApp(appId);
+        return stopped ? `Desktop app "${appId}" stopped.` : `No desktop app "${appId}".`;
+      }
+
+      const app = requireApp();
+
+      if (act === 'status') {
+        return [
+          `id: ${appId}`,
+          `command: ${app.command}`,
+          `pid: ${app.pid}`,
+          `running: ${app.running ? 'yes' : `no (exit code ${app.exitCode ?? 'n/a'})`}`,
+          `display: ${app.display || 'n/a'}`,
+          `workdir: ${app.workdir}`,
+          `log_lines: ${app.logs.length}`,
+          `started_at: ${new Date(app.startedAt).toISOString()}`,
+        ].join('\n');
+      }
+
+      if (act === 'logs') {
+        return desktop.readLogs(app, {
+          lines: Math.max(1, Math.min(Number(lines) || 200, 2000)),
+          onlyErrors: Boolean(only_errors),
+        });
+      }
+
+      if (act === 'errors') {
+        return desktop.readLogs(app, { onlyErrors: true });
+      }
+
+      if (act === 'windows') {
+        const windows = await desktop.listWindows(app);
+        if (!windows.length) return `App "${appId}" has no visible window (yet).`;
+        return windows
+          .map(w => `${w.id} ${w.width}x${w.height}+${w.x}+${w.y} pid ${w.pid} "${w.title}"`)
+          .join('\n');
+      }
+
+      if (act === 'wait') {
+        if (title !== undefined || !Number(ms)) {
+          const win = await desktop.waitForWindow(app, { timeoutMs: timeout, title: title || '' });
+          return `Window ready: ${win.id} ${win.width}x${win.height}+${win.x}+${win.y} "${win.title}"`;
+        }
+        const pause = Math.max(100, Math.min(Number(ms) || 1000, 60000));
+        await new Promise(done => { setTimeout(done, pause); });
+        return `Waited ${pause}ms. ${desktop.readLogs(app, { lines: 20 })}`;
+      }
+
+      if (act === 'focus') {
+        const windows = await desktop.listWindows(app);
+        const target = window_id || windows[0]?.id;
+        if (!target) return `App "${appId}" has no window to focus.`;
+        await desktop.focusWindow(target, app.display);
+        return `Focused window ${target}.`;
+      }
+
+      if (act === 'screenshot') {
+        let target = window_id || null;
+        if (!target) {
+          try { target = (await desktop.listWindows(app))[0]?.id || null; } catch {}
+        }
+        emitToolProgress('desktop_app', { action: act, id: appId }, 'Capturing the window…');
+        const shot = await desktop.captureWindow({ windowId: target, path: shotPath(), display: app.display });
+        return `Screenshot saved to ${shot.path} (${shot.tool}${target ? `, window ${target}` : ', full screen'}).`;
+      }
+
+      if (act === 'click') {
+        if (!Number.isFinite(Number(x)) || !Number.isFinite(Number(y))) {
+          return 'Error: desktop_app click requires numeric "x" and "y" (window-relative when window_id is given, screen coordinates otherwise).';
+        }
+        const windows = await desktop.listWindows(app).catch(() => []);
+        const point = await desktop.clickAt({
+          x: Number(x),
+          y: Number(y),
+          button: Number(button) || 1,
+          windowId: window_id || null,
+          display: app.display,
+          windows,
+        });
+        await new Promise(done => { setTimeout(done, 400); });
+        const fresh = desktop.detectAppErrors(app.logs.slice(-30));
+        const head = `Clicked at ${point.x},${point.y}.`;
+        return fresh.length ? `${head}\nRecent suspicious output:\n${fresh.map(f => f.line).join('\n')}` : head;
+      }
+
+      if (act === 'type') {
+        if (text === undefined || text === null) return 'Error: desktop_app type requires "text".';
+        await desktop.typeText({ text: String(text), windowId: window_id || null, display: app.display });
+        await new Promise(done => { setTimeout(done, 300); });
+        return `Typed ${String(text).length} character(s) into the focused widget.`;
+      }
+
+      if (act === 'press') {
+        if (!keys) return 'Error: desktop_app press requires "keys" (e.g. Return, ctrl+s, alt+F4).';
+        await desktop.pressKeys({ keys: String(keys), windowId: window_id || null, display: app.display });
+        await new Promise(done => { setTimeout(done, 300); });
+        return `Pressed ${keys}.`;
+      }
+
+      return `Error: unsupported action "${action}". Use open|logs|errors|windows|wait|focus|screenshot|click|type|press|status|list|stop|capabilities.`;
+    } catch (error) {
+      return `Error: ${error.message}`;
+    }
+  },
+
   async repo_find_symbol({ symbol, path = '.', max_results = 80 }) {
     try {
       const q = String(symbol || '').trim();
@@ -1491,15 +1932,17 @@ export const toolHandlers = {
     }
   },
 
-  async read_pdf({ file_path, page_from = 1, page_to, max_chars = 20000, ocr = false, ocr_lang = 'eng', ocr_dpi = 200 }) {
+  async read_pdf({ file_path, page_from = 1, page_to, max_chars = 20000, ocr = false, ocr_lang = 'auto', ocr_dpi = 300 }) {
     try {
       if (!file_path) return 'Error: read_pdf requires file_path';
       const safeFrom = Math.max(1, Number(page_from) || 1);
       const safeTo = page_to == null ? null : Math.max(safeFrom, Number(page_to) || safeFrom);
       const charLimit = Math.max(1000, Math.min(Number(max_chars) || 20000, 200000));
-      const lang = String(ocr_lang || 'eng').trim() || 'eng';
-      const dpi = Math.max(72, Math.min(Number(ocr_dpi) || 200, 600));
+      const lang = String(ocr_lang || 'auto').trim() || 'auto';
+      const dpi = Math.max(150, Math.min(Number(ocr_dpi) || 300, 600));
       const forceOcr = Boolean(ocr);
+      let nativeText = '';
+      let ocrError = '';
 
       // Preferred path: pdftotext for real PDF text extraction.
       if (!forceOcr) {
@@ -1511,32 +1954,46 @@ export const toolHandlers = {
             maxBuffer: 20 * 1024 * 1024,
             signal: getToolAbortSignal(120000),
           });
-          const text = String(stdout || '').trim();
-          if (text) {
-            if (text.length > charLimit) return `${text.slice(0, charLimit)}\n... truncated at ${charLimit} chars`;
-            return text;
+          nativeText = String(stdout || '').trim();
+          if (isLikelyUsablePdfText(nativeText)) {
+            if (nativeText.length > charLimit) return `${nativeText.slice(0, charLimit)}\n... truncated at ${charLimit} chars`;
+            return nativeText;
           }
         } catch (pdfErr) {
           const missing = /ENOENT|not found/i.test(String(pdfErr?.message || ''));
           if (!missing && pdfErr?.stdout) {
-            const text = String(pdfErr.stdout).trim();
-            if (text) return text.length > charLimit ? `${text.slice(0, charLimit)}\n... truncated at ${charLimit} chars` : text;
+            nativeText = String(pdfErr.stdout).trim();
+            if (isLikelyUsablePdfText(nativeText)) {
+              return nativeText.length > charLimit ? `${nativeText.slice(0, charLimit)}\n... truncated at ${charLimit} chars` : nativeText;
+            }
           }
         }
       }
 
-      // OCR path (forced or fallback when text extraction produced nothing).
+      // Super OCR path: automatic for empty/suspicious native text, or forced by the model.
       try {
-        const ocrText = await extractPdfTextWithOcr({
+        const ocrResult = await extractPdfTextWithSuperOcr({
           filePath: file_path,
           pageFrom: safeFrom,
           pageTo: safeTo,
           lang,
           dpi,
           maxChars: charLimit,
+          signal: timeout => getToolAbortSignal(timeout),
+          onProgress: message => emitToolProgress('read_pdf', { file_path }, message),
         });
-        if (ocrText) return ocrText.length > charLimit ? `${ocrText.slice(0, charLimit)}\n... truncated at ${charLimit} chars` : ocrText;
-      } catch {}
+        if (ocrResult.text) {
+          const suffix = ocrResult.warning ? `\n\n[${ocrResult.warning}]` : '';
+          const result = `${ocrResult.text}${suffix}`;
+          return result.length > charLimit ? `${result.slice(0, charLimit)}\n... truncated at ${charLimit} chars` : result;
+        }
+      } catch (ocrErr) {
+        ocrError = String(ocrErr?.message || 'strumenti OCR non disponibili');
+      }
+
+      if (nativeText) {
+        return nativeText.length > charLimit ? `${nativeText.slice(0, charLimit)}\n... truncated at ${charLimit} chars` : nativeText;
+      }
 
       // Last fallback: binary strings extraction when pdf tools aren't installed.
       const { stdout } = await execFileAsync('strings', ['-n', '6', file_path], {
@@ -1549,7 +2006,10 @@ export const toolHandlers = {
         .filter(line => line.length > 0)
         .join('\n')
         .trim();
-      if (!text) return `No readable text found in PDF: ${file_path}`;
+      if (!text) {
+        const hint = ocrError ? `\nOCR error: ${ocrError}` : '';
+        return `No readable text found in PDF: ${file_path}${hint}`;
+      }
       return text.length > charLimit
         ? `${text.slice(0, charLimit)}\n... truncated at ${charLimit} chars`
         : text;
@@ -2235,6 +2695,70 @@ export const toolDefinitions = [
   {
     type: 'function',
     function: {
+      name: 'browser_app',
+      description: 'Open and drive a web app in a real browser (Chrome/Chromium via DevTools Protocol) and READ THE BROWSER CONSOLE: console messages, uncaught exceptions, failed requests and HTTP 4xx/5xx. Works on localhost dev servers. Use it to reproduce a bug in the UI, click and type like a user, then read the errors it produced. action=attach connects to an already running app that exposes --remote-debugging-port (e.g. an Electron desktop app).',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['open', 'attach', 'goto', 'click', 'type', 'press', 'eval', 'text', 'snapshot', 'check', 'console', 'errors', 'network', 'wait', 'screenshot', 'reload', 'status', 'list', 'close'], description: 'open (launch browser, optionally at url), attach (connect to an existing debugging port), goto, click, type, press, eval, text, snapshot (list clickable elements), check (verify elements are really usable: visible, enabled, not covered — with a selector it checks one and points at it, without one it checks the whole page), console, errors, network, wait, screenshot, reload, status, list, close' },
+          id: { type: 'string', description: 'Session id, so several apps can be driven at once. Default: default' },
+          url: { type: 'string', description: 'URL to load (action=open/goto). localhost is allowed.' },
+          selector: { type: 'string', description: 'CSS selector, or text=Label / label=Label / placeholder=Hint to match what is visible on the page (click/type/wait). For action=type the match is resolved to the actual control: naming a form label fills the field that label belongs to, and the tool fails loudly instead of typing into the wrong element.' },
+          text: { type: 'string', description: 'Text to type (action=type). Never echoed back in the result: only the character count and the field it went into.' },
+          key: { type: 'string', description: 'Key to press: Enter, Tab, Escape, ArrowDown, … (action=press)' },
+          expression: { type: 'string', description: 'JavaScript to evaluate in the page (action=eval)' },
+          port: { type: 'number', description: 'Debugging port to attach to (action=attach)' },
+          file_path: { type: 'string', description: 'Screenshot destination file. Default: .ettore/screenshots/<id>-<timestamp>.png' },
+          level: { type: 'string', enum: ['debug', 'info', 'warning', 'error'], description: 'Minimum console level to return (action=console). Default: info' },
+          limit: { type: 'number', minimum: 1, maximum: 400, description: 'Maximum messages/elements/requests to return. Default: 80' },
+          since_last: { type: 'boolean', description: 'Only console messages produced since the previous read. Default: false' },
+          only_failed: { type: 'boolean', description: 'action=network: only failed requests and HTTP >= 400. Default: true' },
+          headless: { type: 'boolean', description: 'Force headless (true) or a visible window (false). Default: visible when a desktop is available' },
+          submit: { type: 'boolean', description: 'action=type: press Enter after typing. Default: false' },
+          replace: { type: 'boolean', description: 'action=type: clear the field first. Default: true' },
+          full_page: { type: 'boolean', description: 'action=screenshot: capture beyond the viewport. Default: false' },
+          max_chars: { type: 'number', minimum: 200, maximum: 40000, description: 'action=text/eval: maximum characters returned. Default: 4000' },
+          ms: { type: 'number', minimum: 50, maximum: 60000, description: 'action=wait: pause in ms when no selector is given. Default: 1000' },
+          timeout_ms: { type: 'number', minimum: 1000, maximum: 300000, description: 'Navigation/wait timeout in ms. Default: 30000' },
+          width: { type: 'number', description: 'Window width on open. Default: 1280' },
+          height: { type: 'number', description: 'Window height on open. Default: 800' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'desktop_app',
+      description: 'Launch and drive a desktop (GUI) application: start it while capturing stdout/stderr (crashes, tracebacks, GTK/Qt criticals), list and screenshot its windows, click, type and press keys in it. Use it to reproduce a bug in a real desktop app before fixing the code. Clicking and typing need xdotool on X11; action=capabilities reports what is available.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['open', 'logs', 'errors', 'windows', 'wait', 'focus', 'screenshot', 'click', 'type', 'press', 'status', 'list', 'stop', 'capabilities'], description: 'open, logs, errors (only suspicious lines), windows, wait, focus, screenshot, click, type, press, status, list, stop, capabilities' },
+          id: { type: 'string', description: 'App id, so several apps can run at once. Default: default' },
+          command: { type: 'string', description: 'Command that starts the GUI app (action=open), e.g. "python3 app.py" or "npm run electron"' },
+          workdir: { type: 'string', description: 'Working directory for the command' },
+          file_path: { type: 'string', description: 'Screenshot destination file. Default: .ettore/screenshots/<id>-<timestamp>.png' },
+          window_id: { type: 'string', description: 'Target window id from action=windows (e.g. 0x03200007)' },
+          title: { type: 'string', description: 'action=wait: wait for a window whose title contains this text' },
+          x: { type: 'number', description: 'action=click: X coordinate (relative to window_id when given, screen otherwise)' },
+          y: { type: 'number', description: 'action=click: Y coordinate' },
+          button: { type: 'number', minimum: 1, maximum: 3, description: 'action=click: mouse button, 1=left 2=middle 3=right. Default: 1' },
+          text: { type: 'string', description: 'action=type: text to type into the focused widget' },
+          keys: { type: 'string', description: 'action=press: key or combination, e.g. Return, ctrl+s, alt+F4' },
+          lines: { type: 'number', minimum: 1, maximum: 2000, description: 'action=logs: tail size. Default: 200' },
+          only_errors: { type: 'boolean', description: 'action=logs: keep only suspicious lines. Default: false' },
+          virtual_display: { type: 'boolean', description: 'Run the app on a virtual X display (Xvfb). Default: true only when no desktop is available' },
+          debug_port: { type: 'number', description: 'Add --remote-debugging-port to the command (Electron/Chromium apps), so browser_app action=attach can read its console' },
+          ms: { type: 'number', minimum: 100, maximum: 60000, description: 'Settle time after open, or pause for action=wait. Default: 1000' },
+          timeout_ms: { type: 'number', minimum: 500, maximum: 300000, description: 'action=wait: window timeout in ms. Default: 15000' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'repo_find_symbol',
       description: 'Find occurrences of a symbol name across the repository with file:line output (rg-based). Useful for locating definitions/usages before editing.',
       parameters: {
@@ -2363,7 +2887,7 @@ export const toolDefinitions = [
     type: 'function',
     function: {
       name: 'read_pdf',
-      description: 'Extract readable text from a PDF file. Supports optional page range, OCR, and output truncation.',
+      description: 'Extract readable text from any PDF, including scanned or low-quality pages. Uses native extraction first and automatically activates Super OCR with preprocessing, deskew, denoise, adaptive thresholding, multiple Tesseract layouts, and automatic Italian/English language selection when native text is missing or unreliable.',
       parameters: {
         type: 'object',
         properties: {
@@ -2371,9 +2895,9 @@ export const toolDefinitions = [
           page_from: { type: 'number', minimum: 1, description: 'First page to read, 1-based. Default: 1' },
           page_to: { type: 'number', minimum: 1, description: 'Last page to read, 1-based (optional)' },
           max_chars: { type: 'number', minimum: 1000, maximum: 200000, description: 'Maximum characters to return, 1000-200000. Default: 20000' },
-          ocr: { type: 'boolean', description: 'If true, force OCR text extraction from rendered page images' },
-          ocr_lang: { type: 'string', description: 'Tesseract language code (e.g. eng, ita, eng+ita). Default: eng' },
-          ocr_dpi: { type: 'number', minimum: 72, maximum: 600, description: 'Render DPI for OCR, 72-600. Default: 200' }
+          ocr: { type: 'boolean', description: 'If true, force Super OCR even when the PDF contains selectable text. Default: false means automatic OCR fallback.' },
+          ocr_lang: { type: 'string', description: 'Tesseract language code (auto, eng, ita, or eng+ita). Default: auto, preferring ita+eng when installed.' },
+          ocr_dpi: { type: 'number', minimum: 150, maximum: 600, description: 'Render DPI for difficult scans, 150-600. Default: 300' }
         },
         required: ['file_path']
       }

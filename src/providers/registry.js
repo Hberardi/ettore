@@ -36,7 +36,7 @@ export const PROVIDER_REGISTRY = [
   {
     id: 'openai',
     name: 'OpenAI',
-    description: 'GPT-4o, GPT-4 Turbo, o1, o3',
+    description: 'GPT-5.6 Luna, GPT-4o, GPT-4 Turbo, o1, o3',
     icon: '🤖',
     requiresKey: true,
     keyHint: 'sk-...',

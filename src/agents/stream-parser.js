@@ -4,6 +4,10 @@
 //   <think>...</think>     — model chain-of-thought (DeepSeek R1, Qwen3, …)
 //   <todo>1. ...</todo>    — multi-step plan that drives the UI progress panel
 //   <done:N>               — step-N completion marker
+//   <plan>{...}</plan>     — explicit pre-execution plan (parsed separately
+//                            and surfaced to the user before the run starts)
+//   <decision>...</decision> — important decision the model wants logged
+//                            (alternatives considered, reasoning, etc.)
 //
 // Regexes are compiled once at module load. Pure functions live here; the
 // streaming state machine itself stays in agents/index.js.
@@ -15,6 +19,24 @@ export const TODO_CAPTURE_RE = /<\s*todo\s*>([\s\S]*?)<\s*\/\s*todo\s*>/i;
 export const THINK_OPEN_RE   = /<\s*(think|thinking|reasoning)(\s[^>]*)?\s*>/i;
 export const THINK_CLOSE_RE  = /<\s*\/\s*(think|thinking|reasoning)\s*>/i;
 export const THINK_TAG_RE    = /<\s*\/?\s*(think|thinking|reasoning)(\s[^>]*)?\s*>/gi;
+// Plan block — full matcher and capture-only variant. Tolerant of whitespace
+// and self-closing-ish shapes; the body is parsed by planner.extractPlan.
+export const PLAN_BLOCK_RE    = /<\s*plan\s*>[\s\S]*?<\s*\/\s*plan\s*>\n?/gi;
+export const PLAN_CAPTURE_RE  = /<\s*plan\s*>([\s\S]*?)<\s*\/\s*plan\s*>/i;
+// Decision block — the model can use this to surface choices it made
+// ("I went with X because Y, rejected Z because W"). The body is captured
+// verbatim and forwarded to workingMemory.decisions + a `decision` event
+// for the TUI to display.
+//
+// DECISION_BLOCK_RE has NO `g` flag on purpose: it is used with
+// `String.prototype.replace()` (which only needs a single match in normal
+// use) and is also asserted in tests with `.test()`. A global flag would
+// make `.test()` stateful (lastIndex carries across calls) and break
+// tests that assert multiple distinct inputs. DECISION_CAPTURE_RE DOES
+// need `g` because it is consumed by `String.prototype.matchAll`, which
+// requires the global flag.
+export const DECISION_BLOCK_RE   = /<\s*decision\s*>[\s\S]*?<\s*\/\s*decision\s*>\n?/i;
+export const DECISION_CAPTURE_RE = /<\s*decision\s*>([\s\S]*?)<\s*\/\s*decision\s*>/gi;
 
 // Invisible characters that some providers (notably MiniMax M2.7) insert
 // between `<` and the tag name. JavaScript's `\s` does NOT include U+200D
@@ -171,16 +193,35 @@ function buildWordAlternation(words = []) {
 
 function buildPartialTagRegex({ close = false } = {}) {
   const names = close
-    ? ['think', 'thinking', 'reasoning', 'todo']
-    : ['think', 'thinking', 'reasoning', 'todo', 'done'];
+    ? ['think', 'thinking', 'reasoning', 'todo', 'plan', 'decision']
+    : ['think', 'thinking', 'reasoning', 'todo', 'done', 'plan', 'decision'];
   const partialPattern = buildPrefixAlternation(names, { includeFull: false });
   const fullPattern = buildWordAlternation(names);
   const slash = close ? '\\/\\s*' : '';
-  const pieces = close ? ['<\\s*$', '<\\s*\\/\\s*$'] : ['<\\s*$'];
-  if (partialPattern) pieces.push(`<\\s*${slash}(?:${partialPattern})$`);
+  const attrSuffix = close ? '' : '(?:\\s*[:\\w-]*)?';
+  // Some models emit closing tags as `<\/plan>` — a literal backslash
+  // before the slash — to avoid prematurely closing a `<script>` context.
+  // The streaming parser must hold the buffer back for the backslash-escaped
+  // shapes too, otherwise a chunk ending in `text <\/pla` could leak
+  // partial markup into the visible reply.
+  const pieces = close
+    ? [
+        '<\\s*$',
+        '<\\s*\\/\\s*$',
+        // Bare backslash (`<`, `< `, `<\`, `<  \`).
+        '<\\s*\\\\$',
+        // Backslash-escaped slash, with or without a tag name fragment
+        // (`<\/`, `<\/plan`, `<\/pla`).
+        '<\\s*\\\\\\/\\s*$',
+      ]
+    : ['<\\s*$'];
+  if (partialPattern) {
+    pieces.push(`<\\s*${slash}(?:${partialPattern})$`);
+    if (close) pieces.push(`<\\s*\\\\${slash}(?:${partialPattern})$`);
+  }
   if (fullPattern) {
-    const attrSuffix = close ? '' : '(?:\\s*[:\\w-]*)?';
     pieces.push(`<\\s*${slash}(?:${fullPattern})${attrSuffix}$`);
+    if (close) pieces.push(`<\\s*\\\\${slash}(?:${fullPattern})${attrSuffix}$`);
   }
   return new RegExp(`(?:${pieces.join('|')})`, 'i');
 }
@@ -218,7 +259,17 @@ export function stripMarkers(text) {
     .replace(THINK_BLOCK_RE, '')
     .replace(THINK_TAG_RE, '')
     .replace(TODO_BLOCK_RE, '')
-    .replace(DONE_MARKER_RE, '');
+    .replace(DONE_MARKER_RE, '')
+    .replace(PLAN_BLOCK_RE, '')
+    .replace(DECISION_BLOCK_RE, '');
+}
+
+// Remove just the <plan>...</plan> block, leaving every other marker alone.
+// Used by the streaming path so the UI can keep rendering think/todo tags
+// while the plan block is being captured.
+export function stripPlanBlock(text) {
+  if (!text) return text;
+  return String(text).replace(PLAN_BLOCK_RE, '');
 }
 
 export function stripThinkTags(text) {

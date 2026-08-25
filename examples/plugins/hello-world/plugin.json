@@ -1,0 +1,10 @@
+{
+  "name": "hello-world",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "main": "index.js",
+  "description": "Example plugin: one tool, one slash command, one lifecycle hook.",
+  "author": "ettore@example.com",
+  "license": "MIT",
+  "permissions": ["fs:read"]
+}

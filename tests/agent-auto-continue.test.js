@@ -25,7 +25,7 @@ test('Agent auto-continues when a <todo> plan has unfinished steps', async () =>
         };
       }
       const system = messages[0]?.content || '';
-      assert.match(String(system), /auto-continue 1\/3/i);
+      assert.match(String(system), /auto-continue 1\/30/i);
       assert.match(String(system), /Step B/);
       assert.match(String(system), /Step C/);
       return { type: 'text', content: '<done:2>\n<done:3>\nFatto tutto.' };
@@ -142,6 +142,23 @@ test('Agent forces a retry when the model announces an action but never executes
   const agent = makeAgent(client);
   const emitter = new EventEmitter();
   await agent.run('continua', emitter);
+  assert.equal(turns, 2);
+});
+
+test('Agent retries a short diagnostic announcement instead of ending the turn', async () => {
+  let turns = 0;
+  const client = {
+    async turn(messages) {
+      turns++;
+      if (turns === 1) return { type: 'text', content: 'Diagnostico subito.' };
+      const nudge = messages.find(m => m.role === 'system' && /announced an action/i.test(String(m.content || '')));
+      assert.ok(nudge, 'expected a nudge after the diagnostic announcement');
+      return { type: 'text', content: 'Ho trovato il problema.' };
+    },
+  };
+
+  const agent = makeAgent(client);
+  await agent.run('L\'app non funziona', new EventEmitter());
   assert.equal(turns, 2);
 });
 

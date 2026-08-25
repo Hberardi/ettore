@@ -1,6 +1,6 @@
 {
   "name": "ettore-ai-assistant",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "description": "ETTORE - Advanced AI CLI Assistant",
   "type": "module",
   "main": "src/cli/index.js",
@@ -11,10 +11,14 @@
     "start": "node bin/cli.js",
     "dev": "node bin/cli.js",
     "test": "node --test \"tests/**/*.test.js\"",
+    "test:display": "python3 test_display.py",
+    "check": "npm test && npm run lint && npm run test:display",
+    "release:check": "npm run check",
     "eval": "node --test tests/agent-evals.test.js",
     "lint": "eslint src tests",
     "lint:fix": "eslint src tests --fix",
     "format": "eslint src tests --fix",
+    "prepublishOnly": "npm run release:check",
     "preinstall": "echo 'Installing ETTORE...'",
     "postinstall": "echo 'ETTORE installed! Run: ettore'"
   },

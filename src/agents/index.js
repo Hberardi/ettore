@@ -1,4 +1,4 @@
-import { toolHandlers, toolDefinitions, setToolAbortSignal, setAgentTodoSink, validateToolArgs, coerceToolArgsToSchema } from '../tools/index.js';
+import { toolHandlers, toolDefinitions, setToolAbortSignal, setAgentTodoSink, runWithToolAbortSignal, validateToolArgs, coerceToolArgsToSchema } from '../tools/index.js';
 import { EventEmitter, setMaxListeners as setTargetMaxListeners } from 'events';
 import { createHash } from 'crypto';
 import { stat } from 'fs/promises';
@@ -18,6 +18,10 @@ import {
   TODO_BLOCK_RE,
   DONE_MARKER_RE,
   TODO_CAPTURE_RE,
+  PLAN_BLOCK_RE,
+  PLAN_CAPTURE_RE,
+  DECISION_BLOCK_RE,
+  DECISION_CAPTURE_RE,
   THINK_OPEN_RE,
   THINK_CLOSE_RE,
   PARTIAL_TAG_OPEN_RE,
@@ -31,6 +35,7 @@ import {
   parseTodoBlock,
   extractMarkdownTodoList,
 } from './stream-parser.js';
+import { shouldPlanExplicitly, extractPlan, PLANNING_REMINDER } from './planner.js';
 import { parseTextToolCalls } from './text-tool-calls.js';
 import { translateProviderError } from './error-translator.js';
 import { renderSystemPrompt } from './prompts.js';
@@ -40,7 +45,7 @@ import {
   extractAnnouncement,
   responseAnnouncesUnexecutedAction,
   responseLooksLikeUnappliedCode,
-  toolBatchNeedsSequential,
+  toolBatchExecutionGroups,
   userLikelyRequestedWorkspaceEdit,
 } from './turn-recovery.js';
 import { redactSecrets } from '../utils/secrets.js';
@@ -54,6 +59,7 @@ import { selectToolDefinitions, selectedToolNames } from './tool-router.js';
 import { authorizeToolAccess, normalizeToolArgsForWorkspace } from '../tools/workspace-policy.js';
 import { buildVisionContent } from '../utils/images.js';
 import { isWebImageResult } from '../tools/web-image.js';
+import { SkillSystem } from '../skills/index.js';
 
 // Increase default max listeners to avoid AbortSignal warnings
 EventEmitter.setMaxListeners(20);
@@ -63,6 +69,27 @@ const PLAN_TOOLS = toolDefinitions.filter(t =>
 );
 
 const LOOP_GUARDED_TOOLS = new Set(['repo_map', 'glob', 'grep', 'list_dir', 'file_info', 'git_status', 'git_diff', 'websearch', 'webfetch', 'web_image']);
+
+// Tools that are NOT strictly loop-guarded but still need a ceiling. `read`
+// is the dangerous one: re-reading a different range is normal work, so it
+// cannot be deduped on the second call like a grep — but the *same* range,
+// over an unchanged file, cannot return anything new. Without a budget the
+// model can burn the whole per-turn tool-call allowance on it (81 identical
+// reads is what motivated this). The Nth identical call is refused with an
+// instruction instead.
+const REPEAT_BUDGET_TOOLS = { read: 2 };
+
+// Tools that actually mutate state and therefore trigger the post-
+// execution self-critique check. Read-only tools are intentionally
+// excluded — there is nothing to critique when the side effect is zero.
+const MUTATION_TOOL_NAMES = new Set([
+  'write',
+  'edit',
+  'apply_patch_structured',
+  'bash',
+  'bash_session',
+  'memory_write',
+]);
 const AGENT_TURN_TIMEOUT_MS = 300_000;
 // How many times per user turn a text-leaked tool-call blob may be converted
 // back into real tool calls before the loop stops covering for the model.
@@ -89,6 +116,10 @@ export function getToolTimeoutMs(name) {
   if (name === 'repo_find_symbol') return 60_000;
   if (name === 'dev_server') return 120_000;
   if (name === 'browser_check') return 60_000;
+  // Driving a real app (page loads, waits for selectors, window startup) is
+  // slower than a single fetch, but still bounded.
+  if (name === 'browser_app') return 180_000;
+  if (name === 'desktop_app') return 180_000;
   if (name === 'dep_inspect') return 120_000;
   if (name === 'glob' || name === 'grep' || name === 'list_dir' || name === 'git_status' || name === 'git_diff') return 60_000;
   if (name === 'read_pdf' || name === 'read_doc' || name === 'read_server_console' || name === 'websearch' || name === 'webfetch') return 120_000;
@@ -98,21 +129,48 @@ export function getToolTimeoutMs(name) {
   return 60_000;
 }
 
-async function executeToolWithTimeout(name, fn) {
-  const timeoutMs = getToolTimeoutMs(name);
-  if (!timeoutMs) return fn();
+export async function executeToolWithTimeout(name, fn, parentSignal = null, timeoutOverride = undefined) {
+  const timeoutMs = timeoutOverride === undefined ? getToolTimeoutMs(name) : Math.max(0, Number(timeoutOverride) || 0);
+  if (!timeoutMs) return runWithToolAbortSignal(parentSignal, () => fn(parentSignal));
+
+  const toolController = new AbortController();
+  const abortFromParent = () => {
+    if (!toolController.signal.aborted) toolController.abort(parentSignal?.reason);
+  };
+  if (parentSignal?.aborted) abortFromParent();
+  else parentSignal?.addEventListener?.('abort', abortFromParent, { once: true });
+
   let timer;
+  let timedOut = false;
+  let abortPromise;
+  const parentAbortPromise = parentSignal
+    ? new Promise((resolve) => {
+        abortPromise = () => resolve(`Error: tool "${name}" aborted`);
+        if (parentSignal.aborted) abortPromise();
+        else parentSignal.addEventListener?.('abort', abortPromise, { once: true });
+      })
+    : null;
   try {
+    const timeoutPromise = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        toolController.abort(new Error(`tool "${name}" timed out`));
+        resolve(`Error: tool "${name}" timed out after ${Math.max(1, Math.round(timeoutMs / 1000))}s`);
+      }, timeoutMs);
+    });
+    const operation = runWithToolAbortSignal(toolController.signal, () => fn(toolController.signal));
+    const operationResult = operation.then((value) => {
+      return timedOut ? `Error: tool "${name}" timed out after ${Math.max(1, Math.round(timeoutMs / 1000))}s` : value;
+    });
     return await Promise.race([
-      fn(),
-      new Promise((resolve) => {
-        timer = setTimeout(() => {
-          resolve(`Error: tool "${name}" timed out after ${Math.round(timeoutMs / 1000)}s`);
-        }, timeoutMs);
-      }),
+      operationResult,
+      timeoutPromise,
+      ...(parentAbortPromise ? [parentAbortPromise] : []),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+    parentSignal?.removeEventListener?.('abort', abortFromParent);
+    if (abortPromise) parentSignal?.removeEventListener?.('abort', abortPromise);
   }
 }
 
@@ -152,9 +210,18 @@ function describeArgs(args) {
     .join(', ') + (entries.length > 4 ? ', …' : '');
 }
 
-function waitMs(ms) {
-  return new Promise(resolve => {
-    setTimeout(resolve, ms);
+function waitMs(ms, signal = null) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason || new Error('aborted'));
+    };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener?.('abort', onAbort, { once: true });
   });
 }
 
@@ -167,7 +234,13 @@ export class Agent {
     this.config = config;
     this.mode = mode;
     this.messages = [];
-    this.maxIterations = 30;
+    // Hard cap on the per-turn tool-calling loop. Bumped from a fixed 30 to
+    // a config-overridable value: long coding tasks (e.g. scaffolding a new
+    // module with tests, multi-file refactors) routinely need 40-60
+    // iterations on slower models, and the hardcoded 30 silently truncated
+    // them with a "Maximum agent iterations reached" error. Keep a finite
+    // default, but leave the limit configurable for unusually large tasks.
+    this.maxIterations = Math.max(1, Number(config.maxIterations) || 50);
     this.maxReadOnlyToolBatches = Math.max(2, Number(config.maxReadOnlyToolBatches) || 12);
     this.maxToolCallsPerTurn = Number(config.maxToolCallsPerTurn) || 80;
     this.maxToolsPerRequest = Math.max(4, Math.min(28, Number(config.maxToolsPerRequest) || 16));
@@ -194,13 +267,31 @@ export class Agent {
     this._todoDoneIdx = new Set();
     this._todoFromBlock = false;
     this._autoContinueCount = 0;
-    this.maxAutoContinues = 3;
+    // Auto-continue cap: how many times the agent will silently re-prompt
+    // the model to finish an unfinished <todo> plan before giving up and
+    // emitting `autoContinueExhausted`. Default bumped from 3 → 30 to
+    // match `maxIterations` — a multi-step task that survives 30 retries
+    // is genuinely stuck, but truncating at 3 forced the user to type
+    // "continua" repeatedly during normal long-running workflows. Config
+    // override available for tests / pathological cases.
+    this.maxAutoContinues = Math.max(1, Number(config.maxAutoContinues) || 30);
     // After write/edit, force one extra turn to verify the changes (syntax /
     // lint / test) unless the model already ran a verifier. Opt-out via
     // config.verifyAfterEdit=false (tests use this).
     this.verifyAfterEdit = config.verifyAfterEdit !== false;
     this.cavemanLevel = config.cavemanLevel || null;
     this._pendingTurnOverlay = '';
+
+    // Plugin system: when a registry is provided, the agent merges its
+    // tools and handlers with the built-in ones. Set via config so callers
+    // (TUI, CLI one-shot, tests) can opt in without touching this class.
+    // The handler map is computed once at construction and cached for the
+    // lifetime of the agent — when a plugin is enabled / disabled at
+    // runtime, the caller is expected to rebuild the agent (the slash
+    // `/plugins` command does this via `rebuildAgent` in the TUI).
+    this._pluginRegistry = config.pluginRegistry || null;
+    this._mergedToolDefinitions = null;
+    this._mergedToolHandlers = null;
 
     const workdir = config.workdir || process.cwd();
     this._systemTemplate = renderSystemPrompt(mode, workdir, {
@@ -210,6 +301,15 @@ export class Agent {
     });
     this._systemPromptBase = this._systemTemplate;
     this._workdir = workdir;
+    this.skillSystem = config.skillSystem || new SkillSystem();
+    this._activeSkills = [];
+    this._activeSkillPrompt = '';
+    this._skillPromptText = '';
+    this._skillsReady = this.skillSystem.loadAllSkills({
+      projectDir: workdir,
+      skillsDir: config.skillsDir,
+      global: config.skillsGlobal !== false,
+    }).catch(() => []);
     this.messages.push({ role: 'system', content: this._systemPromptBase });
 
     // Degrade to lite prompt only when capability is explicitly 'lite' or
@@ -247,6 +347,93 @@ export class Agent {
     } catch {
       return null;
     }
+  }
+
+  // Returns the full set of tool definitions (provider-shape) the model
+  // sees on each turn. With a plugin registry attached, plugins are
+  // appended to the built-in set. Cached because `toolDefinitions` is a
+  // module-level constant and plugin entries are stable for the agent's
+  // lifetime (the TUI rebuilds the agent on enable/disable).
+  _getAllToolDefinitions() {
+    if (this._pluginRegistry) {
+      if (!this._mergedToolDefinitions) {
+        this._mergedToolDefinitions = this._pluginRegistry.getAllToolDefinitions();
+      }
+      return this._mergedToolDefinitions;
+    }
+    return toolDefinitions;
+  }
+
+  // Returns the merged tool handler map (name → async fn). Plugin
+  // handlers are wrapped in `PluginRegistry.getAllToolHandlers` so they
+  // see only a controlled context. Cached for the same reason as above.
+  _getAllToolHandlers() {
+    if (this._pluginRegistry) {
+      if (!this._mergedToolHandlers) {
+        this._mergedToolHandlers = this._pluginRegistry.getAllToolHandlers({
+          // Trust boundary: this factory runs in the agent process. The
+          // returned object becomes part of `ctx` in every plugin tool
+          // call. Only fields safe for a plugin to see are exposed.
+          contextFactory: () => ({
+            workspace: this._workdir,
+            agentMode: this.mode,
+            safetyProfile: this.safetyProfile,
+          }),
+        });
+      }
+      return this._mergedToolHandlers;
+    }
+    return toolHandlers;
+  }
+
+  // Tools that actually mutate the workspace / external systems. The
+  // self-critique check only fires for these — read-only tools don't
+  // need post-execution review. Kept as a set for O(1) lookup; new
+  // mutation tools should be added here so they get the same treatment.
+  _isMutationTool(name) {
+    return MUTATION_TOOL_NAMES.has(String(name || ''));
+  }
+
+  // Strip out large / sensitive fields from the args object before it
+  // rides the `critiqueCheck` event into logs or the UI. For `write`
+  // and `edit` the `content` / `new_string` are the bulk of the payload
+  // and the TUI does not need them — it can pull them from the file
+  // itself if necessary. Returns a shallow copy of the args.
+  _safeArgsForCritique(name, args) {
+    const safe = {};
+    const drop = new Set(['content', 'new_string', 'old_string']);
+    for (const [k, v] of Object.entries(args || {})) {
+      if (drop.has(k)) {
+        safe[k] = `<${String(v || '').length} chars>`;
+      } else if (typeof v === 'string' && v.length > 200) {
+        safe[k] = `${v.slice(0, 200)}…`;
+      } else {
+        safe[k] = v;
+      }
+    }
+    return { tool: name, ...safe };
+  }
+
+  // Build a one-line human-readable summary of a mutation result for
+  // the TUI to render in the critique panel. The summary is derived
+  // from the output text — no model call, no LLM judgment. It is just
+  // a small heuristic so the user can see at a glance what happened.
+  _summarizeMutationOutput(name, args, output) {
+    const text = String(output || '');
+    if (text.startsWith('Error:')) {
+      return `✗ ${name} failed: ${text.slice(0, 120)}`;
+    }
+    if (name === 'write') {
+      return `✓ wrote ${args.file_path || 'file'}`;
+    }
+    if (name === 'edit' || name === 'apply_patch_structured') {
+      return `✓ patched ${args.file_path || 'file'}`;
+    }
+    if (name === 'bash' || name === 'bash_session') {
+      const cmd = String(args.command || '').slice(0, 80);
+      return `✓ ran: ${cmd}${cmd.length >= 80 ? '…' : ''}`;
+    }
+    return `✓ ${name} ok`;
   }
 
   async _learnFromTurn(userPrompt, finalText = '') {
@@ -298,6 +485,7 @@ export class Agent {
       cacheEntries: 0,
       ledgerRepairs: 0,
       routedTools: [],
+      activeSkills: [],
       turnState: 'idle',
       stateTransitions: [],
       workspaceRevision: 0,
@@ -325,15 +513,45 @@ export class Agent {
     this.workingMemory.updatedAt = new Date().toISOString();
   }
 
-  _shouldSkipDuplicateTool(name, args = {}) {
-    if (!LOOP_GUARDED_TOOLS.has(name)) return null;
+  // size+mtime, the same fingerprint the read cache keys on. Cheap, and it
+  // tells a real content change (including one made by a shell command) from
+  // a pure repeat.
+  async _fileFingerprint(filePath) {
+    if (!filePath) return null;
+    try {
+      const st = await stat(filePath);
+      return `${st.size}|${Math.floor(st.mtimeMs)}`;
+    } catch {
+      return null;
+    }
+  }
+
+  async _shouldSkipDuplicateTool(name, args = {}) {
+    const budget = REPEAT_BUDGET_TOOLS[name];
+    if (!LOOP_GUARDED_TOOLS.has(name) && budget === undefined) return null;
     const key = this._toolCallKey(name, args);
     const previous = this.workingMemory.toolCalls[key];
     if (!previous || previous.workspaceRevision !== this.workingMemory.workspaceRevision) return null;
-    if (previous.count < 1) return null;
+
+    if (budget === undefined) {
+      if (previous.count < 1) return null;
+      return {
+        key,
+        reason: `Skipped duplicate ${name} call with identical arguments. Use the earlier tool result, or refine the query/path if more detail is needed.`,
+      };
+    }
+
+    if (previous.count < budget) return null;
+    // workspaceRevision only moves on write/edit/apply_patch. A file touched
+    // by bash or by an external editor still deserves a fresh read.
+    if (name === 'read' && previous.fingerprint) {
+      const current = await this._fileFingerprint(args.file_path);
+      if (current && current !== previous.fingerprint) return null;
+    }
     return {
       key,
-      reason: `Skipped duplicate ${name} call with identical arguments. Use the earlier tool result, or refine the query/path if more detail is needed.`,
+      reason: `Skipped ${name}: these exact arguments already ran ${previous.count} times this turn and the file has not changed since. `
+        + `Repeating the call cannot return anything new — use the content you already have, read a different range, or act on it.`,
     };
   }
 
@@ -376,7 +594,10 @@ export class Agent {
       lastOutputHash: this._shortHash(output),
     };
 
-    if (name === 'read') await this._rememberFileSeen(args.file_path, args, output);
+    if (name === 'read') {
+      wm.toolCalls[key].fingerprint = await this._fileFingerprint(args.file_path);
+      await this._rememberFileSeen(args.file_path, args, output);
+    }
     if (name === 'write' || name === 'edit' || name === 'apply_patch_structured') {
       wm.workspaceRevision++;
       wm.filesSeen[args.file_path] = {
@@ -416,6 +637,7 @@ export class Agent {
       turnState: wm.turnState || 'idle',
       stateTransitions: wm.stateTransitions || [],
       workspaceRevision: wm.workspaceRevision,
+      decisions: wm.decisions || [],
       updatedAt: wm.updatedAt,
     };
   }
@@ -606,9 +828,31 @@ export class Agent {
 
   _renderActiveSystemPrompt() {
     const base = this._systemPromptBase || this._systemTemplate || '';
+    const skillPrompt = String(this._activeSkillPrompt || '').trim();
     const overlay = String(this._pendingTurnOverlay || '').trim();
-    if (!overlay) return base;
-    return `${base}\n\nTURN RECOVERY OVERLAY\n${overlay}`;
+    let prompt = skillPrompt ? `${base}${skillPrompt}` : base;
+    if (overlay) prompt += `\n\nTURN RECOVERY OVERLAY\n${overlay}`;
+    return prompt;
+  }
+
+  _activateSkills(prompt) {
+    this._skillPromptText = String(prompt || '');
+    this._activeSkills = this.skillSystem.matchSkills(this._skillPromptText);
+    this._activeSkillPrompt = this.skillSystem.getPromptForSkills(this._activeSkills);
+    this.workingMemory.activeSkills = this._activeSkills.map(skill => skill.name);
+    this._refreshActiveSystemPrompt();
+    return this._activeSkills;
+  }
+
+  async reloadSkills() {
+    this._skillsReady = this.skillSystem.loadAllSkills({
+      projectDir: this._workdir,
+      skillsDir: this.config.skillsDir,
+      global: this.config.skillsGlobal !== false,
+    }).catch(() => []);
+    await this._skillsReady;
+    this._activateSkills(this._skillPromptText);
+    return this.skillSystem.getAllSkills();
   }
 
   _refreshActiveSystemPrompt() {
@@ -638,6 +882,12 @@ export class Agent {
   async run(userPrompt, emitter, options = {}) {
     const promptText = String(userPrompt || '');
     const imageAttachments = Array.isArray(options.imageAttachments) ? options.imageAttachments : [];
+    await this._skillsReady;
+    // A previous turn may have created or edited a SKILL.md through the normal
+    // write tool. Refresh the small filesystem catalog so the next prompt can
+    // activate it without a restart or manual reload command.
+    await this.reloadSkills();
+    this._activateSkills(promptText);
     // Abort any previous run
     if (this.abortController) {
       this.abortController.abort();
@@ -687,6 +937,20 @@ export class Agent {
       role: 'user',
       content: imageAttachments.length ? buildVisionContent(promptText, imageAttachments) : promptText,
     });
+
+    // Explicit planning gate: for non-trivial tasks, append a short reminder
+    // that nudges the model to emit a structured <plan>...</plan> block on
+    // its first turn. The plan rides on the existing first-turn response —
+    // no extra LLM call, no extra latency. The TUI can surface the plan to
+    // the user, and the user can correct/cancel before the tool loop starts.
+    const planningEnabled = shouldPlanExplicitly(promptText, this.config);
+    if (planningEnabled) {
+      this.messages.push({ role: 'user', content: PLANNING_REMINDER });
+      this._planningActive = true;
+      emitter?.emit('planningStarted', { prompt: promptText });
+      this._debugLog(emitter, 'turn.planning_started', { promptLength: promptText.length });
+    }
+
     emitTurnState('started');
     this._debugLog(emitter, 'turn.started', { mode: this.mode, provider: this.config.provider, model: this.config.model });
     this._updateWorkingMemoryGoal(promptText);
@@ -696,6 +960,8 @@ export class Agent {
     this._todoDoneIdx = new Set();
     this._todoFromBlock = false;
     this._autoContinueCount = 0;
+    this._planEmitted = false;
+    this._plan = null;
 
     let iterations = 0;
     let todoEmitted = false;
@@ -706,6 +972,7 @@ export class Agent {
     let toolCallCount = 0;
     let readOnlyToolBatchCount = 0;
     let forceTextOnlyNextTurn = false;
+    let toolBudgetFinalizeUsed = false;
     // Tool calls the model printed as text instead of emitting natively. Capped
     // so a model that only ever leaks XML cannot spin the loop forever.
     let textToolCallRecoveries = 0;
@@ -797,12 +1064,13 @@ export class Agent {
           touchedFiles: touchedFiles.size,
           verificationNeeded: mutationToolUsed && !verificationDone,
           maxTools: this.maxToolsPerRequest,
+          includePluginTools: Boolean(this._pluginRegistry),
         };
         const tools = forceTextOnlyNextTurn || this._isLite
           ? []
           : this.dynamicToolRouting
-            ? selectToolDefinitions(toolDefinitions, toolRouteContext)
-            : this.mode === 'plan' ? PLAN_TOOLS : toolDefinitions;
+            ? selectToolDefinitions(this._getAllToolDefinitions(), toolRouteContext)
+            : this.mode === 'plan' ? PLAN_TOOLS : this._getAllToolDefinitions();
         this.workingMemory.routedTools = selectedToolNames(tools);
         emitter?.emit('toolRoute', {
           count: tools.length,
@@ -828,9 +1096,11 @@ export class Agent {
 
         // Auto-compress context when it exceeds the dynamic threshold (~30% of
         // context window).  Runs every iteration so mid-turn growth from tool
-        // results is caught, not just the pre-loop snapshot.
+        // results is caught, not just the pre-loop snapshot. Forward the
+        // controller signal so a user cancel unwinds the inner LLM call and
+        // the inner call has its own timeout — see compressor.js.
         if (this.compressor.autoEnabled && this.compressor.needsCompression(this.messages)) {
-          this.messages = await this.compressor.compress(this.messages, emitter);
+          this.messages = await this.compressor.compress(this.messages, emitter, controller.signal);
           emitter?.emit('tokenCount', estimateTokens(this.messages));
         }
 
@@ -960,6 +1230,68 @@ export class Agent {
             }
           }
 
+          // Parse <plan>...</plan> block from the first response. Same
+          // tolerance as the todo block, but the body is JSON or a numbered
+          // list, parsed by planner.extractPlan. The block itself is hidden
+          // from the visible stream (the UI shows the plan in a dedicated
+          // panel via the `plan` event), but only stripped once parsed —
+          // partial blocks are kept in parseBuffer until close.
+          if (this._planningActive && !this._planEmitted) {
+            const planMatch = parseBuffer.match(PLAN_CAPTURE_RE);
+            if (planMatch) {
+              const plan = extractPlan(planMatch[1]);
+              if (plan && plan.steps && plan.steps.length) {
+                this._plan = plan;
+                this._planEmitted = true;
+                this.workingMemory.plan = plan;
+                emitter?.emit('plan', plan);
+                this._debugLog(emitter, 'turn.plan_proposed', {
+                  steps: plan.steps.length,
+                  goal: plan.goal.slice(0, 80),
+                });
+              }
+              // Strip the block from both buffers regardless of parse success
+              // so a malformed plan does not leak JSON scaffolding into the
+              // visible reply. The raw body is preserved in plan.raw if it
+              // parsed.
+              parseBuffer = parseBuffer.replace(PLAN_BLOCK_RE, '');
+              emitBuffer  = emitBuffer.replace(PLAN_BLOCK_RE, '');
+            }
+          }
+
+          // Parse <decision>...</decision> blocks — the model can emit
+          // these throughout a turn to flag important choices (e.g. "I went
+          // with X because Y, rejected Z because W"). Each block becomes
+          // a structured entry in workingMemory.decisions, capped at 32
+          // entries to keep memory bounded across long sessions. The block
+          // itself is stripped from the visible stream — the UI consumes
+          // the entries via the `decision` event.
+          const decisionMatches = [...parseBuffer.matchAll(DECISION_CAPTURE_RE)];
+          if (decisionMatches.length) {
+            for (const m of decisionMatches) {
+              const body = String(m[1] || '').trim();
+              if (!body) continue;
+              const entry = {
+                text: body.slice(0, 1000),
+                at: new Date().toISOString(),
+              };
+              if (!Array.isArray(this.workingMemory.decisions)) {
+                this.workingMemory.decisions = [];
+              }
+              this.workingMemory.decisions.push(entry);
+              // Cap at 32 — beyond that, drop the oldest.
+              if (this.workingMemory.decisions.length > 32) {
+                this.workingMemory.decisions.splice(0, this.workingMemory.decisions.length - 32);
+              }
+              emitter?.emit('decision', entry);
+              this._debugLog(emitter, 'turn.decision_logged', {
+                preview: body.slice(0, 80),
+              });
+            }
+            parseBuffer = parseBuffer.replace(DECISION_BLOCK_RE, '');
+            emitBuffer  = emitBuffer.replace(DECISION_BLOCK_RE, '');
+          }
+
           // Parse <done:N> markers — tolerant of whitespace, case, and self-closing.
           // Handles: <done:1>, <done : 1>, <DONE:1/>, <done:1 />
           const doneMatches = [...parseBuffer.matchAll(DONE_MARKER_RE)];
@@ -1035,6 +1367,24 @@ export class Agent {
         pendingThinkClose = '';
         parseBuffer = '';
 
+        // A few providers ignore the empty tool list sent for the final
+        // recovery turn and return another structured tool call anyway. Do
+        // not execute it and do not fall through to the generic max-iteration
+        // error: the work already performed is still useful, and the user
+        // can continue from this preserved conversation on the next prompt.
+        if (forceTextOnlyNextTurn && iterations === this.maxIterations && result.type === 'tool_calls') {
+          const summary = `Ho raggiunto il limite di ${this.maxIterations} passaggi in questo turno. Il lavoro già eseguito è conservato: continuo da qui.`;
+          this.messages.push({ role: 'assistant', content: summary });
+          emitter?.emit('complete', summary);
+          emitTurnState('completed', { reason: 'max_iterations_recovered' });
+          this._debugLog(emitter, 'turn.completed', {
+            iterations,
+            toolCallCount,
+            reason: 'max_iterations_recovered',
+          });
+          return summary;
+        }
+
         // ── Text-leaked tool calls ─────────────────────────────────────────
         // MiniMax M2.x/M3 sometimes ship their XML tool-call protocol as
         // assistant *content* instead of as structured tool_calls deltas.
@@ -1100,6 +1450,28 @@ export class Agent {
           }
         }
 
+        // Parse <plan> block from final result if streaming did not see it
+        // (e.g. the model emitted the whole block in a single non-streamed
+        // turn, or the block landed across a chunk boundary the parser could
+        // not stitch). Same emit contract as the streaming path.
+        if (this._planningActive && !this._planEmitted) {
+          const planMatch = result.content.match(PLAN_CAPTURE_RE);
+          if (planMatch) {
+            const plan = extractPlan(planMatch[1]);
+            if (plan && plan.steps && plan.steps.length) {
+              this._plan = plan;
+              this._planEmitted = true;
+              this.workingMemory.plan = plan;
+              emitter?.emit('plan', plan);
+              this._debugLog(emitter, 'turn.plan_proposed', {
+                steps: plan.steps.length,
+                goal: plan.goal.slice(0, 80),
+                source: 'final',
+              });
+            }
+          }
+        }
+
         // Pick up any <done:N> markers from the final content too — covers the
         // non-streaming code path where onToken never fires.
         if (this._todoFromBlock) {
@@ -1110,6 +1482,32 @@ export class Agent {
               this._todoDoneIdx.add(n - 1);
               emitter?.emit('todoDone', n - 1);
             }
+          }
+        }
+
+        // Pick up <decision> blocks from the final content too — same
+        // rationale as the done-marker fallback above (covers non-streamed
+        // responses where onToken never fired). The streaming path already
+        // strips the block from emitBuffer; here we only need to populate
+        // workingMemory.decisions and emit the event for any block the
+        // streaming parser missed.
+        const finalDecisionMatches = [...String(result.content || '').matchAll(DECISION_CAPTURE_RE)];
+        if (finalDecisionMatches.length) {
+          if (!Array.isArray(this.workingMemory.decisions)) {
+            this.workingMemory.decisions = [];
+          }
+          for (const m of finalDecisionMatches) {
+            const body = String(m[1] || '').trim();
+            if (!body) continue;
+            const entry = { text: body.slice(0, 1000), at: new Date().toISOString() };
+            this.workingMemory.decisions.push(entry);
+            if (this.workingMemory.decisions.length > 32) {
+              this.workingMemory.decisions.splice(0, this.workingMemory.decisions.length - 32);
+            }
+            emitter?.emit('decision', entry);
+            this._debugLog(emitter, 'turn.decision_logged_final', {
+              preview: body.slice(0, 80),
+            });
           }
         }
 
@@ -1322,6 +1720,25 @@ export class Agent {
         const limit = this.maxToolCallsPerTurn;
         const attempted = toolCallCount + result.tool_calls.length;
         const callSummary = callNames.join(', ');
+        // First breach: land the turn instead of losing it. Every other loop
+        // brake in this file (duplicate batches, read-only streaks, invalid
+        // tool calls, iteration ceiling) gives the model one text-only turn to
+        // report what it found; the tool-call budget was the only one that
+        // threw away up to `limit` tool calls of real work. The rejected batch
+        // is not executed and its assistant tool_calls are not persisted —
+        // strict providers reject a tool_call without a matching result.
+        if (!toolBudgetFinalizeUsed) {
+          toolBudgetFinalizeUsed = true;
+          forceTextOnlyNextTurn = true;
+          this._queueNamedTurnOverlay('tool_loop_finalize', {
+            reason: `the ${limit} tool-call budget for this turn is exhausted; answer with what you already have`,
+          });
+          emitter?.emit('loopRecovery', { reason: 'tool_call_limit', iteration: iterations });
+          this._debugLog(emitter, 'turn.tool_call_limit_finalize', { limit, attempted, callNames });
+          continue;
+        }
+        // Second breach: the model kept calling tools even after being sent an
+        // empty tool list. Now it is a hard stop.
         emitter?.emit('error',
           `Tool-call limit reached for this turn (${limit}). The model tried to issue ${attempted} tool-calls in a single turn: [${callSummary}]. ` +
           `This usually means the model is stuck in a loop or the task is large enough to need more headroom. ` +
@@ -1359,7 +1776,7 @@ export class Agent {
 
         emitter?.emit('toolStart', { id: askUserCall.id, name: 'ask_user', args: askUserArgs });
 
-        const handler = toolHandlers['ask_user'];
+        const handler = this._getAllToolHandlers()['ask_user'];
         let askUserOutput;
         if (handler) {
           try { askUserOutput = await handler(askUserArgs); }
@@ -1419,7 +1836,7 @@ export class Agent {
       validTools.forEach(p => emitter?.emit('toolStart', { id: p.id, name: p.name, args: p.args }));
 
       const executeParsedTool = async (p) => {
-        const handler = toolHandlers[p.name];
+        const handler = this._getAllToolHandlers()[p.name];
 
         // Pre-flight schema validation: catch tool_use blocks emitted with
         // missing/empty required args (seen with MiniMax M2.7 calling
@@ -1439,7 +1856,7 @@ export class Agent {
           return { ...p, output, contextOutput: output, skipped: true, policyDenied: true };
         }
 
-        const duplicate = this._shouldSkipDuplicateTool(p.name, p.args);
+        const duplicate = await this._shouldSkipDuplicateTool(p.name, p.args);
         if (duplicate) {
           const output = duplicate.reason;
           await this._recordToolExecution(p.name, p.args, output, { skipped: true });
@@ -1462,8 +1879,18 @@ export class Agent {
         let imageAttachment = null;
         let retries = 0;
         if (handler) {
+          // Emit a synthetic "Avvio…" so the TUI shows immediate feedback even
+          // for tools that don't emit their own progress (read, write, edit,
+          // grep, glob, git_*, list_dir, file_info, …). Tools that emit their
+          // own progress overwrite this within a few ms, so it's a no-op for
+          // them but a critical heartbeat for the silent ones.
+          emitter?.emit('toolProgress', {
+            name: p.name,
+            key: '',
+            message: 'Avvio…',
+          });
           try {
-            output = await executeToolWithTimeout(p.name, () => handler(p.args));
+            output = await executeToolWithTimeout(p.name, (signal) => handler(p.args, { signal }), controller.signal);
             if (isTransientToolError(output)) {
               const maxRetries = 2;
               for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -1474,8 +1901,8 @@ export class Agent {
                   key: p.args?.file_path || p.args?.command || '',
                   message: `Transient error, retry ${attempt}/${maxRetries} in ${Math.round(backoffMs / 1000)}s`,
                 });
-                await waitMs(backoffMs);
-                output = await executeToolWithTimeout(p.name, () => handler(p.args));
+                await waitMs(backoffMs, controller.signal);
+                output = await executeToolWithTimeout(p.name, (signal) => handler(p.args, { signal }), controller.signal);
                 if (!isTransientToolError(output)) break;
               }
             }
@@ -1528,6 +1955,29 @@ export class Agent {
         }
         await this._recordToolExecution(p.name, p.args, output, { summarized });
         if (p.name === 'repo_map') repoMapUsedThisTurn = true;
+
+        // Self-critique for mutation tools: emit a lightweight signal so
+        // the TUI (and any future agent-level reflection) can see what
+        // the model just changed, and whether the change was clean. The
+        // check is intentionally cheap — no extra LLM call, no blocking
+        // — and it only fires for tools that actually mutate state. The
+        // `critiqueCheck` event carries enough information for a UI
+        // panel to display "I just edited X (N lines added/removed), the
+        // output reports success" without re-running anything.
+        if (this._isMutationTool(p.name)) {
+          const outText = String(output || '');
+          const passed = !outText.startsWith('Error:') && outText.length > 0;
+          const summary = this._summarizeMutationOutput(p.name, p.args, outText);
+          emitter?.emit('critiqueCheck', {
+            tool: p.name,
+            args: this._safeArgsForCritique(p.name, p.args),
+            output: outText.slice(0, 400),
+            passed,
+            summary,
+            at: new Date().toISOString(),
+            iteration: iterations,
+          });
+        }
         this._debugLog(emitter, 'tool.executed', {
           name: p.name,
           retries,
@@ -1539,14 +1989,24 @@ export class Agent {
       };
 
       const workspaceRevisionBeforeBatch = this.workingMemory.workspaceRevision;
-      const runSequentially = toolBatchNeedsSequential(validTools);
-      const results = runSequentially
-        ? await (async () => {
-            const ordered = [];
-            for (const p of validTools) ordered.push(await executeParsedTool(p));
-            return ordered;
-          })()
-        : await Promise.all(validTools.map(executeParsedTool));
+      // Execute each dependency wave concurrently. The legacy boolean helper
+      // remains available for callers/tests, while groups let repo_map run
+      // first and the independent exploration calls run together afterward.
+      const executionGroups = toolBatchExecutionGroups(validTools);
+      const results = [];
+      for (const [groupIndex, group] of executionGroups.entries()) {
+        emitter?.emit('toolWaveStart', {
+          index: groupIndex,
+          total: executionGroups.length,
+          tools: group.map(tool => ({ id: tool.id, name: tool.name })),
+        });
+        results.push(...await Promise.all(group.map(executeParsedTool)));
+        emitter?.emit('toolWaveEnd', {
+          index: groupIndex,
+          total: executionGroups.length,
+          tools: group.map(tool => ({ id: tool.id, name: tool.name })),
+        });
+      }
 
       const resultById = new Map(results.map(r => [r.id, r]));
       const parsedById = new Map(parsed.map(p => [p.id, p]));
@@ -1662,9 +2122,11 @@ export class Agent {
       // Mid-turn auto-compress: after tools added messages, re-check threshold.
       // Without this, compression only fires once before the loop — large tool
       // batches can push context well past the 30% threshold without a chance
-      // to compress until the next user turn.
+      // to compress until the next user turn. Forward the controller signal
+      // so a user cancel unwinds the inner LLM call and the inner call has
+      // its own timeout — see compressor.js.
       if (this.compressor.autoEnabled && this.compressor.needsCompression(this.messages)) {
-        this.messages = await this.compressor.compress(this.messages, emitter);
+        this.messages = await this.compressor.compress(this.messages, emitter, controller.signal);
         emitter?.emit('tokenCount', estimateTokens(this.messages));
       }
 
@@ -1709,9 +2171,20 @@ export class Agent {
       setAgentTodoSink(null);
     }
 
-    emitter?.emit('error', `Maximum agent iterations reached (${this.maxIterations}).`);
-    emitTurnState('failed', { reason: 'max_iterations' });
-    this._debugLog(emitter, 'turn.failed', { kind: 'max_iterations', maxIterations: this.maxIterations });
+    // The final iteration is reserved for a text-only response above. This
+    // fallback is only reachable when a provider aborts the loop without
+    // returning a final response; keep it non-fatal so the TUI does not show a
+    // misleading error after useful tool work has already completed.
+    const summary = `Ho raggiunto il limite di ${this.maxIterations} passaggi in questo turno. Il lavoro già eseguito è conservato: continuo da qui.`;
+    this.messages.push({ role: 'assistant', content: summary });
+    emitter?.emit('complete', summary);
+    emitTurnState('completed', { reason: 'max_iterations_recovered' });
+    this._debugLog(emitter, 'turn.completed', {
+      iterations,
+      toolCallCount,
+      reason: 'max_iterations_recovered',
+    });
+    return summary;
   }
 
   reset() {

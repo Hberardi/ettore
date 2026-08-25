@@ -33,9 +33,11 @@ test('Agent: non-numeric or zero maxToolCallsPerTurn falls back to default', () 
   assert.equal(makeAgent({ maxToolCallsPerTurn: null }).maxToolCallsPerTurn, 80);
 });
 
-test('Agent: tool-call limiter emits a helpful error message and stops the turn', async () => {
+test('Agent: a model that keeps calling tools past the budget is stopped with a helpful error', async () => {
   // Client emits a batch of 5 tool-calls in a single turn; limit is set to 4
-  // so the very first batch already overflows.
+  // so the very first batch already overflows. This client ignores the empty
+  // tool list it gets for the recovery turn and keeps calling tools, which is
+  // what turns the soft landing into a hard stop.
   const client = {
     async turn() {
       return {
@@ -66,10 +68,15 @@ test('Agent: tool-call limiter emits a helpful error message and stops the turn'
   const emitter = new EventEmitter();
   const errors = [];
   const states = [];
+  const recoveries = [];
   emitter.on('error', (msg) => errors.push(msg));
   emitter.on('turnState', (s) => states.push(s));
+  emitter.on('loopRecovery', (r) => recoveries.push(r));
 
   const result = await agent.run('do thing', emitter);
+  // The budget is only fatal on the second breach: the first one asks the
+  // model to wrap up.
+  assert.ok(recoveries.some((r) => r.reason === 'tool_call_limit'));
   // Should NOT have completed normally — should return undefined when limited.
   assert.equal(result, undefined);
   assert.equal(errors.length, 1);
@@ -82,4 +89,54 @@ test('Agent: tool-call limiter emits a helpful error message and stops the turn'
   assert.match(err, /\.ettore\/config\.json/);
   // Turn should be marked failed.
   assert.ok(states.some((s) => s && s.state === 'failed'));
+});
+
+
+test('Agent: exhausting the tool-call budget lands the turn instead of losing the work', async () => {
+  // First batch overflows the budget; on the recovery turn the model complies
+  // and answers in prose. The turn must complete with that answer — the whole
+  // point is that up to `limit` tool calls of real work are not thrown away.
+  let calls = 0;
+  const client = {
+    async turn() {
+      calls++;
+      if (calls === 1) {
+        return {
+          type: 'tool_calls',
+          tool_calls: [
+            { id: 'c1', function: { name: 'read', arguments: '{}' } },
+            { id: 'c2', function: { name: 'read', arguments: '{}' } },
+            { id: 'c3', function: { name: 'read', arguments: '{}' } },
+            { id: 'c4', function: { name: 'read', arguments: '{}' } },
+            { id: 'c5', function: { name: 'read', arguments: '{}' } },
+          ],
+          message: { role: 'assistant', content: '', tool_calls: [] },
+        };
+      }
+      return { type: 'text', content: 'Ecco cosa ho trovato finora.' };
+    },
+  };
+  const agent = new Agent(client, {
+    provider: 'test',
+    model: 'gpt-4o',
+    modelCapability: 'full',
+    workdir: process.cwd(),
+    contextWindow: 128000,
+    maxToolCallsPerTurn: 4,
+  });
+  agent._executeToolCall = async () => ({ output: 'ok' });
+
+  const emitter = new EventEmitter();
+  const errors = [];
+  const states = [];
+  const recoveries = [];
+  emitter.on('error', (msg) => errors.push(msg));
+  emitter.on('turnState', (s) => states.push(s));
+  emitter.on('loopRecovery', (r) => recoveries.push(r));
+
+  const result = await agent.run('do thing', emitter);
+  assert.equal(result, 'Ecco cosa ho trovato finora.');
+  assert.deepEqual(errors, []);
+  assert.ok(recoveries.some((r) => r.reason === 'tool_call_limit'));
+  assert.ok(!states.some((s) => s && s.state === 'failed'));
 });

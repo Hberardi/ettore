@@ -117,6 +117,8 @@ const ACCESS_RULES = {
   run_checks: [['workdir', 'read']],
   run_tests: [['workdir', 'read']],
   dev_server: [['workdir', 'read']],
+  browser_app: [['file_path', 'write']],
+  desktop_app: [['workdir', 'read'], ['file_path', 'write']],
   bash: [['workdir', 'read']],
   bash_session: [['workdir', 'read']],
   memory_write: [['workdir', 'write']],
@@ -147,7 +149,10 @@ export async function authorizeToolAccess(name, args = {}, policyOverride = null
     (
       name === 'bash' ||
       name === 'bash_session' ||
-      (name === 'dev_server' && String(args.action || '').toLowerCase() === 'start')
+      (name === 'dev_server' && String(args.action || '').toLowerCase() === 'start') ||
+      // desktop_app open runs its command through a shell, exactly like
+      // dev_server start.
+      (name === 'desktop_app' && String(args.action || '').toLowerCase() === 'open')
     )
   ) {
     return {

@@ -6,6 +6,7 @@ import {
   responseAnnouncesUnexecutedAction,
   responseLooksLikeUnappliedCode,
   toolBatchNeedsSequential,
+  toolBatchExecutionGroups,
   userLikelyRequestedWorkspaceEdit,
 } from '../src/agents/turn-recovery.js';
 
@@ -24,6 +25,8 @@ test('responseLooksLikeUnappliedCode detects fenced snippets and code-like prose
 test('responseAnnouncesUnexecutedAction detects plan and action announcements', () => {
   assert.equal(responseAnnouncesUnexecutedAction('Piano: aggiorno il file domani.'), true);
   assert.equal(responseAnnouncesUnexecutedAction('Ora creo il componente padre.'), true);
+  assert.equal(responseAnnouncesUnexecutedAction('Diagnostico subito.'), true);
+  assert.equal(responseAnnouncesUnexecutedAction('Adesso verifico il problema.'), true);
   assert.equal(responseAnnouncesUnexecutedAction("Now I'll update the config."), true);
   assert.equal(responseAnnouncesUnexecutedAction('Questo e solo un riassunto finale.'), false);
 });
@@ -34,6 +37,24 @@ test('toolBatchNeedsSequential returns true for dependent or stateful batches', 
   assert.equal(toolBatchNeedsSequential([{ name: 'bash_session' }, { name: 'read' }]), true);
   assert.equal(toolBatchNeedsSequential([{ name: 'grep' }, { name: 'file_info' }]), false);
   assert.equal(toolBatchNeedsSequential([{ name: 'read' }]), false);
+});
+
+test('toolBatchExecutionGroups preserves dependencies while widening read parallelism', () => {
+  assert.deepEqual(
+    toolBatchExecutionGroups([{ name: 'repo_map' }, { name: 'grep' }, { name: 'file_info' }])
+      .map(group => group.map(tool => tool.name)),
+    [['repo_map'], ['grep', 'file_info']],
+  );
+  assert.deepEqual(
+    toolBatchExecutionGroups([{ name: 'write' }, { name: 'read' }])
+      .map(group => group.map(tool => tool.name)),
+    [['write'], ['read']],
+  );
+  assert.deepEqual(
+    toolBatchExecutionGroups([{ name: 'grep' }, { name: 'file_info' }])
+      .map(group => group.map(tool => tool.name)),
+    [['grep', 'file_info']],
+  );
 });
 
 test('createTurnRecoveryState returns clean defaults', () => {

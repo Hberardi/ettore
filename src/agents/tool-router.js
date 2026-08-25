@@ -35,14 +35,14 @@ const EDIT_TOOLS = [
 const VERIFY_TOOLS = ['run_checks', 'run_tests', 'bash', 'bash_session', 'read', 'git_diff'];
 const WEB_TOOLS = ['websearch', 'webfetch', 'web_image'];
 const DOCUMENT_TOOLS = ['read_pdf', 'read_doc'];
-const RUNTIME_TOOLS = ['dev_server', 'browser_check', 'read_server_console'];
+const RUNTIME_TOOLS = ['dev_server', 'browser_app', 'desktop_app', 'browser_check', 'read_server_console'];
 const DEPENDENCY_TOOLS = ['dep_inspect', 'bash'];
 
 const EDIT_INTENT_RE = /\b(edit|modify|change|update|fix|create|write|implement|patch|refactor|build|add|remove|rename|modifica|cambia|aggiorna|correggi|crea|scrivi|implementa|sistema|aggiungi|rimuovi|rinomina)\b/i;
 const WEB_INTENT_RE = /\b(latest|current|today|news|web|online|website|url|docs?|documentation|internet|image|images|photo|picture|aggiornat[oaie]|oggi|notizie|sito|pagina|immagin[ei]|foto)\b/i;
 const DOCUMENT_INTENT_RE = /\b(pdf|docx?|odt|document[oi]?)\b/i;
 const VIDEO_INTENT_RE = /\b(youtube|youtu\.be|video|trascrivi|transcript)\b/i;
-const RUNTIME_INTENT_RE = /\b(server|browser|page|frontend|runtime|console|logs?|localhost|porta|errore.*avvio)\b/i;
+const RUNTIME_INTENT_RE = /\b(server|browser|page|frontend|runtime|console|logs?|localhost|porta|errore.*avvio|app|apps?|webapp|desktop|gui|ui|window|finestra|schermata|screenshot|click|clicca|electron|tk|qt|gtk|prova(?:re|la|lo)?|test(?:are|a)?\s+l['’]?app)\b/i;
 const DEPENDENCY_INTENT_RE = /\b(dependenc|package|npm|pnpm|yarn|pip|cargo|vulnerab|audit|dipendenz|pacchett)\b/i;
 const SHELL_INTENT_RE = /\b(command|shell|terminal|bash|script|execute|run|comando|terminale|esegui)\b/i;
 
@@ -58,6 +58,13 @@ export function selectToolDefinitions(definitions = [], context = {}) {
   const overlay = String(context.overlay || '');
   const selected = new Set(mode === 'plan' ? BASE_PLAN : BASE_BUILD);
   const contextualPriority = [];
+  // Plugin tools are not part of the static core tool lists above. When a
+  // registry is attached, keep their schemas discoverable in build mode so
+  // dynamic routing does not silently make an enabled plugin unusable.
+  const pluginToolNames = mode === 'build' && context.includePluginTools
+    ? definitions.filter(tool => tool?._pluginTool).map(tool => tool.function?.name).filter(Boolean)
+    : [];
+  for (const name of pluginToolNames) selected.add(name);
   const editIntent = mode === 'build' && (
     EDIT_INTENT_RE.test(prompt) ||
     context.mutationToolUsed ||
@@ -112,6 +119,7 @@ export function selectToolDefinitions(definitions = [], context = {}) {
     'read',
     'grep',
     'ask_user',
+    ...pluginToolNames,
     ...contextualPriority,
     ...(editIntent ? EDIT_TOOLS : []),
     ...(mode === 'plan' ? BASE_PLAN : BASE_BUILD),

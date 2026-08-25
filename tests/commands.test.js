@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { builtinCommands } from '../src/commands/index.js';
+import { MissionControl } from '../src/mission/index.js';
 
 const commandSystem = {
   list: () => Object.entries(builtinCommands).map(([name, cmd]) => ({
@@ -70,6 +71,20 @@ test('help: shows command-specific usage', async () => {
 
   assert.match(output, /\/connect/);
   assert.match(output, /Usage: \/connect \[provider\] \[api-key\]/);
+});
+
+test('mission: reports and clears the current Mission Control state', async () => {
+  const mission = new MissionControl();
+  mission.startTurn('Build the feature');
+  mission.fileChanged({ type: 'write', path: 'src/feature.js' });
+
+  const output = await builtinCommands.mission.handler([], { mission });
+  assert.match(output, /Mission /);
+  assert.match(output, /Files changed: 1/);
+
+  const cleared = await builtinCommands.mission.handler(['clear'], { mission });
+  assert.match(cleared, /cleared/);
+  assert.match(await builtinCommands.mission.handler([], { mission }), /No active mission/);
 });
 
 test('connect: lists providers with key requirements', async () => {

@@ -13,6 +13,14 @@ const MAX_COMPRESSIONS_PER_SESSION = 8;
 const DYNAMIC_THRESHOLD_RATIO = 0.3;
 const MIN_DYNAMIC_THRESHOLD = 4000;
 const HARD_GUARD_RATIO = 0.92;
+// Hard ceiling on the compression LLM call. Without it, a provider stall
+// hangs the agent loop indefinitely — the main turn has its own
+// `Promise.race` against `AGENT_TURN_TIMEOUT_MS`, but the compressor's
+// inner `client.turn` was previously called with `null` as the abort
+// signal and no timeout, so a network stall at exactly this point froze
+// the CLI forever. 90s is well above any healthy compression latency and
+// well below "the user has already given up and re-launched".
+const COMPRESS_TURN_TIMEOUT_MS = 90_000;
 
 const COMPRESSION_PROMPT = `You are a context compression assistant. Analyze the conversation below and produce a dense, structured summary for an AI coding assistant to continue the session seamlessly.
 
@@ -209,7 +217,7 @@ export class ContextCompressor {
     };
   }
 
-  async compress(messages, emitter) {
+  async compress(messages, emitter, signal = null) {
     if (!this._privacyWarned) {
       emitter?.emit('compressPrivacyNotice');
       this._privacyWarned = true;
@@ -229,7 +237,10 @@ export class ContextCompressor {
     // Save snapshot for undo
     this._snapshot = messages.slice();
 
-    // Call LLM for summary (low temperature, concise)
+    // Call LLM for summary (low temperature, concise). Wrap in a
+    // Promise.race against a hard timeout so a provider stall cannot
+    // freeze the agent loop forever, and forward any caller-supplied
+    // abort signal so a user cancel during compression also unwinds.
     const summaryPrompt = COMPRESSION_PROMPT + serializeForCompression(toCompress);
     let summary = '';
     let degraded = null;
@@ -237,7 +248,20 @@ export class ContextCompressor {
       const summaryMessages = [
         { role: 'user', content: summaryPrompt }
       ];
-      const result = await this.client.turn(summaryMessages, [], (token) => { summary += token; }, null);
+      const innerTurn = this.client.turn(summaryMessages, [], (token) => { summary += token; }, signal);
+      let timeoutTimer;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutTimer = setTimeout(
+          () => reject(new Error(`compression LLM call timed out after ${Math.round(COMPRESS_TURN_TIMEOUT_MS / 1000)}s`)),
+          COMPRESS_TURN_TIMEOUT_MS,
+        );
+      });
+      let result;
+      try {
+        result = await Promise.race([innerTurn, timeoutPromise]);
+      } finally {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+      }
       if (result?.type === 'text') summary = result.content;
     } catch (e) {
       degraded = e?.message || 'compression LLM call failed';

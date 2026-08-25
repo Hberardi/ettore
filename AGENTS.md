@@ -39,6 +39,25 @@ python3 test_display.py
 ## Tools Available
 `bash`, `read`, `write`, `edit`, `glob`, `grep`, `webfetch`, `ask_user`, `memory_write`
 
+## Driving applications
+- `browser_app` (`src/tools/browser-driver.js`) — drives Chrome/Chromium over the
+  DevTools Protocol (raw CDP over Node's built-in WebSocket, no extra dependency):
+  open/goto/click/type/press/eval/snapshot/screenshot plus `console`, `errors` and
+  `network` reads. Needs a Chrome/Chromium binary (`ETTORE_CHROME_BIN` overrides
+  the lookup) and Node 22+.
+- `desktop_app` (`src/tools/desktop-app.js`) — launches a GUI app keeping its
+  stdout/stderr, lists/focuses/screenshots its windows and injects clicks and
+  keystrokes. Uses wmctrl or xdotool for windows, ImageMagick/gnome-screenshot/
+  scrot for screenshots, xdotool (X11) or ydotool (Wayland) for input, and Xvfb
+  when no display is available. `action="capabilities"` reports what is installed.
+- Both keep per-id sessions in module state and kill their processes on
+  `process.on('exit')` / SIGINT, like `bash-session.js`.
+- Adding a tool means touching: `src/tools/index.js` (handler + definition),
+  `src/agents/tool-router.js` (routing), `src/agents/prompts.js` (capabilities),
+  `src/agents/index.js` (`getToolTimeoutMs`), `src/tools/workspace-policy.js`
+  (path rules), `src/plugins/manifest.js` (reserved names), and the TUI colour
+  map / intent labels in `src/app/`.
+
 ## ask_user constraint
 Only works in interactive mode. In one-shot/non-interactive contexts it returns an error telling the user to start interactive mode.
 

@@ -63,6 +63,29 @@ For local models, start Ollama and run /connect ollama.`);
 
   const config = await loadConfig(options);
   config.contextWindow = getModelPricing(config.model).ctx || 128000;
+  // Plugin system in one-shot mode: best-effort. boot() failures are
+  // logged to stderr so the user knows a plugin is broken without
+  // changing the run's exit code — the rest of the prompt proceeds
+  // against the built-in tool set.
+  const { toolDefinitions, toolHandlers } = await import('../tools/index.js');
+  const { PluginRegistry, PluginRuntime } = await import('../plugins/index.js');
+  const pluginRegistry = new PluginRegistry({
+    builtInTools: toolDefinitions,
+    builtInHandlers: toolHandlers,
+    builtInCommands: {},
+  });
+  const pluginRuntime = new PluginRuntime({ registry: pluginRegistry });
+  try {
+    const bootReport = await pluginRuntime.boot();
+    if (bootReport.failed.length > 0) {
+      for (const f of bootReport.failed) {
+        process.stderr.write(`⚠ Plugin "${f.name}" failed to load: ${f.error}\n`);
+      }
+    }
+  } catch (err) {
+    process.stderr.write(`⚠ Plugin system error: ${err.message}\n`);
+  }
+  config.pluginRegistry = pluginRegistry;
   const client = createClient(config);
   const agent = new Agent(client, config);
   const em = new EventEmitter();

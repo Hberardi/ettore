@@ -10,7 +10,7 @@ export class OpenAIProvider {
     const defaults = [
       { id: 'gpt-4o' }, { id: 'gpt-4o-mini' }, { id: 'gpt-4-turbo' },
       { id: 'gpt-4' }, { id: 'o1' }, { id: 'o1-mini' }, { id: 'o3-mini' },
-      { id: 'o3' }, { id: 'o4-mini' },
+      { id: 'o3' }, { id: 'o4-mini' }, { id: 'gpt-5.6-luna' },
     ];
     // Non-chat models to exclude (embeddings, speech, image generation)
     const excludePatterns = ['embedding', 'whisper', 'tts', 'dall-e', 'text-search', 'code-search', 'moderation'];
@@ -49,7 +49,8 @@ export class OpenAIProvider {
         { id: 'gpt-4', description: 'GPT-4' },
         { id: 'o1', description: 'O1 (Reasoning)' },
         { id: 'o1-mini', description: 'O1 Mini (Reasoning)' },
-        { id: 'o3-mini', description: 'O3 Mini (Reasoning)' }
+        { id: 'o3-mini', description: 'O3 Mini (Reasoning)' },
+        { id: 'gpt-5.6-luna', description: 'GPT-5.6 Luna (fast and cost-efficient)' }
       ]
     };
   }

@@ -159,6 +159,7 @@ export async function loadConfig(options = {}) {
     maxTokens: numFrom('maxTokens'),
     // Safety limit on tool-calls per turn. Raise in .ettore/config.json for
     // complex multi-file tasks; lower to surface runaway loops earlier.
+    maxIterations: numFrom('maxIterations'),
     maxToolCallsPerTurn: numFrom('maxToolCallsPerTurn'),
     // How many times the TUI silently re-prompts the model to finish an
     // unfinished task before handing control back to the user.

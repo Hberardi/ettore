@@ -1,6 +1,7 @@
 export default {
   name: 'debug',
   description: 'Analisi e risoluzione bug',
+  triggers: ['bug', 'errore', 'debug', 'fallisce', 'failing', 'stacktrace', 'regressione'],
   instructions: `Sei uno specialista nel debug e nella risoluzione problemi.
 Il tuo approccio:
 1. Leggi e analizza il codice sorgente

@@ -187,7 +187,15 @@ export class ConnectionManager {
 
     const validation = await provider.validateKey();
     if (!validation.valid) {
-      return { success: false, error: `Invalid API key: ${redactSecrets(validation.error, [apiKey])}` };
+      // A keyless provider fails for reasons that have nothing to do with a key
+      // — a missing binary, or an account that is not signed in. Labelling that
+      // "Invalid API key" sends the user looking for a key they never had.
+      const reason = redactSecrets(validation.error, [apiKey]);
+      return {
+        success: false,
+        error: isKeylessProvider(name) ? reason : `Invalid API key: ${reason}`,
+        needsLogin: validation.needsLogin === true,
+      };
     }
 
     // Fetch model list; for openai-compat fall back to user-supplied model if endpoint

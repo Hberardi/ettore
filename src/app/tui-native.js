@@ -110,6 +110,12 @@ const ANSI = {
   move:        (x, y) => `\x1b[${y};${x}H`,
 };
 
+// Keep the three surfaces distinct so the TUI reads as one composed screen
+// instead of a collection of independently colored rows.
+const HEADER_BG = '\x1b[48;5;237m';
+const PANEL_BG = '\x1b[48;5;236m';
+const INPUT_BG = '\x1b[48;5;235m';
+
 // ─── Enhanced Animation State ─────────────────────────────────────────────
 const PULSE_FRAMES = ['○', '◐', '◑', '●', '◑', '◐'];
 const WAVE_FRAMES = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '▇', '▆', '▅', '▄', '▃', '▂'];
@@ -140,6 +146,8 @@ const TOOL_COLORS = {
   webfetch:     C.code,     // blue — fetching URLs
   websearch:    C.code,     // blue — web search
   read_server_console: C.code, // blue — server logs
+  browser_app:  C.code,     // blue — driving a web app
+  desktop_app:  C.code,     // blue — driving a desktop app
   ask_user:     C.accent,   // cyan — user interaction
   memory_read:  C.dim,      // gray — memory
   memory_write: C.dim,      // gray — memory
@@ -154,6 +162,8 @@ class TUI {
     this.streaming = null;
     this.todos = [];
     this.input = '';
+    this.attachments = [];
+    this.filePicker = null;
     this.mode = 'build';
     this.isRunning = false;
     this.provider = '';
@@ -184,6 +194,17 @@ class TUI {
     this.exitConfirmMode = false;
     this.currentPlan = [];
     this.sidebarWidth = 32;
+    // /loop runtime — written by native-ui.js on start/advance/stop, read
+    // by _renderSidebar. Null when no loop has run in this session.
+    this.loopStatus = null;
+    // Sequence id bumped on every loop state change so the renderer can
+    // pick up updates even when the data itself didn't change (rare but
+    // possible with the same status returned twice).
+    this.loopStatusRev = 0;
+    // Mission Control snapshot written by native-ui.js. Keeping a snapshot in
+    // the renderer makes sidebar drawing pure and avoids coupling the TUI to
+    // agent internals.
+    this.mission = null;
   }
 
   updateSize() {
@@ -199,6 +220,7 @@ class TUI {
 
   _render() {
     const sidebarWidth = Math.min(this.sidebarWidth, Math.max(24, this.cols - 40));
+    const sidebarContentWidth = Math.max(1, sidebarWidth - 1);
     const mainWidth = Math.max(20, this.cols - sidebarWidth - 1);
 
     // Render the input first so we know how many rows it occupies, then shrink
@@ -209,7 +231,7 @@ class TUI {
     this.availableHeight = Math.max(2, this.rows - 5 - inputHeight);
 
     const msgLines = this._renderMessages();
-    const sideLines = this._renderSidebar(sidebarWidth);
+    const sideLines = this._renderSidebar(sidebarContentWidth);
     this.animationFrame = (this.animationFrame + 1) % 100;
     let out = ANSI.hide;
 
@@ -217,33 +239,39 @@ class TUI {
 
     for (let i = 0; i < this.availableHeight; i++) {
       out += ANSI.move(1, i + 2) + this._padVisual(msgLines[i] || '', mainWidth);
-      out += ANSI.move(mainWidth + 1, i + 2) + ` `;
-      out += ANSI.move(mainWidth + 2, i + 2) + `\x1b[48;5;236m${this._padVisual(sideLines[i] || '', sidebarWidth)}${C.reset}`;
+      out += ANSI.move(mainWidth + 1, i + 2) + ' ';
+      out += ANSI.move(mainWidth + 2, i + 2) + `${C.border}│${C.reset}`;
+      out += ANSI.move(mainWidth + 3, i + 2) + `${PANEL_BG}${this._padVisual(sideLines[i] || '', sidebarContentWidth)}${C.reset}`;
     }
 
-    out += ANSI.move(1, this.availableHeight + 2) + this._padVisual(this._renderStatus(), mainWidth);
-    out += ANSI.move(mainWidth + 1, this.availableHeight + 2) + ` `;
-    out += ANSI.move(mainWidth + 2, this.availableHeight + 2) + `\x1b[48;5;236m${this._padVisual(this._renderSidebarStatus(sidebarWidth), sidebarWidth)}${C.reset}`;
+    out += ANSI.move(1, this.availableHeight + 2) + this._padVisual(this._renderStatus(mainWidth), mainWidth);
+    out += ANSI.move(mainWidth + 1, this.availableHeight + 2) + ' ';
+    out += ANSI.move(mainWidth + 2, this.availableHeight + 2) + `${C.border}│${C.reset}`;
+    out += ANSI.move(mainWidth + 3, this.availableHeight + 2) + `${PANEL_BG}${this._padVisual(this._renderSidebarStatus(sidebarContentWidth), sidebarContentWidth)}${C.reset}`;
 
     // Input area: top border, N input rows, bottom border.
     const inputTop = this.availableHeight + 3;
     out += ANSI.move(1, inputTop) + this._renderInputBorder(true, mainWidth);
-    out += ANSI.move(mainWidth + 1, inputTop) + ` `;
-    out += ANSI.move(mainWidth + 2, inputTop) + `\x1b[48;5;236m${' '.repeat(sidebarWidth)}${C.reset}`;
+    out += ANSI.move(mainWidth + 1, inputTop) + ' ';
+    out += ANSI.move(mainWidth + 2, inputTop) + `${C.border}│${C.reset}`;
+    out += ANSI.move(mainWidth + 3, inputTop) + `${PANEL_BG}${' '.repeat(sidebarContentWidth)}${C.reset}`;
     for (let i = 0; i < inputHeight; i++) {
       const row = inputTop + 1 + i;
       out += ANSI.move(1, row) + inputRows[i];
-      out += ANSI.move(mainWidth + 1, row) + ` `;
-      out += ANSI.move(mainWidth + 2, row) + `\x1b[48;5;236m${' '.repeat(sidebarWidth)}${C.reset}`;
+      out += ANSI.move(mainWidth + 1, row) + ' ';
+      out += ANSI.move(mainWidth + 2, row) + `${C.border}│${C.reset}`;
+      out += ANSI.move(mainWidth + 3, row) + `${PANEL_BG}${' '.repeat(sidebarContentWidth)}${C.reset}`;
     }
     const inputBottom = inputTop + 1 + inputHeight;
     out += ANSI.move(1, inputBottom) + this._renderInputBorder(false, mainWidth);
-    out += ANSI.move(mainWidth + 1, inputBottom) + ` `;
-    out += ANSI.move(mainWidth + 2, inputBottom) + `\x1b[48;5;236m${' '.repeat(sidebarWidth)}${C.reset}`;
+    out += ANSI.move(mainWidth + 1, inputBottom) + ' ';
+    out += ANSI.move(mainWidth + 2, inputBottom) + `${C.border}│${C.reset}`;
+    out += ANSI.move(mainWidth + 3, inputBottom) + `${PANEL_BG}${' '.repeat(sidebarContentWidth)}${C.reset}`;
 
     // Overlays
     out += this._renderCommandPalette();
     out += this._renderSubMenu();
+    out += this._renderFilePicker();
     out += this._renderApiKeyInput();
     out += this._renderAskUser();
     out += this._renderExitConfirm();
@@ -282,14 +310,14 @@ class TUI {
     const glowIdx = Math.floor(this.animationFrame / 20) % GLOW_COLORS.length;
     const glowColor = GLOW_COLORS[glowIdx];
 
-    const leftPlain = ` ETTORE  ${session}`;
-    const rightPlain = `${provider} ${model} ${modeLabel}`;
+    const leftPlain = ` ETTORE · ${session}`;
+    const rightPlain = `${provider}/${model} · ${modeLabel}`;
     const pad = Math.max(0, this.cols - leftPlain.length - rightPlain.length);
 
-    const bg = '\x1b[48;5;237m';
-    const left = `${bg}${C.bold}${glowColor}█${C.reset}${bg}${C.bold}${C.text} ETTORE ${C.reset}${bg}${C.dim}${session}${C.reset}`;
+    const bg = HEADER_BG;
+    const left = `${bg}${C.bold}${glowColor}▌${C.reset}${bg}${C.bold}${C.text} ETTORE${C.reset}${bg}${C.dim} · ${session}${C.reset}`;
     const providerColor = provider === 'no provider' ? C.warn : C.dim;
-    const right = `${bg}${providerColor}${provider}${C.reset}${bg} ${C.text}${model}${C.reset}${bg} ${modeColor}${C.bold}[${modeLabel}]${C.reset}`;
+    const right = `${bg}${providerColor}${provider}${C.reset}${bg}/${C.text}${model}${C.reset}${bg} ${C.dim}·${C.reset}${bg} ${modeColor}${C.bold}${modeLabel}${C.reset}`;
     return left + bg + ' '.repeat(pad) + right + C.reset;
   }
 
@@ -316,7 +344,7 @@ class TUI {
       lines.push(`  ${C.accent}/${C.reset}${C.text}help${C.reset}           ${C.dim}show guided command help${C.reset}`);
       lines.push('');
       lines.push(`${C.bold}${C.text}Work faster${C.reset}`);
-      lines.push(`  ${C.accent}@${C.reset}${C.text}shot.png${C.reset}      ${C.dim}attach an image to your next prompt${C.reset}`);
+      lines.push(`  ${C.accent}📎${C.reset}${C.text} Ctrl+O${C.reset}          ${C.dim}attach files or images to your next prompt${C.reset}`);
       lines.push(`  ${C.accent}!${C.reset}${C.text}npm test${C.reset}       ${C.dim}run a shell command${C.reset}`);
       lines.push(`  ${C.accent}Tab${C.reset}             ${C.dim}toggle ${modeColor}${this.mode.toUpperCase()}${C.reset}${C.dim} mode${C.reset}`);
       lines.push(`  ${C.accent}↑↓${C.reset}              ${C.dim}scroll conversation history${C.reset}`);
@@ -347,7 +375,7 @@ class TUI {
     const provider = connectionManager.activeProvider || 'no provider';
     const mode = this.mode.toUpperCase();
     const workdir = process.cwd().split('/').slice(-2).join('/');
-    const line = ` ${C.accent}${C.bold}▌${C.reset} ${C.bold}${C.text}${mode}${C.reset} ${C.dim}workspace${C.reset} ${C.text}${workdir}${C.reset} ${C.dim}· llm:${C.reset}${provider === 'no provider' ? C.warn : C.accent}${provider}${C.reset} ${C.dim}· / commands · @ attach · ! shell${C.reset}`;
+    const line = ` ${C.accent}${C.bold}▌${C.reset} ${C.bold}${C.text}${mode}${C.reset} ${C.dim}workspace${C.reset} ${C.text}${workdir}${C.reset} ${C.dim}· llm:${C.reset}${provider === 'no provider' ? C.warn : C.accent}${provider}${C.reset} ${C.dim}· / commands · 📎 attach · ! shell${C.reset}`;
     return [this._truncateVisual(line, maxWidth), ''];
   }
 
@@ -785,23 +813,56 @@ class TUI {
       const toolColor = TOOL_COLORS[runningTool.name] || C.accent;
       const desc = this._describeToolCall(runningTool.name, runningTool.args, 40);
       const descStr = desc ? `${C.dim}: ${C.reset}${C.text}${desc}${C.reset}` : '';
-      actLabel = `${toolColor}${pulse}${C.reset} ${toolColor}${C.bold}${runningTool.name}${C.reset}${descStr}`;
+      // Elapsed time placed in the actLabel (top row, always visible above
+      // the fold) so the user always sees the timer even when the lower
+      // "tool attivo" section is clipped by the assistant block height.
+      const aElapsedMs = Math.max(0, Date.now() - (Number(runningTool.startMs) || Date.now()));
+      const aElapsedStr = aElapsedMs < 60_000
+        ? `${Math.floor(aElapsedMs / 1000)}s`
+        : `${Math.floor(aElapsedMs / 60_000)}m${Math.floor((aElapsedMs % 60_000) / 1000)}s`;
+      const aElapsedColor = aElapsedMs > 180_000 ? C.err
+                          : aElapsedMs > 60_000  ? C.warn
+                          :                        C.dim;
+      const aElapsed = ` ${aElapsedColor}[${aElapsedStr}]${C.reset}`;
+      actLabel = `${toolColor}${pulse}${C.reset} ${toolColor}${C.bold}${runningTool.name}${C.reset}${descStr}${aElapsed}`;
     } else if (text || reasoning) {
       const waveBar = WAVE_FRAMES.slice(0, 5).map((_, i) =>
         WAVE_FRAMES[(waveIdx + i) % WAVE_FRAMES.length]
       ).join('');
       actLabel = `${C.ok}${pulse}${C.reset} ${C.dim}writing${C.reset} ${C.accent}${waveBar}${C.reset} ${C.text}${cursor}${C.reset}`;
     } else {
-      actLabel = `${glowColor}${pulse}${C.reset} ${C.accent}${C.bold}●●●${C.reset} ${C.dim}thinking…${C.reset}`;
+      // Model is "thinking" — no tool, no visible text yet. Show how long we've
+      // been waiting so the user can tell "slow model" from "hung model" before
+      // the 120-300s stall watchdog fires. Without this, a 5-minute provider
+      // stall looks identical to a 5-second first-token delay.
+      const thinkingElapsedMs = lastActivityAt > 0 ? (Date.now() - lastActivityAt) : 0;
+      const thinkingElapsedStr = thinkingElapsedMs < 60_000
+        ? `${Math.floor(thinkingElapsedMs / 1000)}s`
+        : `${Math.floor(thinkingElapsedMs / 60_000)}m${Math.floor((thinkingElapsedMs % 60_000) / 1000)}s`;
+      const thinkingElapsedColor = thinkingElapsedMs > 180_000 ? C.err
+                                 : thinkingElapsedMs > 60_000  ? C.warn
+                                 :                                 C.dim;
+      const thinkingElapsed = ` ${thinkingElapsedColor}[${thinkingElapsedStr}]${C.reset}`;
+      actLabel = `${glowColor}${pulse}${C.reset} ${C.accent}${C.bold}●●●${C.reset} ${C.dim}thinking…${C.reset}${thinkingElapsed}`;
     }
 
     const rows = [actLabel];
     const innerWidth = this._bubbleInnerWidth(maxWidth, 'left');
     const idleMs = lastActivityAt > 0 ? (Date.now() - lastActivityAt) : 0;
     if (idleMs >= stallMs) {
-      const waitText = waitKind === 'tool'
-        ? `${C.warn}stato:${C.reset} ${C.dim}in attesa completamento tool…${C.reset}`
-        : `${C.accent}stato:${C.reset} ${C.dim}in attesa risposta modello…${C.reset}`;
+      let waitText;
+      if (waitKind === 'tool') {
+        waitText = `${C.warn}stato:${C.reset} ${C.dim}in attesa completamento tool…${C.reset}`;
+      } else {
+        // Model wait: escalate color from accent → warn → err as the idle
+        // duration grows. Reaches err well before the 300s hard watchdog
+        // so the user can press ESC themselves instead of waiting for the
+        // automatic cancel.
+        const waitColor = idleMs > 180_000 ? C.err
+                        : idleMs > 60_000  ? C.warn
+                        :                    C.accent;
+        waitText = `${waitColor}stato:${C.reset} ${C.dim}in attesa risposta modello…${C.reset}`;
+      }
       rows.push(waitText);
     }
 
@@ -873,7 +934,25 @@ class TUI {
       const progress = runningTool.progress
         ? ` ${C.dim}${this._truncateVisual(this._sanitizeForRender(runningTool.progress), Math.max(10, innerWidth - 24))}${C.reset}`
         : '';
-      const line = `  ${toolColor}${pulse}${C.reset} ${toolColor}${C.bold}${runningTool.name}${C.reset}${descStr}${progress} ${C.dim}…${C.reset}`;
+      // Elapsed time since tool started. Gives the user a heartbeat even when
+      // the tool itself doesn't emit progress (read, write, edit, grep, glob,
+      // git_*, etc.). Color shifts to warn/err so a stuck tool is visible
+      // without having to wait for the 300s stall watchdog.
+      const elapsedMs = Math.max(0, Date.now() - (Number(runningTool.startMs) || Date.now()));
+      const elapsedStr = elapsedMs < 60_000
+        ? `${Math.floor(elapsedMs / 1000)}s`
+        : `${Math.floor(elapsedMs / 60_000)}m${Math.floor((elapsedMs % 60_000) / 1000)}s`;
+      const elapsedColor = elapsedMs > 180_000 ? C.err
+                         : elapsedMs > 60_000  ? C.warn
+                         :                       C.dim;
+      const elapsed = ` ${elapsedColor}[${elapsedStr}]${C.reset}`;
+      // Liveness fallback: if the tool hasn't reported progress and it's been
+      // a few seconds, surface that it's still working. Prevents the "is it
+      // frozen?" perception for silent tools.
+      const stillRunning = !runningTool.progress && elapsedMs > 3000
+        ? ` ${C.dim}(ancora in esecuzione…)${C.reset}`
+        : '';
+      const line = `  ${toolColor}${pulse}${C.reset} ${toolColor}${C.bold}${runningTool.name}${C.reset}${descStr}${progress} ${C.dim}…${C.reset}${elapsed}${stillRunning}`;
       this._wrapText(line, innerWidth).forEach(w => rows.push(w));
       if (runningTool.diffPreview) {
         const diffRows = this._renderDiffSideBySide(runningTool.diffPreview, Math.max(20, innerWidth - 2));
@@ -890,7 +969,7 @@ class TUI {
     });
   }
 
-  _renderStatus() {
+  _renderStatus(width = this.cols) {
     const sep = `${C.dim} · ${C.reset}`;
     const glowIdx = Math.floor(this.animationFrame / 20) % GLOW_COLORS.length;
     const glowColor = GLOW_COLORS[glowIdx];
@@ -911,12 +990,13 @@ class TUI {
     const hint = this.isRunning
       ? `${C.dim}ctrl+c stop${C.reset}`
       : `${C.accent}/${C.reset}${C.dim} commands${C.reset}${sep}${C.accent}tab${C.reset}${C.dim} mode${C.reset}`;
-    return `\x1b[48;5;236m ${scroll}${state}${sep}${hint} ${C.reset}`;
+    const content = ` ${scroll}${state}${sep}${hint} `;
+    return `${PANEL_BG}${this._padVisual(content, width)}${C.reset}`;
   }
 
   _renderSidebarStatus(width) {
     const model = this._truncate(connectionManager.activeModel || this.model || 'not configured', Math.max(8, width - 8));
-    return `\x1b[48;5;236m ${C.dim}model:${C.reset} ${C.text}${model}${C.reset}`;
+    return ` ${C.dim}model${C.reset} ${C.text}${model}${C.reset}`;
   }
 
   _fmtTokens(n) {
@@ -932,7 +1012,7 @@ class TUI {
     const bc = this.isRunning ? C.warn : glowColor;
     const borderChar = this.isRunning ? '-' : '━';
     const line = ` ${borderChar.repeat(Math.max(0, width - 2))} `;
-    return `${bc}${line}${C.reset}`;
+    return `${INPUT_BG}${bc}${line}${C.reset}`;
   }
 
   // Maximum number of visual rows the input box may occupy. The first row
@@ -996,7 +1076,7 @@ class TUI {
       const clipped = this._truncateVisual(payload, maxLen);
       const used = this._visualLen(` ${glyph} ${clipped}`);
       const pad = ' '.repeat(Math.max(0, width - used - 1));
-      return `\x1b[48;5;235m ${bc}${glyph}${C.reset}\x1b[48;5;235m ${clipped}${pad}${C.reset}`;
+      return `${INPUT_BG} ${bc}${glyph}${C.reset}${INPUT_BG} ${clipped}${pad}${C.reset}`;
     };
 
     // Single-line modes (most of them).
@@ -1019,15 +1099,16 @@ class TUI {
         singleLine = `${C.dim}API key for ${C.bold}${this.apiKeyProviderMeta?.name || this.apiKeyProvider}${C.dim}: ${C.reset}${C.text}${masked}▋${C.reset}`;
       }
     } else if (this.commandPaletteOpen) {
-      singleLine = this.commandFilter
-        ? `${C.accent}/${C.reset}${C.text}${this.commandFilter}▋${C.reset}`
+      const query = this.commandInput || this.commandFilter;
+      singleLine = query
+        ? `${C.accent}/${C.reset}${C.text}${query}▋${C.reset}`
         : `${C.accent}/${C.reset}${C.dim}Search commands…${C.reset}${C.dim}▋${C.reset}`;
     } else if (this.subMenuOpen) {
       singleLine = `${C.accent}/${C.reset}${C.dim}${this.subMenuTitle}${C.reset} ${C.text}▋${C.reset}`;
-    } else if (!this.input) {
+    } else if (!this.input && this.attachments.length === 0) {
       const connected = Boolean(connectionManager.getActive());
       singleLine = connected
-        ? `${C.dim}Message ETTORE…  / commands  @ image  ! shell${C.reset}`
+        ? `${C.dim}Message ETTORE…  ${C.accent}📎 attach${C.dim} (ctrl+o)  / commands  ! shell${C.reset}`
         : `${C.dim}Type /connect to start, or /help for commands${C.reset}`;
     }
 
@@ -1036,7 +1117,11 @@ class TUI {
     }
 
     // Multi-line: wrap user input. Reserve 1 column for the cursor glyph.
-    const rows = this._wrapInputText(this.input, maxLen - 1, TUI.INPUT_MAX_ROWS);
+    const attachmentRows = this.attachments.length
+      ? this._wrapInputText(`📎 ${this.attachments.map(file => this._truncate(file.name, 20)).join('  ')}  ⌫ remove last`, maxLen - 1, 2)
+      : [];
+    const inputRows = this._wrapInputText(this.input, maxLen - 1, Math.max(1, TUI.INPUT_MAX_ROWS - attachmentRows.length));
+    const rows = [...attachmentRows, ...inputRows].slice(0, TUI.INPUT_MAX_ROWS);
     return rows.map((rowText, idx) => {
       const isLast = idx === rows.length - 1;
       const payload = `${C.text}${rowText}${isLast ? '▋' : ''}${C.reset}`;
@@ -1046,29 +1131,78 @@ class TUI {
 
   _renderSidebar(width) {
     const lines = [];
-    const header = `${C.bold}${C.accent} ETTORE PANEL${C.reset}`;
+    const header = `${C.bold}${C.accent}▌ ETTORE${C.reset} ${C.dim}SESSION${C.reset}`;
     lines.push(header);
-    lines.push(`${C.dim}${'-'.repeat(Math.max(4, width - 1))}${C.reset}`);
+    lines.push(`${C.border}${'━'.repeat(Math.max(4, width))}${C.reset}`);
+
+    // /loop section: only when there's something to show. Either an active
+    // loop (top-of-mind status: which step is running and how many remain)
+    // or the most recent completed loop in this session (so the user can
+    // see "✓ 5/5 step" after the run finishes).
+    if (this.loopStatus) {
+      const ls = this.loopStatus;
+      const titleMax = Math.max(8, width - 14);
+      if (ls.active) {
+        // Animated dot — alternates ●/○ on every render so the eye catches it.
+        const pulse = (this.animationFrame % 4 < 2) ? `${C.warn}●${C.reset}` : `${C.accent}●${C.reset}`;
+        const done = ls.completedTitles?.length || 0;
+        const cur = Math.min(done + 1, ls.totalSteps);
+        const currentTitle = ls.steps?.[done]?.title || `step ${cur}`;
+        lines.push(`${C.bold}${C.accent}LOOP${C.reset} ${pulse} ${C.text}${cur}/${ls.totalSteps}${C.reset} ${C.dim}${this._truncate(currentTitle, titleMax)}${C.reset}`);
+        // Progress dots — one per step (✓ done, ● current, ◯ pending).
+        const dots = (ls.steps || []).map((_s, i) => {
+          if (i < done) return `${C.ok}✓${C.reset}`;
+          if (i === done) return `${C.warn}●${C.reset}`;
+          return `${C.dim}◯${C.reset}`;
+        }).join(' ');
+        lines.push(`  ${dots}`);
+      } else if (ls.totalSteps > 0) {
+        // Loop finished — show the summary once, then the section collapses.
+        lines.push(`${C.bold}${C.accent}LOOP${C.reset} ${C.ok}✓${C.reset} ${C.text}${ls.totalSteps}/${ls.totalSteps} step${C.totalSteps === 1 ? '' : 's'}${C.reset}`);
+        if (ls.goal) {
+          lines.push(`  ${C.dim}${this._truncate(ls.goal, width - 3)}${C.reset}`);
+        }
+      }
+    }
+
+    if (this.mission?.id) {
+      const ms = this.mission;
+      const statusColor = ms.status === 'failed' ? C.err : ms.status === 'completed' ? C.ok : C.warn;
+      const statusIcon = ms.status === 'failed' ? '!' : ms.status === 'completed' ? '✓' : '●';
+      lines.push(`${C.bold}${C.accent}MISSION${C.reset} ${statusColor}${statusIcon}${C.reset} ${C.text}${this._truncate(ms.status, Math.max(8, width - 12))}${C.reset}`);
+      lines.push(`  ${C.dim}${ms.turns} turn${ms.turns === 1 ? '' : 's'} · ${ms.tools?.total || 0} tools · ${ms.files?.length || 0} files${C.reset}`);
+      if (ms.progress?.plan || ms.progress?.todos) {
+        const progress = [ms.progress.plan ? `plan ${ms.progress.plan}` : '', ms.progress.todos ? `todo ${ms.progress.todos}` : '']
+          .filter(Boolean).join(' · ');
+        lines.push(`  ${C.dim}${this._truncate(progress, width - 3)}${C.reset}`);
+      }
+      if (ms.waves?.length) {
+        const wave = ms.waves[ms.waves.length - 1];
+        lines.push(`  ${C.dim}wave ${wave.index}/${wave.total} · ${wave.tools.length} parallel${C.reset}`);
+      }
+      if (ms.lastEvent?.detail) {
+        lines.push(`  ${C.dim}${this._truncate(ms.lastEvent.detail, width - 3)}${C.reset}`);
+      }
+    }
 
     const provider = connectionManager.activeProvider || this.provider || 'none';
     const model = connectionManager.activeModel || this.model || 'none';
     const cwdDisplay = process.cwd().split('/').slice(-2).join('/');
-    lines.push(`${C.dim}LLM${C.reset} ${C.text}${this._truncate(provider, Math.max(8, width - 5))}${C.reset}`);
-    lines.push(`${C.dim}Model${C.reset} ${C.text}${this._truncate(model, Math.max(8, width - 7))}${C.reset}`);
-    lines.push(`${C.dim}CWD${C.reset} ${C.text}${this._truncate(cwdDisplay, Math.max(8, width - 5))}${C.reset}`);
+    lines.push(`${C.dim}◉ provider${C.reset} ${C.text}${this._truncate(provider, Math.max(8, width - 11))}${C.reset}`);
+    lines.push(`${C.dim}◈ model${C.reset}    ${C.text}${this._truncate(model, Math.max(8, width - 11))}${C.reset}`);
+    lines.push(`${C.dim}⌂ cwd${C.reset}      ${C.text}${this._truncate(cwdDisplay, Math.max(8, width - 11))}${C.reset}`);
 
     const state = this.isRunning ? `${C.warn}running${C.reset}` : `${C.ok}idle${C.reset}`;
-    lines.push(`${C.dim}State${C.reset} ${state}`);
-    lines.push(`${C.dim}Cap${C.reset} ${this.modelCapability === 'full' ? `${C.ok}FULL${C.reset}` : this.modelCapability === 'lite' ? `${C.warn}LITE${C.reset}` : `${C.dim}?${C.reset}`}`);
-    lines.push(`${C.dim}Safety${C.reset} ${C.text}${String(this.safetyProfile || 'balanced').toUpperCase()}${C.reset}`);
+    const capability = this.modelCapability === 'full' ? `${C.ok}FULL${C.reset}` : this.modelCapability === 'lite' ? `${C.warn}LITE${C.reset}` : `${C.dim}?${C.reset}`;
+    lines.push(`${C.dim}● state${C.reset} ${state} ${C.dim}· cap${C.reset} ${capability}`);
+    lines.push(`${C.dim}◆ safety${C.reset} ${C.text}${String(this.safetyProfile || 'balanced').toUpperCase()}${C.reset}`);
     const routeText = this.dynamicToolRouting
       ? `${this.routedToolCount || 0} dynamic`
       : 'all tools';
-    lines.push(`${C.dim}Route${C.reset} ${C.text}${routeText}${C.reset}`);
-    lines.push(`${C.dim}Cost${C.reset} ${this._statusCostText()}`);
-    lines.push(`${C.dim}Ctx${C.reset} ${this._statusCtxText()}`);
-    lines.push(`${C.dim}Msgs${C.reset} ${C.text}${this.messages.filter(m => m.role !== 'todos').length}${C.reset}`);
-    lines.push(`${C.bold}${C.dim}Recent tools${C.reset}`);
+    lines.push(`${C.dim}↗ route${C.reset} ${C.text}${routeText}${C.reset}`);
+    lines.push(`${C.dim}cost${C.reset} ${this._statusCostText()} ${C.dim}· ctx${C.reset} ${this._statusCtxText()}`);
+    lines.push(`${C.dim}msgs${C.reset} ${C.text}${this.messages.filter(m => m.role !== 'todos').length}${C.reset}`);
+    lines.push(`${C.bold}${C.accent}▸ ACTIVITY${C.reset}`);
 
     const liveTools = this.streaming?.tools || [];
     const lastAssistant = [...this.messages].reverse().find(m => m.role === 'assistant' && m.tools?.length);
@@ -1084,7 +1218,7 @@ class TUI {
     }
 
     const approvals = listInstallSessionApprovals();
-    lines.push(`${C.bold}${C.dim}Approvals${C.reset}`);
+    lines.push(`${C.bold}${C.accent}▸ APPROVALS${C.reset}`);
     if (approvals.length === 0) {
       lines.push(`${C.dim}none${C.reset}`);
     } else {
@@ -1112,14 +1246,14 @@ class TUI {
       }
     }
 
-    lines.push(`${C.bold}${C.dim}Quick keys${C.reset}`);
+    lines.push(`${C.bold}${C.accent}▸ KEYS${C.reset}`);
     lines.push(`${C.accent}/${C.reset} ${C.dim}commands${C.reset}`);
-    lines.push(`${C.accent}@${C.reset} ${C.dim}attach image${C.reset}`);
+    lines.push(`${C.accent}📎${C.reset} ${C.dim}attach file (ctrl+o)${C.reset}`);
     lines.push(`${C.accent}!${C.reset} ${C.dim}shell cmd${C.reset}`);
     lines.push(`${C.accent}tab${C.reset} ${C.dim}build/plan${C.reset}`);
 
     while (lines.length < this.availableHeight) lines.push('');
-    return lines.slice(0, this.availableHeight).map(l => this._truncateVisual(l, width));
+    return lines.slice(0, this.availableHeight).map(l => this._padVisual(l, width));
   }
 
   _statusCostText() {
@@ -1268,7 +1402,10 @@ class TUI {
   }
 
   _visualLen(s) {
-    const plain = this._stripAnsi(s || '');
+    // Width measurement must preserve padding spaces. `_stripAnsi` also
+    // normalizes repeated whitespace for prose, which is correct for text
+    // content but wrong for terminal rows that are intentionally padded.
+    const plain = stripAllAnsi(String(s || '')).replace(/\r/g, '');
     let width = 0;
     for (let i = 0; i < plain.length; i++) {
       const cp = plain.codePointAt(i);
@@ -1432,10 +1569,75 @@ class TUI {
   removeChar()   { this.input = this.input.slice(0,-1); this.needsRender = true; }
   clearInput()   { this.input = '';                   this.needsRender = true; }
 
+  openFilePicker(options = {}) {
+    this.filePicker = { selecting: options.selecting === true, error: '' };
+    this.needsRender = true;
+  }
+
+  closeFilePicker() {
+    this.filePicker = null;
+    this.needsRender = true;
+  }
+
+  addAttachment(file) {
+    if (!file?.path) return false;
+    if (this.attachments.some(item => item.path === file.path)) return false;
+    this.attachments.push(file);
+    this.needsRender = true;
+    return true;
+  }
+
+  clearAttachments() {
+    this.attachments = [];
+    this.needsRender = true;
+  }
+
+  removeLastAttachment() {
+    if (this.attachments.length === 0) return null;
+    const removed = this.attachments.pop();
+    this.needsRender = true;
+    return removed;
+  }
+
+  _renderFilePicker() {
+    if (!this.filePicker) return '';
+    const width = Math.max(52, Math.min(this.cols - 6, 88));
+    const left = Math.max(2, Math.floor((this.cols - width) / 2));
+    const rows = 7;
+    const top = Math.max(2, Math.floor((this.rows - rows) / 2));
+    const bg = '\x1b[48;5;238m';
+    const headerBg = '\x1b[48;5;24m';
+    let out = '';
+
+    for (let i = 0; i < rows; i++) {
+      out += ANSI.move(left, top + i) + `${bg}${' '.repeat(width)}${C.reset}`;
+    }
+    out += ANSI.move(left, top) + `${headerBg}`;
+    const title = `  ${C.bold}${C.accent}📎 Allega file${C.reset}  ${C.dim}selettore di sistema${C.reset}`;
+    out += title + ' '.repeat(Math.max(0, width - this._visualLen(title))) + C.reset;
+
+    out += ANSI.move(left, top + 2) + bg;
+    const status = this.filePicker.error
+      ? `${C.err}✗ ${this.filePicker.error}${C.reset}`
+      : `${C.accent}▣${C.reset} ${C.text}Seleziona uno o più file nella finestra che si è aperta.${C.reset}`;
+    const statusLine = `  ${this._truncateVisual(status, width - 2)}`;
+    out += statusLine + ' '.repeat(Math.max(0, width - this._visualLen(statusLine))) + C.reset;
+
+    out += ANSI.move(left, top + 3) + bg;
+    const hintLine = `  ${C.dim}Immagini, documenti, audio, video e file di progetto${C.reset}`;
+    out += hintLine + ' '.repeat(Math.max(0, width - this._visualLen(hintLine))) + C.reset;
+
+    out += ANSI.move(left, top + 5) + `${headerBg}`;
+    const hint = `  ${C.dim}selezione multipla disponibile${C.reset}  ${C.dim}esc annulla${C.reset}  ${C.dim}allegati: ${this.attachments.length}${C.reset}`;
+    out += hint + ' '.repeat(Math.max(0, width - this._visualLen(hint))) + C.reset;
+    return out;
+  }
+
   // ─── Command palette ──────────────────────────────────────────────────────
   openCommandPalette(commands) {
     this.commandPaletteOpen  = true;
     this.commandFilter       = '';
+    this.commandInput        = '';
     this.commandIndex        = 0;
     this.commandScrollOffset = 0;
     this.commandList         = commands;
@@ -1446,6 +1648,7 @@ class TUI {
   closeCommandPalette() {
     this.commandPaletteOpen  = false;
     this.commandFilter       = '';
+    this.commandInput        = '';
     this.commandIndex        = 0;
     this.commandScrollOffset = 0;
     this.needsRender         = true;
@@ -2010,75 +2213,85 @@ class TUI {
     if (!this.askUser) return '';
     const { question, options, sensitive } = this.askUser;
     const hasOptions = Array.isArray(options) && options.length > 0;
-    const modalRows = hasOptions ? (options.length + 4) : 7;
+    const BG_DIM = '\x1b[48;5;233m';
     const BG_MODAL = '\x1b[48;5;238m';
     const BG_HEADER = '\x1b[48;5;236m';
     const BG_SELECTED = '\x1b[48;5;24m';
-    const width = Math.min(Math.max(56, Math.floor(this.cols * 0.72)), Math.max(40, this.cols - 8));
+    const width = Math.min(Math.max(40, Math.floor(this.cols * 0.72)), Math.max(28, this.cols - 6));
+    const innerWidth = Math.max(18, width - 2);
     const left = Math.max(1, Math.floor((this.cols - width) / 2) + 1);
-    const top = Math.max(2, Math.floor((this.rows - modalRows) / 2));
     const keepBg = (str, bg) => String(str || '').replace(/\x1b\[0m/g, `\x1b[0m${bg}`);
-    
+    const fit = (str, max = innerWidth) => this._truncateVisual(String(str || ''), max);
+    const line = (content, bg = BG_MODAL) => {
+      const clipped = fit(content);
+      const padding = ' '.repeat(Math.max(0, innerWidth - this._visualLen(clipped)));
+      return `${bg}│${keepBg(clipped, bg)}${bg}${padding}${bg}│${C.reset}`;
+    };
+
+    // A question is a modal interaction, not another chat message. Cover the
+    // whole frame first so the transcript cannot show through the prompt and
+    // make the user's answer look like ordinary CLI output.
     let out = '';
-    
-    // Modal background
-    for (let i = 0; i < modalRows; i++) {
-      out += ANSI.move(left, top + i);
-      out += `${BG_MODAL}${' '.repeat(width)}\x1b[0m`;
+    for (let row = 1; row <= this.rows; row++) {
+      out += ANSI.move(1, row) + `${BG_DIM}${' '.repeat(this.cols)}${C.reset}`;
     }
-    
-    // Question/header
-    out += ANSI.move(left, top);
-    out += BG_HEADER;
-    const qLine = keepBg(` ${C.bold}${C.accent}?${C.reset} ${C.text}${question}${C.reset}`, BG_HEADER);
-    out += qLine;
-    out += ' '.repeat(Math.max(0, width - this._visualLen(qLine)));
-    out += C.reset;
-    
+
+    const questionLines = [];
+    for (const rawLine of String(question || '').split('\n')) {
+      questionLines.push(...this._wrapText(this._sanitizeForRender(rawLine), innerWidth - 4));
+    }
+    const maxQuestionLines = Math.max(1, Math.min(5, this.rows - 7));
+    if (questionLines.length > maxQuestionLines) {
+      questionLines.length = maxQuestionLines;
+      questionLines[maxQuestionLines - 1] = fit(`${questionLines[maxQuestionLines - 1]}…`, innerWidth - 4);
+    }
+
+    const maxModalRows = Math.max(5, this.rows - 2);
+    const baseRows = questionLines.length + (hasOptions ? 4 : 5);
+    const maxVisibleOptions = hasOptions
+      ? Math.max(1, Math.min(options.length, maxModalRows - baseRows))
+      : 0;
+    const optionStart = hasOptions
+      ? Math.min(Math.max(0, this.askUserIdx - maxVisibleOptions + 1), Math.max(0, options.length - maxVisibleOptions))
+      : 0;
+    const visibleOptions = hasOptions ? options.slice(optionStart, optionStart + maxVisibleOptions) : [];
+    const modalRows = Math.min(maxModalRows, baseRows + visibleOptions.length);
+    const top = Math.max(1, Math.min(Math.floor((this.rows - modalRows) / 2), this.rows - modalRows));
+    const border = (leftChar, rightChar, bg = BG_HEADER) =>
+      `${bg}${leftChar}${'─'.repeat(Math.max(0, innerWidth))}${rightChar}${C.reset}`;
+
+    out += ANSI.move(left, top) + border('╭', '╮');
+    out += ANSI.move(left, top + 1) + line(` ${C.bold}${C.accent}?${C.reset} ${C.bold}${C.text}ETTORE needs your input${C.reset}`, BG_HEADER);
+    for (let i = 0; i < questionLines.length; i++) {
+      // Every row gets an explicit cursor position; embedded newlines are
+      // deliberately avoided because they can desynchronise the overlay.
+      out += ANSI.move(left, top + 2 + i) + line(`  ${C.text}${questionLines[i]}${C.reset}`);
+    }
+
+    let row = top + 2 + questionLines.length;
     if (hasOptions) {
-      for (let i = 0; i < options.length; i++) {
-        out += ANSI.move(left, top + 2 + i);
-        const isSelected = i === this.askUserIdx;
-        if (isSelected) {
-          out += BG_SELECTED;
-          const line = keepBg(` ${C.bold}${C.ok}▸${C.reset} ${C.bold}${C.text}${options[i]}${C.reset}`, BG_SELECTED);
-          out += line;
-          out += ' '.repeat(Math.max(0, width - this._visualLen(line)));
-        } else {
-          out += BG_MODAL;
-          const line = keepBg(` ${C.dim}  ${options[i]}${C.reset}`, BG_MODAL);
-          out += line;
-          out += ' '.repeat(Math.max(0, width - this._visualLen(line)));
-        }
-        out += C.reset;
+      for (let i = 0; i < visibleOptions.length; i++) {
+        const optionIndex = optionStart + i;
+        const isSelected = optionIndex === this.askUserIdx;
+        const bg = isSelected ? BG_SELECTED : BG_MODAL;
+        const marker = isSelected ? `${C.bold}${C.ok}▸${C.reset}` : ' ';
+        const optionText = fit(String(visibleOptions[i] || ''), innerWidth - 5);
+        out += ANSI.move(left, row++) + line(` ${marker} ${isSelected ? C.bold : C.dim}${C.text}${optionText}${C.reset}`, bg);
       }
-
-      out += ANSI.move(left, top + 2 + options.length);
-      out += BG_HEADER;
-      const hint = keepBg(` ${C.dim}↑↓ navigate${C.reset} ${C.dim}↵ select${C.reset} ${C.dim}esc cancel${C.reset}`, BG_HEADER);
-      out += hint;
-      out += ' '.repeat(Math.max(0, width - this._visualLen(hint)));
-      out += C.reset;
+      const position = options.length > visibleOptions.length
+        ? ` ${C.dim}${this.askUserIdx + 1}/${options.length}${C.reset}`
+        : '';
+      out += ANSI.move(left, row++) + line(` ${C.dim}↑↓ navigate${C.reset} ${C.dim}↵ select${C.reset} ${C.dim}esc cancel${C.reset}${position}`, BG_HEADER);
     } else {
-      out += ANSI.move(left, top + 2);
-      out += BG_MODAL;
       const answer = this.askUserInput || '';
-      const maxAnswerLen = Math.max(8, width - 14);
+      const maxAnswerLen = Math.max(8, innerWidth - 14);
       const rawShown = sensitive ? '•'.repeat(answer.length) : answer;
-      const shown = this._truncate(rawShown, maxAnswerLen);
-      const inputLine = keepBg(` ${C.dim}Answer:${C.reset} ${C.text}${shown}${C.reset}${C.dim}▋${C.reset}`, BG_MODAL);
-      out += inputLine;
-      out += ' '.repeat(Math.max(0, width - this._visualLen(inputLine)));
-      out += C.reset;
-
-      out += ANSI.move(left, top + 4);
-      out += BG_HEADER;
-      const hint = keepBg(` ${C.dim}type response${C.reset} ${C.dim}↵ send${C.reset} ${C.dim}esc cancel${C.reset}`, BG_HEADER);
-      out += hint;
-      out += ' '.repeat(Math.max(0, width - this._visualLen(hint)));
-      out += C.reset;
+      const shown = fit(rawShown, maxAnswerLen);
+      out += ANSI.move(left, row++) + line(` ${C.dim}Answer:${C.reset} ${C.text}${shown}${C.reset}${C.dim}▋${C.reset}`);
+      out += ANSI.move(left, row++) + line(` ${C.dim}type response${C.reset} ${C.dim}↵ send${C.reset} ${C.dim}esc cancel${C.reset}`, BG_HEADER);
     }
-    
+    out += ANSI.move(left, row) + border('╰', '╯');
+
     return out;
   }
 

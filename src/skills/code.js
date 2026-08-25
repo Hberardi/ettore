@@ -1,6 +1,7 @@
 export default {
   name: 'code',
   description: 'Specializzato in scrittura e analisi codice',
+  triggers: ['codice', 'implementa', 'modifica', 'funzione', 'test', 'refactoring'],
   instructions: `Sei uno specialista nella scrittura di codice di alta qualità.
 Segui queste regole:
 1. Scrivi codice pulito e idiomatico

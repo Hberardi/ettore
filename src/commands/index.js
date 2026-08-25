@@ -178,7 +178,7 @@ First steps
 `;
 
       output += group('Core commands', ['help', 'status', 'doctor', 'providers', 'models', 'connect', 'use', 'disconnect']);
-      output += group('Session and project', ['clear', 'new', 'sessions', 'resume', 'init', 'memory', 'compress', 'agent', 'caveman', 'approvals', 'history', 'team']);
+      output += group('Session and project', ['clear', 'new', 'sessions', 'resume', 'init', 'memory', 'skills', 'mission', 'compress', 'agent', 'caveman', 'approvals', 'history', 'team', 'loop']);
       output += group('Configuration', ['keys', 'config', 'theme', 'system', 'version', 'exit']);
       output += '\nUse /help <command> for details, for example /help connect.';
 
@@ -388,12 +388,18 @@ ${setupHint()}`;
           : firstModelId
             ? `\n\nUse /use ${provider} <model> to select a model`
             : '\n\nNo models were returned. Run /models after the provider is available.';
-        return `${result.message}\n\nAvailable models:\n${modelsList || '(none)'}${more ? '\n' + more : ''}${activeNote}`;
+        // Keyless providers (claude-code) reach an account rather than a key —
+        // say which one, so it is obvious what the session is about to spend.
+        const accountNote = manager.getProvider?.(provider)?.connectionNote?.();
+        const account = accountNote ? `\n\n${accountNote}` : '';
+        return `${result.message}${account}\n\nAvailable models:\n${modelsList || '(none)'}${more ? '\n' + more : ''}${activeNote}`;
       }
       
-      const next = String(provider).toLowerCase() === 'ollama'
-        ? '\nNext: make sure Ollama is running, then retry /connect ollama.'
-        : '\nNext: check the key, provider status, or run /doctor.';
+      const next = result.needsLogin
+        ? `\nNext: sign in, then retry /connect ${provider}.`
+        : String(provider).toLowerCase() === 'ollama'
+          ? '\nNext: make sure Ollama is running, then retry /connect ollama.'
+          : '\nNext: check the key, provider status, or run /doctor.';
       return `Error: ${redactSecrets(result.error, [apiKey])}${next}`;
     }
   },
@@ -736,6 +742,7 @@ stream: ${config.stream}
 workdir: ${config.workdir}
 safetyProfile: ${config.safetyProfile}
 dynamicToolRouting: ${config.dynamicToolRouting}
+maxIterations: ${config.maxIterations || 50}
 maxToolsPerRequest: ${config.maxToolsPerRequest || 16}`;
 
         if (hasLocal) {
@@ -825,6 +832,17 @@ maxToolsPerRequest: ${config.maxToolsPerRequest || 16}`;
         return `Max tools per request set to: ${count}${isLocal ? ' (project-local)' : ' (global)'}`;
       }
 
+      if (key === 'max-iterations' && value) {
+        const count = Number.parseInt(value, 10);
+        if (!Number.isInteger(count) || count < 1 || count > 200) {
+          return 'Invalid max-iterations value. Use an integer from 1 to 200.';
+        }
+        if (isLocal) await saveConfigAsync('maxIterations', count, { local: true });
+        else saveConfig('maxIterations', count);
+        if (context.agent) context.agent.maxIterations = count;
+        return `Max iterations set to: ${count}${isLocal ? ' (project-local)' : ' (global)'}`;
+      }
+
       return `Usage: /config [key] [value] [--local|-l]
 
 Available keys:
@@ -834,6 +852,7 @@ Available keys:
   theme <name>     Set the UI theme
   safety <profile> safe|balanced|autonomous
   tool-routing <on|off> Enable dynamic tool selection
+  max-iterations <1-200> Maximum agent loop iterations
   max-tools <4-28> Maximum schemas sent per request
 
 Flags:
@@ -1262,6 +1281,94 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
     }
   },
 
+  skills: {
+    description: 'Manage global skills loaded automatically by ETTORE',
+    usage: 'skills [list|show|create|reload] [name]',
+    aliases: ['skill'],
+    handler: async (args, context = {}) => {
+      const agent = context.agent;
+      const [subcommand = 'list', name] = args;
+      const sub = String(subcommand).toLowerCase();
+
+      // Creating a global skill only needs the local web studio. It must work
+      // even before a provider is connected and before an Agent exists.
+      if (sub === 'create' || sub === 'new') {
+        try {
+          const { startSkillStudio } = await import('../web/skill-studio.js');
+          const { url, reused, browserOpened } = await startSkillStudio({
+            open: true,
+            onCreated: async () => agent?.reloadSkills?.(),
+          });
+          const state = reused ? 'already open' : 'opened';
+          const browserNote = browserOpened
+            ? ''
+            : '\n⚠ Browser automatico non disponibile. Apri manualmente questo URL.';
+          return `✓ Skill Studio ${state}: ${url}${browserNote}\nCreate a global skill from the web form. It will be available in every project.`;
+        } catch (error) {
+          return `✗ Cannot open Skill Studio: ${error.message}`;
+        }
+      }
+
+      if (!agent?.skillSystem) return 'Skill system not available in this session.';
+
+      if (sub === 'list' || sub === 'ls') {
+        const skills = agent.skillSystem.getAllSkills();
+        if (!skills.length) return 'No skills loaded.';
+        const active = new Set(agent.workingMemory?.activeSkills || []);
+        return `Skills (${skills.length}):\n` + skills.map(skill => {
+          const marker = active.has(skill.name) ? ' *active*' : '';
+          const source = skill.source ? ` [${skill.source}]` : '';
+          return `  ${skill.name}${marker}${source} — ${skill.description}`;
+        }).join('\n');
+      }
+
+      if (sub === 'show' || sub === 'info') {
+        if (!name) return 'Usage: /skills show <name>';
+        const skill = agent.skillSystem.getSkill(name);
+        if (!skill) return `Skill "${name}" not found.`;
+        return `─── Skill: ${skill.name} ───\n${skill.description}\n\n${skill.instructions}`;
+      }
+
+      if (sub === 'reload') {
+        const skills = await agent.reloadSkills();
+        return `✓ Skills reloaded: ${skills.length} loaded.`;
+      }
+
+      return 'Usage: /skills [list|show <name>|create|reload]';
+    },
+  },
+
+  mission: {
+    description: 'Show the live execution graph for the current mission',
+    usage: 'mission [status|show|history|clear]',
+    aliases: ['m'],
+    handler: async (args, context = {}) => {
+      const mission = context.mission;
+      if (!mission) return 'Mission Control is available in the interactive TUI.';
+      const [subcommand = 'status'] = args;
+      const sub = String(subcommand).toLowerCase();
+
+      if (sub === 'clear' || sub === 'reset') {
+        mission.clear();
+        return '✓ Mission Control cleared. The next prompt starts a new mission.';
+      }
+
+      if (sub === 'history' || sub === 'log') {
+        const history = mission.snapshot().history || [];
+        if (!history.length) return 'No completed missions in this session.';
+        return 'Mission history:\n' + history.map((item, index) => {
+          const goal = String(item.goal || '(untitled)').replace(/\s+/g, ' ').slice(0, 100);
+          return `  ${index + 1}. ${item.status} · ${item.turns} turns · ${item.files?.length || 0} files · ${goal}`;
+        }).join('\n');
+      }
+
+      if (sub !== 'status' && sub !== 'show') {
+        return 'Usage: /mission [status|show|history|clear]';
+      }
+      return mission.format();
+    },
+  },
+
   ecosystem: {
     description: 'Manage ETTORE self-learning ecosystem memory (show/prune/export/path)',
     usage: 'ecosystem [show|prune|export|path]',
@@ -1551,9 +1658,398 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
 
       let summary = `✓ Team "${teamName}" creato con ${n} agenti!\n`;
       summary += `File: team/${teamName}.md\n\n`;
-      summary += agents.map((a, i) => `  ${i + 1}. ${a.name} — ${a.competencies}`).join('\n');
+      summary += agents.map((a, i) => `  ${i + 1}. ${a.name} — ${a.competenze}`).join('\n');
       summary += `\n\nRichiama il team con: /team/${teamName}`;
       return summary;
     }
+  },
+
+  // ── /loop — auto-generate a sequence of prompts from a high-level goal ────
+  // Sub-commands: start <goal> [max], stop, status, list, show <name>, run <name>,
+  // clear [<name>]. The TUI owns the runtime state (queue, current step, etc.)
+  // via startLoop/stopLoop hooks injected through `context`. Static plan:
+  // one LLM call to break the goal into 3-7 sub-prompts, then mechanical
+  // sequential execution in the same agent conversation.
+  loop: {
+    description: 'Auto-generate a prompt sequence from a goal and run it step-by-step',
+    usage: 'loop [start <goal> [max]|stop|status|list|show <n>|run <n>|clear [<n>]]',
+    aliases: [],
+    handler: async (args, context = {}) => {
+      const { uiBridge } = await import('../tools/bridge.js');
+      const loops = await import('../loops/index.js');
+
+      const askUser = (question, options = []) => new Promise((resolve) => {
+        if (uiBridge.listenerCount('askUser') === 0) {
+          // Non-interactive context: fall back to immediate 'Esegui' for headless runs.
+          resolve(options[0] || '');
+          return;
+        }
+        uiBridge.emit('askUser', { question, options, resolve });
+      });
+
+      const fmtPlan = (plan) => {
+        const head = `📋 Loop plan${plan.name ? ` (${plan.name})` : ''}: ${plan.goal || ''}\n`
+          + (plan.rationale ? `${plan.rationale}\n` : '')
+          + `\nSteps (${plan.steps.length}):\n`;
+        const body = plan.steps.map((s, i) => {
+          const firstLine = String(s.prompt || '').split('\n').find(l => l.trim().length > 0) || '';
+          const preview = firstLine.length > 110 ? `${firstLine.slice(0, 110)}…` : firstLine;
+          return `  ${i + 1}. ${s.title}\n     ${preview}`;
+        }).join('\n');
+        return head + body;
+      };
+
+      const reviewAndEnqueue = async (plan, { originalGoal } = {}) => {
+        // Loop until the user picks Esegui or Annulla. Modifica + Salva just
+        // mutate the plan and re-display it.
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const choice = await askUser(
+            `${fmtPlan(plan)}\n\nCosa faccio?`,
+            ['Esegui', 'Modifica uno step', 'Salva e poi esegui', 'Salva senza eseguire', 'Annulla'],
+          );
+          if (choice === '__cancelled__' || /^annull/i.test(choice || '')) {
+            return 'Annullato.';
+          }
+          if (/^esegui/i.test(choice || '')) {
+            if (typeof context.startLoop === 'function') {
+              context.startLoop({ plan, name: plan.name || null });
+              return `▶ Loop avviato: ${plan.steps.length} step in coda. /loop stop per fermare.`;
+            }
+            return '⚠ Loop non disponibile in questo contesto (serve la TUI interattiva).';
+          }
+          if (/^salva senza/i.test(choice || '')) {
+            const saveName = await askUser('Nome del loop (es: auth-system):');
+            if (saveName === '__cancelled__' || !String(saveName || '').trim()) return 'Annullato.';
+            try {
+              await loops.saveLoop(saveName.trim(), plan, { goal: originalGoal || plan.goal });
+            } catch (e) {
+              return `✗ Salvataggio fallito: ${e.message}`;
+            }
+            return `✓ Salvato come "${saveName.trim()}".\nUsa /loop run ${saveName.trim()} per rieseguirlo.`;
+          }
+          if (/^salva e poi/i.test(choice || '')) {
+            const saveName = await askUser('Nome del loop (es: auth-system):');
+            if (saveName === '__cancelled__' || !String(saveName || '').trim()) return 'Annullato.';
+            try {
+              const saved = await loops.saveLoop(saveName.trim(), plan, { goal: originalGoal || plan.goal });
+              plan.name = saved.name;
+            } catch (e) {
+              return `✗ Salvataggio fallito: ${e.message}`;
+            }
+            if (typeof context.startLoop === 'function') {
+              context.startLoop({ plan, name: plan.name });
+              return `▶ Loop "${plan.name}" salvato e avviato: ${plan.steps.length} step. /loop stop per fermare.`;
+            }
+            return `✓ Salvato come "${plan.name}". (Loop non avviato: serve TUI interattiva.)`;
+          }
+          if (/^modif/i.test(choice || '')) {
+            const whichRaw = await askUser(
+              'Quale step vuoi modificare?',
+              plan.steps.map((s, i) => `${i + 1}. ${s.title}`),
+            );
+            if (whichRaw === '__cancelled__') return 'Annullato.';
+            const idx = parseInt(String(whichRaw).trim(), 10) - 1;
+            if (Number.isNaN(idx) || idx < 0 || idx >= plan.steps.length) {
+              return 'Numero di step non valido. Riprova con /loop start o /loop run.';
+            }
+            const newPrompt = await askUser(
+              `Nuovo prompt per step ${idx + 1} (${plan.steps[idx].title}).\nInvio = mantieni il prompt attuale.\nPrompt attuale:\n${plan.steps[idx].prompt}`,
+            );
+            if (newPrompt === '__cancelled__') return 'Annullato.';
+            if (String(newPrompt || '').trim()) {
+              plan.steps[idx].prompt = String(newPrompt).trim();
+            }
+            // Re-enter the review loop.
+            continue;
+          }
+          return 'Scelta non riconosciuta, riprova.';
+        }
+      };
+
+      const [subRaw, ...rest] = args;
+      const sub = String(subRaw || 'status').toLowerCase();
+
+      // ── /loop stop ─────────────────────────────────────────────────────
+      if (sub === 'stop' || sub === 'abort' || sub === 'cancel') {
+        if (typeof context.stopLoop === 'function') {
+          const wasActive = context.stopLoop();
+          return wasActive ? '⏹ Loop fermato (dopo lo step corrente).' : 'Nessun loop attivo.';
+        }
+        return 'Nessun loop attivo.';
+      }
+
+      // ── /loop status ───────────────────────────────────────────────────
+      if (sub === 'status' || sub === 'st') {
+        const s = loops.getLoopStatus();
+        if (!s.active && !s.totalSteps) {
+          return 'Nessun loop in esecuzione.\nUsa /loop start <goal> per generarne uno.';
+        }
+        const done = s.completedTitles.length;
+        const current = s.active ? `step ${done + 1}/${s.totalSteps}` : `completato (${s.totalSteps}/${s.totalSteps})`;
+        const lines = [
+          `Loop status: ${s.active ? 'attivo' : 'completato'}`,
+          `Goal: ${s.goal || '(non specificato)'}`,
+          s.name ? `Name: ${s.name}` : null,
+          `Progress: ${current}`,
+          `Started: ${s.startedAt || 'n/a'}`,
+        ].filter(Boolean);
+        if (s.steps.length) {
+          lines.push('', 'Steps:');
+          s.steps.forEach((step, i) => {
+            const mark = i < done ? '✓' : (i === done && s.active ? '▶' : '·');
+            lines.push(`  ${mark} ${i + 1}. ${step.title}`);
+          });
+        }
+        return lines.join('\n');
+      }
+
+      // ── /loop list ─────────────────────────────────────────────────────
+      if (sub === 'list' || sub === 'ls') {
+        const items = await loops.listLoops();
+        if (!items.length) {
+          return 'Nessun loop salvato.\nUsa /loop start <goal> per generarne uno, oppure /loop clear dopo averne eseguito uno.';
+        }
+        const lines = [`Loop salvati (${items.length}):`];
+        for (const it of items) {
+          const goal = it.goal ? ` — ${it.goal.slice(0, 70)}${it.goal.length > 70 ? '…' : ''}` : '';
+          lines.push(`  • ${it.name}  (${it.stepCount} step, ${it.createdAt || 'n/d'})${goal}`);
+        }
+        lines.push('', 'Comandi: /loop show <name>, /loop run <name>, /loop clear <name>');
+        return lines.join('\n');
+      }
+
+      // ── /loop show <name> ──────────────────────────────────────────────
+      if (sub === 'show') {
+        const name = rest[0];
+        if (!name) return 'Usage: /loop show <name>';
+        try {
+          const plan = await loops.loadLoop(name);
+          return fmtPlan(plan) + `\n\nCreated: ${plan.createdAt || 'n/d'}\nProvider: ${plan.provider || 'n/d'} / ${plan.model || 'n/d'}`;
+        } catch {
+          return `Loop "${name}" non trovato. Usa /loop list per vederli.`;
+        }
+      }
+
+      // ── /loop clear [name] ─────────────────────────────────────────────
+      if (sub === 'clear' || sub === 'delete' || sub === 'rm') {
+        const name = rest[0];
+        if (name) {
+          const ok = await loops.deleteLoop(name);
+          return ok ? `✓ Loop "${name}" eliminato.` : `Loop "${name}" non trovato.`;
+        }
+        const items = await loops.listLoops();
+        if (!items.length) return 'Nessun loop salvato.';
+        const which = await askUser('Quale loop elimino?', items.map(i => i.name));
+        if (which === '__cancelled__') return 'Annullato.';
+        const ok = await loops.deleteLoop(which);
+        return ok ? `✓ Loop "${which}" eliminato.` : `Loop "${which}" non trovato.`;
+      }
+
+      // ── /loop run <name> ───────────────────────────────────────────────
+      if (sub === 'run' || sub === 'exec') {
+        const name = rest[0];
+        if (!name) return 'Usage: /loop run <name>';
+        let plan;
+        try {
+          plan = await loops.loadLoop(name);
+        } catch {
+          return `Loop "${name}" non trovato. Usa /loop list per vederli.`;
+        }
+        plan.name = plan.name || name;
+        return reviewAndEnqueue(plan, { originalGoal: plan.goal });
+      }
+
+      // ── /loop start <goal> [max] ───────────────────────────────────────
+      if (sub === 'start' || sub === 'go') {
+        const goalWithMax = args.slice(1).join(' ').trim();
+        if (!goalWithMax) return 'Usage: /loop start <goal> [max-steps]';
+
+        // Optional trailing integer = max steps (3-7 by default, capped at 20).
+        let maxSteps = 5;
+        let cleanGoal = goalWithMax;
+        const maxMatch = goalWithMax.match(/\s+(\d{1,2})\s*$/);
+        if (maxMatch) {
+          const n = parseInt(maxMatch[1], 10);
+          if (Number.isInteger(n) && n >= 1 && n <= 20) {
+            maxSteps = n;
+            cleanGoal = goalWithMax.slice(0, maxMatch.index).trim();
+          }
+        }
+        if (!cleanGoal) return 'Goal vuoto. Usage: /loop start <goal> [max-steps]';
+
+        let plan;
+        try {
+          plan = await loops.generatePlan(cleanGoal, { maxSteps });
+        } catch (e) {
+          return `✗ Generazione piano fallita: ${e.message}`;
+        }
+        plan.name = null;
+        return reviewAndEnqueue(plan, { originalGoal: cleanGoal });
+      }
+
+      return `Usage: /loop [start <goal> [max]|stop|status|list|show <name>|run <name>|clear [<name>]]`;
+    },
+  },
+
+  // ── /plugins — manage the plugin system ──────────────────────────────────
+  // Sub-commands: list, available, enable <name>, disable <name>,
+  // reload <name>, info <name>. The runtime is provided by the TUI/CLI
+  // via `context.pluginRuntime`; when the system has no runtime the
+  // command is a no-op with a friendly message. After enable/disable/
+  // reload we trigger a rebuildAgent() so the new tool set is picked
+  // up on the next turn.
+  plugins: {
+    description: 'Manage plugins (list, enable, disable, reload, info)',
+    usage: 'plugins [list|available|enable|disable|reload|info] [name]',
+    aliases: ['plugin'],
+    handler: async (args, context = {}) => {
+      const runtime = context.pluginRuntime;
+      if (!runtime) {
+        return 'Plugin system not initialized.\nThe runtime is only available when the project has a plugin directory under ~/.config/ettore/plugins/.';
+      }
+
+      const [subCmd, name] = args;
+      const sub = String(subCmd || 'list').toLowerCase();
+
+      // ── /plugins list — currently enabled plugins ─────────────────────
+      if (sub === 'list' || sub === 'ls') {
+        const enabled = runtime.list();
+        if (enabled.length === 0) {
+          return 'No plugins enabled.\nUse /plugins available to see what is on disk, then /plugins enable <name>.';
+        }
+        return `Enabled plugins (${enabled.length}):\n` + enabled.map((p) => {
+          const perm = (p.permissions && p.permissions.length) ? ` perms: ${p.permissions.join(', ')}` : '';
+          return `  ${p.name.padEnd(20)} v${p.version}  ${p.toolCount} tool(s), ${p.commandCount} command(s)${perm}\n    ${p.description || '(no description)'}`;
+        }).join('\n');
+      }
+
+      // ── /plugins available — on-disk plugins (enabled or not) ────────
+      if (sub === 'available' || sub === 'all') {
+        let candidates = [];
+        try {
+          const { discoverPlugins } = await import('../plugins/loader.js');
+          candidates = await discoverPlugins(runtime._pluginsDir);
+        } catch (err) {
+          return `Error listing plugins: ${err.message}`;
+        }
+        if (candidates.length === 0) {
+          return 'No plugins found on disk.\nDrop a plugin into ~/.config/ettore/plugins/<name>/ with a plugin.json and an index.js to install one.';
+        }
+        const lines = [`Available plugins (${candidates.length}):`];
+        for (const c of candidates) {
+          const tag = runtime.has(c.name) ? ' [enabled]' : '';
+          lines.push(`  ${c.name}${tag}`);
+        }
+        return lines.join('\n');
+      }
+
+      // ── /plugins enable <name> ────────────────────────────────────────
+      if (sub === 'enable' || sub === 'on') {
+        if (!name) return 'Usage: /plugins enable <name>';
+        try {
+          const result = await runtime.enable(name);
+          if (context.rebuildAgent) {
+            try { await context.rebuildAgent(); } catch {}
+          }
+          const persisted = result.persistedOnDisk === false
+            ? '\n\n⚠ Plugin is enabled for this session, but persisting the on-disk marker failed. It will be lost on restart.'
+            : '';
+          return `✓ Plugin "${name}" enabled (v${result.manifest.version}).${persisted}`;
+        } catch (err) {
+          return `Error enabling plugin "${name}": ${err.message}`;
+        }
+      }
+
+      // ── /plugins disable <name> ───────────────────────────────────────
+      if (sub === 'disable' || sub === 'off') {
+        if (!name) return 'Usage: /plugins disable <name>';
+        try {
+          const result = await runtime.disable(name);
+          if (result.removed && context.rebuildAgent) {
+            try { await context.rebuildAgent(); } catch {}
+          }
+          if (result.removed) {
+            const errNote = result.onUnloadError
+              ? `\n\n⚠ Plugin's onUnload hook reported an error: ${result.onUnloadError}\nThe plugin has been disabled anyway.`
+              : '';
+            return `✓ Plugin "${name}" disabled.${errNote}`;
+          }
+          return `Plugin "${name}" is not enabled.`;
+        } catch (err) {
+          return `Error disabling plugin "${name}": ${err.message}`;
+        }
+      }
+
+      // ── /plugins reload <name> ────────────────────────────────────────
+      if (sub === 'reload') {
+        if (!name) return 'Usage: /plugins reload <name>';
+        try {
+          await runtime.reload(name);
+          if (context.rebuildAgent) {
+            try { await context.rebuildAgent(); } catch {}
+          }
+          return `✓ Plugin "${name}" reloaded.`;
+        } catch (err) {
+          return `Error reloading plugin "${name}": ${err.message}`;
+        }
+      }
+
+      // ── /plugins info <name> ──────────────────────────────────────────
+      if (sub === 'info' || sub === 'show') {
+        if (!name) return 'Usage: /plugins info <name>';
+        const entry = runtime.get(name);
+        if (entry) {
+          const m = entry.manifest;
+          const toolList = Object.keys(entry.tools || {}).map((t) => `      - ${t}`).join('\n');
+          const cmdList = Object.keys(entry.commands || {}).map((c) => `      /${c}`).join('\n');
+          return [
+            `Plugin: ${m.name}`,
+            `Version: ${m.version}`,
+            `apiVersion: ${m.apiVersion}`,
+            `Main: ${m.main}`,
+            `Root: ${m.root}`,
+            `Description: ${m.description || '(none)'}`,
+            `Author: ${m.author || '(none)'}`,
+            `License: ${m.license || '(none)'}`,
+            `Permissions: ${(m.permissions && m.permissions.length) ? m.permissions.join(', ') : '(none)'}`,
+            ``,
+            `Tools (${Object.keys(entry.tools || {}).length}):`,
+            toolList || '      (none)',
+            ``,
+            `Commands (${Object.keys(entry.commands || {}).length}):`,
+            cmdList || '      (none)',
+            ``,
+            `Loaded at: ${entry.loadedAt}`,
+            `Status: enabled`,
+          ].join('\n');
+        }
+        // Fallback: read the manifest from disk without enabling.
+        try {
+          const { readManifest } = await import('../plugins/loader.js');
+          const { join } = await import('path');
+          const { homedir } = await import('os');
+          const dir = runtime._pluginsDir || join(homedir(), '.config', 'ettore', 'plugins');
+          const m = await readManifest(join(dir, name));
+          return [
+            `Plugin: ${m.name} (on disk, not enabled)`,
+            `Version: ${m.version}`,
+            `apiVersion: ${m.apiVersion}`,
+            `Main: ${m.main}`,
+            `Description: ${m.description || '(none)'}`,
+            `Author: ${m.author || '(none)'}`,
+            `License: ${m.license || '(none)'}`,
+            `Permissions: ${(m.permissions && m.permissions.length) ? m.permissions.join(', ') : '(none)'}`,
+            ``,
+            `Use /plugins enable ${m.name} to activate it.`,
+          ].join('\n');
+        } catch (err) {
+          return `Plugin "${name}" is not enabled and could not be found on disk: ${err.message}`;
+        }
+      }
+
+      // Unknown subcommand — show usage.
+      return `Usage: /plugins [list|available|enable|disable|reload|info] [name]`;
+    },
   }
 };
