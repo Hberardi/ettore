@@ -160,6 +160,9 @@ export async function loadConfig(options = {}) {
     // Safety limit on tool-calls per turn. Raise in .ettore/config.json for
     // complex multi-file tasks; lower to surface runaway loops earlier.
     maxToolCallsPerTurn: numFrom('maxToolCallsPerTurn'),
+    // How many times the TUI silently re-prompts the model to finish an
+    // unfinished task before handing control back to the user.
+    maxAutoResumes: numFrom('maxAutoResumes'),
     // Dynamic routing reduces tool-schema tokens and malformed calls by only
     // exposing tools relevant to the current request.
     dynamicToolRouting: boolFrom('dynamicToolRouting', true),
