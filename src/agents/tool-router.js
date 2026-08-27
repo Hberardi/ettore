@@ -23,14 +23,21 @@ const BASE_BUILD = [
   'memory_write',
 ];
 
-const EDIT_TOOLS = [
-  'write',
-  'edit',
-  'apply_patch_structured',
-  'run_checks',
-  'run_tests',
-  'bash_session',
-];
+// Changing files is what build mode is *for*. These used to be gated behind
+// an edit-intent regex over the current prompt, so any turn whose wording did
+// not look like an edit request — "continua", "vai avanti", the auto-resume
+// continuation, a bug report like "il menu non si vede" — reached the model
+// with no way to write. It then correctly answered that it had no writing
+// tool, and the run stalled on an explanation instead of a change. Worse, the
+// recovery overlay that orders the model to "use write/edit tools" was sent
+// with those very tools removed.
+const MUTATION_TOOLS = ['write', 'edit', 'apply_patch_structured'];
+
+// Running things and checking the result stays situational: useful around an
+// edit, noise in the middle of a plain question.
+const EXEC_TOOLS = ['run_checks', 'run_tests', 'bash_session'];
+
+const EDIT_TOOLS = [...MUTATION_TOOLS, ...EXEC_TOOLS];
 
 const VERIFY_TOOLS = ['run_checks', 'run_tests', 'bash', 'bash_session', 'read', 'git_diff'];
 const WEB_TOOLS = ['websearch', 'webfetch', 'web_image'];
@@ -39,12 +46,26 @@ const RUNTIME_TOOLS = ['dev_server', 'browser_app', 'desktop_app', 'browser_chec
 const DEPENDENCY_TOOLS = ['dep_inspect', 'bash'];
 
 const EDIT_INTENT_RE = /\b(edit|modify|change|update|fix|create|write|implement|patch|refactor|build|add|remove|rename|modifica|cambia|aggiorna|correggi|crea|scrivi|implementa|sistema|aggiungi|rimuovi|rinomina)\b/i;
+// A recovery overlay demanding an edit is an edit request, whoever wrote it.
+const EDIT_OVERLAY_RE = /\bwrite\b|\bedit\b|carry out the announced action/i;
+// "continua" and friends carry no intent of their own: they continue whatever
+// the previous prompt asked for, so the caller's sticky intent must survive.
+const CONTINUATION_PROMPT_RE = /^\s*(?:continua|prosegui|vai(?:\s+avanti)?|avanti|procedi|dai|ok(?:ay)?|va\s+bene|continue|go\s+on|keep\s+going|next|proceed|resume)\b/i;
+
 const WEB_INTENT_RE = /\b(latest|current|today|news|web|online|website|url|docs?|documentation|internet|image|images|photo|picture|aggiornat[oaie]|oggi|notizie|sito|pagina|immagin[ei]|foto)\b/i;
 const DOCUMENT_INTENT_RE = /\b(pdf|docx?|odt|document[oi]?)\b/i;
 const VIDEO_INTENT_RE = /\b(youtube|youtu\.be|video|trascrivi|transcript)\b/i;
 const RUNTIME_INTENT_RE = /\b(server|browser|page|frontend|runtime|console|logs?|localhost|porta|errore.*avvio|app|apps?|webapp|desktop|gui|ui|window|finestra|schermata|screenshot|click|clicca|electron|tk|qt|gtk|prova(?:re|la|lo)?|test(?:are|a)?\s+l['’]?app)\b/i;
 const DEPENDENCY_INTENT_RE = /\b(dependenc|package|npm|pnpm|yarn|pip|cargo|vulnerab|audit|dipendenz|pacchett)\b/i;
 const SHELL_INTENT_RE = /\b(command|shell|terminal|bash|script|execute|run|comando|terminale|esegui)\b/i;
+
+export function promptHasEditIntent(text) {
+  return EDIT_INTENT_RE.test(String(text || ''));
+}
+
+export function isContinuationPrompt(text) {
+  return CONTINUATION_PROMPT_RE.test(String(text || ''));
+}
 
 function addMany(target, names) {
   for (const name of names) target.add(name);
@@ -57,6 +78,8 @@ export function selectToolDefinitions(definitions = [], context = {}) {
   const prompt = String(context.prompt || '');
   const overlay = String(context.overlay || '');
   const selected = new Set(mode === 'plan' ? BASE_PLAN : BASE_BUILD);
+  // Plan mode is read-only by design; build mode always keeps its hands.
+  if (mode === 'build') addMany(selected, MUTATION_TOOLS);
   const contextualPriority = [];
   // Plugin tools are not part of the static core tool lists above. When a
   // registry is attached, keep their schemas discoverable in build mode so
@@ -67,12 +90,14 @@ export function selectToolDefinitions(definitions = [], context = {}) {
   for (const name of pluginToolNames) selected.add(name);
   const editIntent = mode === 'build' && (
     EDIT_INTENT_RE.test(prompt) ||
+    EDIT_OVERLAY_RE.test(overlay) ||
+    context.editIntentSticky === true ||
     context.mutationToolUsed ||
     context.touchedFiles > 0
   );
 
   if (editIntent) {
-    addMany(selected, EDIT_TOOLS);
+    addMany(selected, EXEC_TOOLS);
   }
   if (/verify|did not verify|quality checks?/i.test(overlay) || context.verificationNeeded) {
     addMany(selected, VERIFY_TOOLS);
@@ -119,6 +144,9 @@ export function selectToolDefinitions(definitions = [], context = {}) {
     'read',
     'grep',
     'ask_user',
+    // Ahead of the contextual families: losing the ability to write to make
+    // room for, say, a web search is never the right trade in build mode.
+    ...(mode === 'build' ? MUTATION_TOOLS : []),
     ...pluginToolNames,
     ...contextualPriority,
     ...(editIntent ? EDIT_TOOLS : []),

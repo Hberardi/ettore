@@ -1787,7 +1787,7 @@ export const toolHandlers = {
     }
   },
 
-  async bash({ command, workdir }) {
+  async bash({ command, workdir, timeout_ms }) {
     try {
       const installAction = detectInstallAction(command);
       if (installAction) {
@@ -1819,14 +1819,21 @@ export const toolHandlers = {
         }
       }
       const startedAt = Date.now();
+      const timeoutMs = Math.max(1000, Math.min(Number(timeout_ms) || 120_000, 600_000));
       const heartbeat = setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
         emitToolProgress('bash', { command }, `Running… ${elapsed}s elapsed`);
       }, 5000);
       try {
-        const { stdout, stderr } = await execAsync(command, {
+        // Same stdin trap as the persistent session: `exec` hands the child a
+        // stdin pipe nobody ever writes to or closes, so anything that reads
+        // stdin (a prompt, a REPL, `git commit` with no -m) blocks forever.
+        // `execFile` drops a `stdio` option, so the redirect has to live in the
+        // command itself; a heredoc or explicit `< file` still takes priority.
+        const { stdout, stderr } = await execAsync(`{ ${command}\n} < /dev/null`, {
           cwd: workdir || process.cwd(),
           maxBuffer: 10 * 1024 * 1024,
+          timeout: timeoutMs,
           signal: getToolAbortSignal(),
         });
         // Cap and clean so chat clients don't truncate silently. The bash
@@ -1845,6 +1852,10 @@ export const toolHandlers = {
     } catch (error) {
       // Errors also flow through sanitizeOutput to keep stray ANSI escapes
       // out of the user's terminal.
+      if (error?.killed && error?.signal && error?.name !== 'AbortError') {
+        const partial = sanitizeOutput(`${error.stdout || ''}${error.stderr || ''}`, { maxBytes: 10_000 });
+        return `${partial.output}\n[timeout — command killed. Re-run with a larger timeout_ms, or make it non-interactive.]`.trim();
+      }
       const msg = sanitizeOutput(`Error: ${error.message}\n${error.stderr || ''}`, { maxBytes: 10_000 });
       return msg.output;
     }
@@ -1885,7 +1896,7 @@ export const toolHandlers = {
         }
       }
 
-      const timeoutMs = Math.max(1000, Math.min(Number(timeout_ms) || 300_000, 600_000));
+      const timeoutMs = Math.max(1000, Math.min(Number(timeout_ms) || 120_000, 600_000));
       const session = getBashSession(workdir || process.cwd());
       const result = await session.run(command, {
         timeoutMs,
@@ -2840,12 +2851,13 @@ export const toolDefinitions = [
     type: 'function',
     function: {
       name: 'bash',
-      description: 'Execute a shell command in a fresh subprocess and return the output. Stateless — every call starts in the original cwd with the original env. Use `bash_session` instead when later commands need state from earlier ones.',
+      description: 'Execute a shell command in a fresh subprocess and return the output. Stateless — every call starts in the original cwd with the original env. Use `bash_session` instead when later commands need state from earlier ones. stdin is /dev/null: a command that waits for input gets EOF instead of hanging, so pass flags like -y/--yes/-m rather than relying on a prompt.',
       parameters: {
         type: 'object',
         properties: {
           command: { type: 'string', description: 'Shell command to run' },
-          workdir: { type: 'string', description: 'Working directory (optional)' }
+          workdir: { type: 'string', description: 'Working directory (optional)' },
+          timeout_ms: { type: 'number', minimum: 1000, maximum: 600000, description: 'Optional timeout in ms (default 120000, max 600000). On timeout the command is killed and partial output is returned.' }
         },
         required: ['command']
       }
@@ -2855,13 +2867,13 @@ export const toolDefinitions = [
     type: 'function',
     function: {
       name: 'bash_session',
-      description: 'Execute a shell command in a PERSISTENT bash session. Working directory, exported variables, defined functions, and shell options persist between calls — so `cd subdir` followed by `pwd` returns the new path, and a `VAR=x` followed by `echo $VAR` returns x. Use this when later commands depend on state from earlier ones (cd, source, exports, function defs). The session auto-respawns if it crashes or is killed by a timeout.',
+      description: 'Execute a shell command in a PERSISTENT bash session. Working directory, exported variables, defined functions, and shell options persist between calls — so `cd subdir` followed by `pwd` returns the new path, and a `VAR=x` followed by `echo $VAR` returns x. Use this when later commands depend on state from earlier ones (cd, source, exports, function defs). The session auto-respawns if it crashes or is killed by a timeout. stdin is /dev/null: a command that waits for input gets EOF instead of hanging, so pass flags like -y/--yes/-m rather than relying on a prompt.',
       parameters: {
         type: 'object',
         properties: {
           command: { type: 'string', description: 'Shell command to run in the persistent session' },
           workdir: { type: 'string', description: 'Initial working directory. Changing it recreates the persistent session.' },
-          timeout_ms: { type: 'number', minimum: 1000, maximum: 600000, description: 'Optional timeout in ms (default 300000, max 600000). On timeout the session is killed and respawned fresh.' }
+          timeout_ms: { type: 'number', minimum: 1000, maximum: 600000, description: 'Optional timeout in ms (default 120000, max 600000). On timeout the session is killed and respawned fresh.' }
         },
         required: ['command']
       }

@@ -18,7 +18,7 @@ import { randomBytes } from 'crypto';
 import { resolve } from 'path';
 
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
-const DEFAULT_TIMEOUT_MS = 300_000;
+const DEFAULT_TIMEOUT_MS = 120_000;
 
 let _sharedSession = null;
 
@@ -60,6 +60,11 @@ class BashSession {
     proc.on('error', () => {
       if (this.process === proc) { this.alive = false; this.process = null; }
     });
+    // A dead shell surfaces the failed write as an async EPIPE on the stdin
+    // stream, not as a throw from write(). Without a listener that becomes an
+    // unhandled 'error' event and takes the CLI down; the pending call is
+    // settled by the `exit` handler above.
+    proc.stdin.on('error', () => {});
   }
 
   run(command, opts = {}) {
@@ -181,7 +186,17 @@ class BashSession {
       // Brace group preserves shell builtins like `cd` (a subshell would lose
       // the cwd change). The sentinel + exit code prints AFTER user output so
       // we can frame it cleanly.
-      const wrapped = `{ ${command}\n}\nprintf '\\n%sEXIT:%d\\n' '${sentinel}' $?\n`;
+      //
+      // `< /dev/null` on the group is what keeps this tool from freezing. The
+      // shell's stdin is the same pipe we write commands into, so a command
+      // that reads stdin — `read`, a REPL, `git commit` with no -m, an npm or
+      // sudo prompt — swallows the sentinel line below and the framing never
+      // arrives: the call then sits there for the full timeout. Worse, a
+      // command that *echoes* stdin (`cat`) hands the sentinel straight back
+      // and we frame a bogus success. Redirecting the group's default stdin
+      // fixes both; a command with its own redirect (heredoc, `< file`, an
+      // explicit pipe) still wins, because that redirect is applied closer in.
+      const wrapped = `{ ${command}\n} < /dev/null\nprintf '\\n%sEXIT:%d\\n' '${sentinel}' $?\n`;
       try {
         this.process.stdin.write(wrapped);
       } catch (err) {

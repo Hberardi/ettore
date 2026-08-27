@@ -62,6 +62,64 @@ export function extractAnnouncement(text) {
   return (specific || matches[0]).slice(0, 160);
 }
 
+// Phrases that only make sense when the whole job is over. Deliberately
+// narrow: a partial "il primo step è completato" must NOT match, because
+// resuming one turn too many costs a round-trip while stopping one turn too
+// early costs the user a manual nudge.
+const COMPLETION_PATTERNS = [
+  /\btask\s+(?:complet[oai]|completat[oa]|finit[oa]|terminat[oa]|done|complete[d]?)\b/i,
+  /\b(?:lavoro|attivit[àa]|implementazione|modifica|refactor|migrazione)\s+(?:completat[oa]|finit[oa]|conclus[oa]|terminat[oa])\b/i,
+  /\bho\s+(?:finito|completato|concluso|terminato)\b/i,
+  /\b(?:tutto|e[' ]?\s*tutto)\s+(?:fatto|pronto|completato|a\s+posto|sistemato)\b/i,
+  /\ball\s+done\b|\bthat'?s\s+it\b|\bwork\s+complete\b|\bnothing\s+(?:else\s+)?left\b/i,
+];
+
+// A standalone "Fatto." on its own line is a real completion signal; the same
+// word inside a sentence is not.
+const STANDALONE_DONE = /^(?:fatto|done|completato|pronto)[.!]?$/i;
+
+// Anything here means the model is still mid-job, and it vetoes a completion
+// match found in the same tail. "primo/secondo/step" are included because
+// "ho completato il primo file" is a progress report, not a finish line.
+const CONTINUATION_MARKERS = new RegExp(
+  '\\b(?:'
+  + 'prossim[oi]\\s+(?:pass[oi]|step)|next\\s+steps?|'
+  + 'manca(?:no)?|rest(?:a|ano)|rimane|rimangono|da\\s+fare|ancora\\s+(?:aperti|apert[oa]|da)|'
+  + 'continuo|proseguo|procedo|passo\\s+a|'
+  + 'ora|adesso|poi|quindi|'
+  + 'prim[oa]|second[oa]|terz[oa]|parzial\\w*|in\\s+corso|step\\s+\\d'
+  + ')\\b',
+  'i',
+);
+
+// The decision only looks at the closing lines: a long answer can mention
+// "ho finito di leggere il file" halfway through and still be mid-task.
+export function tailOf(text, lines = 2) {
+  const rows = String(text || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  if (!rows.length) return '';
+  return rows.slice(-lines).join(' ');
+}
+
+export function modelDeclaredCompletion(text) {
+  const body = String(text || '').trim();
+  if (!body) return false;
+
+  const rows = body.split('\n').map(line => line.trim()).filter(Boolean);
+  const lastRow = rows[rows.length - 1] || '';
+  if (STANDALONE_DONE.test(lastRow)) return true;
+
+  const tail = tailOf(body, 2);
+  if (!COMPLETION_PATTERNS.some(re => re.test(tail))) return false;
+  // "Ho completato il refactor, ora aggiorno i test" — the completion phrase
+  // is real but scoped to a step, not the task.
+  if (CONTINUATION_MARKERS.test(tail)) return false;
+  return true;
+}
+
+
 export function toolBatchNeedsSequential(validTools = []) {
   if (validTools.length <= 1) return false;
   const names = validTools.map(t => t.name);
@@ -105,6 +163,10 @@ export function createTurnRecoveryState() {
     lastWorkspaceEditProgress: null,
     verifyRetryUsed: false,
     repoMapNudgeUsed: false,
+    // Resumes spent on a reply the provider cut off at max_tokens. Bounded so
+    // a model that only ever emits 8k of prose cannot spin the turn forever.
+    truncationResumes: 0,
+    maxTruncationResumes: 3,
     invalidToolCallStreak: 0,
     maxInvalidToolCallStreak: 3,
   };
@@ -132,6 +194,11 @@ export function buildTurnOverlay(kind, data = {}) {
       `Your last tool call batch was invalid (${streak}/${max - 1} warning before abort). Stop repeating malformed tool calls. Re-read each tool schema carefully and call exactly one or more valid tools with complete JSON arguments. Do not use empty objects for tools like read/write/edit. If you cannot supply valid arguments, answer briefly and explain what is missing.`,
     native_tool_calls: () =>
       'Your last message contained tool-call markup (<invoke>, <tool_call>, <parameter>) written as plain text. Text like that is never executed. Call tools through the native tool-calling API only — never print the XML protocol into your answer. Retry the step now with real tool calls, or, if you cannot, say plainly what you need.',
+    output_truncated: ({ attempt, max }) =>
+      'Your previous message was cut off by the output token limit — it is not a finished answer, and the user has only seen the part that made it through.'
+      + ` Continue from exactly where it stopped (resume ${attempt}/${max}), mid-sentence if that is where the cut fell.`
+      + ' Do not restart, do not repeat what you already wrote, and do not summarize it. If the cut landed inside a tool call, issue that tool call again now as a proper native call.'
+      + ' Keep the remainder shorter: finish the work in the tokens you have left.',
     tool_loop_finalize: ({ reason }) =>
       `Tool use is now disabled for this recovery turn because ${reason || 'the tool loop stopped making progress'}. Do not request or simulate more tool calls. Use the results and images already present in the conversation, answer the user directly, and clearly state any limitation or failed fetch.`,
   };

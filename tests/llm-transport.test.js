@@ -243,3 +243,29 @@ test('openaiCompatibleTurn sends normalized message history to the provider', as
     { role: 'tool', tool_call_id: 'call_1', content: 'ok' },
   ]);
 });
+
+test('openaiCompatibleTurn reports the finish_reason so a truncated turn is recognizable', async () => {
+  const makeClient = (reason) => ({
+    chat: {
+      completions: {
+        create: async () => (async function* () {
+          yield { choices: [{ delta: { content: 'meta ris' }, finish_reason: null }] };
+          yield { choices: [{ delta: {}, finish_reason: reason }] };
+        })(),
+      },
+    },
+  });
+
+  // `length` means the model hit max_tokens: the content is a fragment, and the
+  // agent loop needs to see that instead of treating it as a finished answer.
+  const truncated = await openaiCompatibleTurn(
+    makeClient('length'), 'MiniMax-M3', [{ role: 'user', content: 'hi' }], null, null, null,
+  );
+  assert.equal(truncated.type, 'text');
+  assert.equal(truncated.finishReason, 'length');
+
+  const complete = await openaiCompatibleTurn(
+    makeClient('stop'), 'MiniMax-M3', [{ role: 'user', content: 'hi' }], null, null, null,
+  );
+  assert.equal(complete.finishReason, 'stop');
+});

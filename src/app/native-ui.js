@@ -367,7 +367,7 @@ export async function startApp(options = {}) {
     firstToolSeen = false;
     tui.needsRender = true;
     try {
-      await agent.run(text, emitter, { imageAttachments });
+      await agent.run(text, emitter, { imageAttachments, continuation });
     } catch {
       // Errors are surfaced via the 'error' event; nothing to do here.
     }
@@ -936,6 +936,24 @@ export async function startApp(options = {}) {
     syncMission();
     tui.todos.forEach((t, i) => { if (i <= idx) t.status = 'done'; });
     tui.currentPlan = [...tui.todos];
+    tui.needsRender = true;
+  });
+
+  // The provider truncated the reply at its output limit and the agent is
+  // finishing it. Unlike auto-continue this is one answer split in two, so the
+  // streaming buffer is deliberately left untouched — clearing it would drop
+  // the half the user has already read.
+  emitter.on('outputTruncated', ({ attempt, max }) => {
+    tui.messages.push({
+      role: 'system',
+      text: `▸ Risposta troncata dal limite di token (ripresa ${attempt}/${max}): continuo da dove si era interrotta`,
+      tools: [],
+      id: Date.now(),
+    });
+    if (tui.streaming) {
+      tui.streaming.waitKind = 'model';
+      tui.streaming.lastActivityAt = Date.now();
+    }
     tui.needsRender = true;
   });
 

@@ -65,9 +65,18 @@ test('createTurnRecoveryState returns clean defaults', () => {
     lastWorkspaceEditProgress: null,
     verifyRetryUsed: false,
     repoMapNudgeUsed: false,
+    truncationResumes: 0,
+    maxTruncationResumes: 3,
     invalidToolCallStreak: 0,
     maxInvalidToolCallStreak: 3,
   });
+});
+
+test('buildTurnOverlay explains a truncated reply without inviting a restart', () => {
+  const overlay = buildTurnOverlay('output_truncated', { attempt: 2, max: 3 });
+  assert.match(overlay, /cut off by the output token limit/i);
+  assert.match(overlay, /resume 2\/3/i);
+  assert.match(overlay, /do not restart/i);
 });
 
 test('buildTurnOverlay renders known overlays and returns empty string for unknown keys', () => {

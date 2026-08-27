@@ -362,6 +362,10 @@ export async function openaiCompatibleTurn(client, model, messages, tools, onTok
   // Supports: MiniMax M2.7, DeepSeek-R1 API (reasoning_content), OpenRouter (reasoning)
   let inReasoning = false;
   let sawFinishReason = false;
+  // The actual reason, not just "a terminal chunk arrived": `length` means the
+  // model was cut off at max_tokens and the turn is unfinished, which the agent
+  // loop has to know to avoid presenting a truncated answer as the final one.
+  let finishReason = null;
 
   // Stream creation stays inside the try: if it throws, clear() still runs and
   // disarms the idle watchdog (otherwise the 120s timer would leak).
@@ -372,7 +376,7 @@ export async function openaiCompatibleTurn(client, model, messages, tools, onTok
         // Final usage chunk (include_usage) carries an empty choices array.
         if (chunk.usage) usage = chunk.usage;
         const choice = chunk.choices?.[0];
-        if (choice?.finish_reason) sawFinishReason = true;
+        if (choice?.finish_reason) { sawFinishReason = true; finishReason = choice.finish_reason; }
         const d = choice?.delta;
         if (!d) continue;
 
@@ -438,10 +442,11 @@ export async function openaiCompatibleTurn(client, model, messages, tools, onTok
       tool_calls: canonical.calls,
       message: canonical.message,
       usage: usageObj,
+      finishReason,
     };
   }
 
-  return { type: 'text', content, usage: usageObj };
+  return { type: 'text', content, usage: usageObj, finishReason };
 }
 
 export class OpenAICompatClient {
@@ -541,6 +546,9 @@ export class AnthropicClient {
       cacheRead:    final.usage?.cache_read_input_tokens ?? cacheRead,
     };
 
+    // Normalized onto the OpenAI spelling so the agent loop has one thing to check.
+    const finishReason = final.stop_reason === 'max_tokens' ? 'length' : (final.stop_reason || null);
+
     if (final.stop_reason === 'tool_use') {
       const tool_calls = final.content
         .filter(b => b.type === 'tool_use')
@@ -554,6 +562,7 @@ export class AnthropicClient {
         tool_calls: canonical.calls,
         message: canonical.message,
         usage: usageObj,
+        finishReason,
       };
     }
 
@@ -561,7 +570,7 @@ export class AnthropicClient {
       .filter(b => b.type === 'text')
       .map(b => b.text)
       .join('');
-    return { type: 'text', content, usage: usageObj };
+    return { type: 'text', content, usage: usageObj, finishReason };
   }
 }
 

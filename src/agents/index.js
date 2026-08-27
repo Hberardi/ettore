@@ -43,6 +43,7 @@ import {
   buildTurnOverlay,
   createTurnRecoveryState,
   extractAnnouncement,
+  modelDeclaredCompletion,
   responseAnnouncesUnexecutedAction,
   responseLooksLikeUnappliedCode,
   toolBatchExecutionGroups,
@@ -55,7 +56,7 @@ import {
   validateMessageHistory,
 } from './message-ledger.js';
 import { TurnStateMachine } from './turn-state.js';
-import { selectToolDefinitions, selectedToolNames } from './tool-router.js';
+import { selectToolDefinitions, selectedToolNames, promptHasEditIntent, isContinuationPrompt } from './tool-router.js';
 import { authorizeToolAccess, normalizeToolArgsForWorkspace } from '../tools/workspace-policy.js';
 import { buildVisionContent } from '../utils/images.js';
 import { isWebImageResult } from '../tools/web-image.js';
@@ -266,7 +267,12 @@ export class Agent {
     this._todoList = [];
     this._todoDoneIdx = new Set();
     this._todoFromBlock = false;
+    this._todoFromMarkdown = false;
     this._autoContinueCount = 0;
+    // Whether the task in progress is one that changes files. A bare
+    // "continua" carries no intent of its own, so without this the tool
+    // router dropped the verification toolchain halfway through an edit.
+    this._editIntentActive = false;
     // Auto-continue cap: how many times the agent will silently re-prompt
     // the model to finish an unfinished <todo> plan before giving up and
     // emitting `autoContinueExhausted`. Default bumped from 3 → 30 to
@@ -881,6 +887,12 @@ export class Agent {
 
   async run(userPrompt, emitter, options = {}) {
     const promptText = String(userPrompt || '');
+    // A continuation prompt inherits the previous intent; a fresh request
+    // that asks for no changes clears it, so a question asked after a
+    // refactor stops dragging the edit toolchain along.
+    const continuation = options.continuation === true || isContinuationPrompt(promptText);
+    if (promptHasEditIntent(promptText)) this._editIntentActive = true;
+    else if (!continuation) this._editIntentActive = false;
     const imageAttachments = Array.isArray(options.imageAttachments) ? options.imageAttachments : [];
     await this._skillsReady;
     // A previous turn may have created or edited a SKILL.md through the normal
@@ -954,11 +966,21 @@ export class Agent {
     emitTurnState('started');
     this._debugLog(emitter, 'turn.started', { mode: this.mode, provider: this.config.provider, model: this.config.model });
     this._updateWorkingMemoryGoal(promptText);
-    // Reset auto-continue state for the new user turn. A fresh user prompt
-    // means any prior plan is no longer load-bearing.
-    this._todoList = [];
-    this._todoDoneIdx = new Set();
-    this._todoFromBlock = false;
+    // Reset auto-continue state for the new user turn: a fresh user prompt
+    // means any prior plan is no longer load-bearing. "continua" is the one
+    // exception — it carries no plan of its own, so wiping the previous one
+    // left the resumed turn with nothing to auto-continue against. The run
+    // then stopped again at the same place, and the user typed "continua"
+    // again. Keep a plan that still has open steps.
+    const resumingPlan = isContinuationPrompt(promptText)
+      && (this._todoFromBlock || this._todoFromMarkdown)
+      && this._todoList.some((_, i) => !this._todoDoneIdx.has(i));
+    if (!resumingPlan) {
+      this._todoList = [];
+      this._todoDoneIdx = new Set();
+      this._todoFromBlock = false;
+      this._todoFromMarkdown = false;
+    }
     this._autoContinueCount = 0;
     this._planEmitted = false;
     this._plan = null;
@@ -1002,6 +1024,7 @@ export class Agent {
         this._todoList = items.slice();
         this._todoDoneIdx = new Set();
         this._todoFromBlock = true;
+        this._todoFromMarkdown = false;
         todoEmitted = true;
         emitter?.emit('todoList', items.slice());
       },
@@ -1009,6 +1032,7 @@ export class Agent {
         const before = this._todoList.length;
         this._todoList = [...this._todoList, ...items];
         this._todoFromBlock = true;
+        this._todoFromMarkdown = false;
         todoEmitted = true;
         emitter?.emit('todoList', this._todoList.slice());
         return { added: this._todoList.length - before };
@@ -1065,6 +1089,7 @@ export class Agent {
           verificationNeeded: mutationToolUsed && !verificationDone,
           maxTools: this.maxToolsPerRequest,
           includePluginTools: Boolean(this._pluginRegistry),
+          editIntentSticky: this._editIntentActive,
         };
         const tools = forceTextOnlyNextTurn || this._isLite
           ? []
@@ -1222,6 +1247,7 @@ export class Agent {
                 this._todoList = items;
                 this._todoDoneIdx = new Set();
                 this._todoFromBlock = true;
+                this._todoFromMarkdown = false;
                 todoEmitted = true;
                 emitter?.emit('todoList', items);
               }
@@ -1444,6 +1470,7 @@ export class Agent {
               this._todoList = items;
               this._todoDoneIdx = new Set();
               this._todoFromBlock = true;
+              this._todoFromMarkdown = false;
               todoEmitted = true;
               emitter?.emit('todoList', items);
             }
@@ -1473,8 +1500,10 @@ export class Agent {
         }
 
         // Pick up any <done:N> markers from the final content too — covers the
-        // non-streaming code path where onToken never fires.
-        if (this._todoFromBlock) {
+        // non-streaming code path where onToken never fires. A markdown-derived
+        // plan counts here as well: auto-continue now acts on one, so the model
+        // has to be able to tick its steps off.
+        if (this._todoFromBlock || this._todoFromMarkdown) {
           const doneMatches = [...String(result.content || '').matchAll(DONE_MARKER_RE)];
           for (const m of doneMatches) {
             const n = parseInt(m[0].match(/\d+/)[0], 10);
@@ -1511,17 +1540,48 @@ export class Agent {
           }
         }
 
-        // Fallback: detect a markdown numbered list when no <todo> tag was used.
-        // Populates the UI panel only — does NOT trigger auto-continue, since a
-        // bare numbered list may just be a plain enumeration, not a plan.
-        if (!todoEmitted) {
+        // Fallback: detect a markdown numbered list when no <todo> tag was
+        // used. Tracked as a weaker source than a real <todo> block, because a
+        // bare numbered list may just be an enumeration inside an answer —
+        // auto-continue only trusts it once the turn has actually run tools.
+        // Skipped while resuming a retained plan, so the list the model prints
+        // to recap where it left off cannot overwrite the ticked-off original.
+        if (!todoEmitted && !resumingPlan) {
           const mdItems = extractMarkdownTodoList(clean);
           if (mdItems) {
             this._todoList = mdItems;
             this._todoDoneIdx = new Set();
+            this._todoFromMarkdown = true;
             todoEmitted = true;
             emitter?.emit('todoList', mdItems);
           }
+        }
+
+        // The provider cut the reply off at the output token limit
+        // (`finish_reason: length`, Anthropic `stop_reason: max_tokens`). That
+        // is a fragment, not a conclusion — and treating it as the final answer
+        // is what ended turns in the middle of a file and left the user typing
+        // "continua". Park the fragment in history and give the model the rest
+        // of the turn to finish it.
+        if (
+          result.finishReason === 'length'
+          && turnRecoveryState.truncationResumes < turnRecoveryState.maxTruncationResumes
+        ) {
+          this.messages.push({ role: 'assistant', content: result.content });
+          turnRecoveryState.truncationResumes++;
+          this._queueNamedTurnOverlay('output_truncated', {
+            attempt: turnRecoveryState.truncationResumes,
+            max: turnRecoveryState.maxTruncationResumes,
+          });
+          emitter?.emit('outputTruncated', {
+            attempt: turnRecoveryState.truncationResumes,
+            max: turnRecoveryState.maxTruncationResumes,
+          });
+          this._debugLog(emitter, 'turn.output_truncated', {
+            attempt: turnRecoveryState.truncationResumes,
+            contentLength: String(result.content || '').length,
+          });
+          continue;
         }
 
         // Garbage detection for lite/small models that hallucinate
@@ -1620,8 +1680,16 @@ export class Agent {
           .map((text, i) => ({ text, i }))
           .filter(({ i }) => !this._todoDoneIdx.has(i));
         const autoContinueEligible = pendingTodos.length > 0
-          && this._todoFromBlock
-          && this.mode === 'build';
+          && this.mode === 'build'
+          // A <todo> block (or a todo_write call) is a declared plan and always
+          // counts. A plain markdown list counts only once the turn has run at
+          // least one tool — that is what separates a plan being executed from
+          // a numbered list that happened to be part of an answer.
+          && (this._todoFromBlock || (this._todoFromMarkdown && toolCallCount > 0))
+          // "Task completo." with steps still unticked means the model finished
+          // without emitting every <done:N>. Pushing it for another round there
+          // only burns turns, and the TUI's resume policy already agrees.
+          && !modelDeclaredCompletion(clean);
         if (autoContinueEligible) {
           // Repeating the same overlay against an unchanged state just burns
           // turns: the model that ignored it once ignores it again. A step
@@ -2193,7 +2261,9 @@ export class Agent {
     this._todoList = [];
     this._todoDoneIdx = new Set();
     this._todoFromBlock = false;
+    this._todoFromMarkdown = false;
     this._autoContinueCount = 0;
+    this._editIntentActive = false;
   }
 
   setMode(mode) {

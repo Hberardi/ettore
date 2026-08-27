@@ -11,39 +11,18 @@
 // Both are fixed here, with a repeat guard so a model that keeps emitting the
 // same words without touching anything still stops instead of looping.
 
-import { responseAnnouncesUnexecutedAction } from '../agents/turn-recovery.js';
+import {
+  modelDeclaredCompletion,
+  responseAnnouncesUnexecutedAction,
+  tailOf,
+} from '../agents/turn-recovery.js';
+
+// Re-exported so the TUI and its tests keep a single import site for the
+// policy, even though the predicate itself now lives with the agent loop that
+// also needs it.
+export { modelDeclaredCompletion };
 
 export const DEFAULT_MAX_AUTO_RESUMES = 25;
-
-// Phrases that only make sense when the whole job is over. Deliberately
-// narrow: a partial "il primo step è completato" must NOT match, because
-// resuming one turn too many costs a round-trip while stopping one turn too
-// early costs the user a manual nudge.
-const COMPLETION_PATTERNS = [
-  /\btask\s+(?:complet[oai]|completat[oa]|finit[oa]|terminat[oa]|done|complete[d]?)\b/i,
-  /\b(?:lavoro|attivit[àa]|implementazione|modifica|refactor|migrazione)\s+(?:completat[oa]|finit[oa]|conclus[oa]|terminat[oa])\b/i,
-  /\bho\s+(?:finito|completato|concluso|terminato)\b/i,
-  /\b(?:tutto|e[' ]?\s*tutto)\s+(?:fatto|pronto|completato|a\s+posto|sistemato)\b/i,
-  /\ball\s+done\b|\bthat'?s\s+it\b|\bwork\s+complete\b|\bnothing\s+(?:else\s+)?left\b/i,
-];
-
-// A standalone "Fatto." on its own line is a real completion signal; the same
-// word inside a sentence is not.
-const STANDALONE_DONE = /^(?:fatto|done|completato|pronto)[.!]?$/i;
-
-// Anything here means the model is still mid-job, and it vetoes a completion
-// match found in the same tail. "primo/secondo/step" are included because
-// "ho completato il primo file" is a progress report, not a finish line.
-const CONTINUATION_MARKERS = new RegExp(
-  '\\b(?:'
-  + 'prossim[oi]\\s+(?:pass[oi]|step)|next\\s+steps?|'
-  + 'manca(?:no)?|rest(?:a|ano)|rimane|rimangono|da\\s+fare|ancora\\s+(?:aperti|apert[oa]|da)|'
-  + 'continuo|proseguo|procedo|passo\\s+a|'
-  + 'ora|adesso|poi|quindi|'
-  + 'prim[oa]|second[oa]|terz[oa]|parzial\\w*|in\\s+corso|step\\s+\\d'
-  + ')\\b',
-  'i',
-);
 
 // Work the model itself says is still open. Unlike CONTINUATION_MARKERS this
 // set is narrow enough to *trigger* a resume on its own: a turn that ends on
@@ -57,33 +36,6 @@ const UNFINISHED_WORK = new RegExp(
   + ')\\b',
   'i',
 );
-
-// The decision only looks at the closing lines: a long answer can mention
-// "ho finito di leggere il file" halfway through and still be mid-task.
-function tailOf(text, lines = 2) {
-  const rows = String(text || '')
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean);
-  if (!rows.length) return '';
-  return rows.slice(-lines).join(' ');
-}
-
-export function modelDeclaredCompletion(text) {
-  const body = String(text || '').trim();
-  if (!body) return false;
-
-  const rows = body.split('\n').map(line => line.trim()).filter(Boolean);
-  const lastRow = rows[rows.length - 1] || '';
-  if (STANDALONE_DONE.test(lastRow)) return true;
-
-  const tail = tailOf(body, 2);
-  if (!COMPLETION_PATTERNS.some(re => re.test(tail))) return false;
-  // "Ho completato il refactor, ora aggiorno i test" — the completion phrase
-  // is real but scoped to a step, not the task.
-  if (CONTINUATION_MARKERS.test(tail)) return false;
-  return true;
-}
 
 // Stable fingerprint of a finished turn. Two turns sharing it produced the
 // same words, ran the same number of tools and left the same steps open.

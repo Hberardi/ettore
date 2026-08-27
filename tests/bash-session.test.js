@@ -148,3 +148,50 @@ test('bash_session: changing the requested workdir recreates the shared shell', 
     await rm(second, { recursive: true, force: true });
   }
 });
+
+test('bash_session: a command that reads stdin gets EOF instead of hanging', async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    // The shell's own stdin is the pipe we write commands into. Without the
+    // `< /dev/null` redirect on the command group, `read` swallows the sentinel
+    // line and the call sits there until the timeout expires.
+    const started = Date.now();
+    const r = await session.run('read -r X; echo "after=$X"', { timeoutMs: 4000 });
+    assert.ok(!r.timedOut, 'the call must not hit the timeout');
+    assert.ok(Date.now() - started < 3000, 'the call must return promptly');
+    assert.match(r.stdout, /after=/);
+  } finally {
+    killBashSession();
+  }
+});
+
+test('bash_session: a command that echoes stdin cannot forge the sentinel', async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    // `cat` used to echo the sentinel line straight back, which framed a bogus
+    // success carrying the printf source as its output.
+    const r = await session.run('cat', { timeoutMs: 4000 });
+    assert.ok(!r.timedOut);
+    assert.equal(r.stdout, '');
+    assert.doesNotMatch(r.stdout, /EXIT:/);
+    // The session must still be usable afterwards.
+    const r2 = await session.run('echo still-alive');
+    assert.match(r2.stdout, /still-alive/);
+  } finally {
+    killBashSession();
+  }
+});
+
+test('bash_session: an explicit heredoc still wins over the /dev/null default', async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    const r = await session.run('cat <<EOF\nfrom-heredoc\nEOF', { timeoutMs: 4000 });
+    assert.equal(r.exitCode, 0);
+    assert.match(r.stdout, /from-heredoc/);
+  } finally {
+    killBashSession();
+  }
+});
