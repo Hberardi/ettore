@@ -1955,10 +1955,15 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
           return `Error listing plugins: ${err.message}`;
         }
         let bundled = [];
+        let stale = [];
         try {
-          const { listBundledPlugins } = await import('../plugins/loader.js');
-          const installed = new Set(candidates.map(c => c.name));
-          bundled = (await listBundledPlugins()).filter(b => !installed.has(b.name));
+          const { bundledPluginStates } = await import('../plugins/loader.js');
+          const states = await bundledPluginStates({ pluginsDir: runtime._pluginsDir });
+          bundled = states.filter(b => !b.installed);
+          // An installed copy is what runs; the package's own is never loaded.
+          // A copy left behind by a release keeps running the old code while
+          // reporting itself installed and enabled, which it is.
+          stale = states.filter(b => b.stale);
         } catch { /* an install without the examples directory simply has none */ }
 
         if (candidates.length === 0 && bundled.length === 0) {
@@ -1969,6 +1974,13 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
           lines.push(`Installed plugins (${candidates.length}):`);
           for (const c of candidates) {
             lines.push(`  ${c.name}${runtime.has(c.name) ? ' [enabled]' : ''}`);
+          }
+        }
+        if (stale.length) {
+          if (lines.length) lines.push('');
+          lines.push(`Older than the copy shipped with ETTORE (${stale.length}):`);
+          for (const p of stale) {
+            lines.push(`  ${p.name} — running an older copy; /plugins install ${p.name} --force to update`);
           }
         }
         if (bundled.length) {

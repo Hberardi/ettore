@@ -16,6 +16,7 @@
 
 import { readdir, readFile, mkdir, cp, stat } from 'fs/promises';
 import { existsSync } from 'fs';
+import { createHash } from 'crypto';
 import { join, resolve, sep, dirname } from 'path';
 import { homedir } from 'os';
 import { pathToFileURL, fileURLToPath } from 'url';
@@ -68,6 +69,47 @@ export async function listBundledPlugins() {
     }
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * A fingerprint of a plugin directory's code, for telling two copies apart.
+ *
+ * Content rather than version: every bundled plugin here reads 1.0.0, so a
+ * version check would call an installed copy current no matter how far behind
+ * it had fallen. Only the files that decide behaviour are hashed — a marker
+ * file or a README differing is not a reason to offer an update.
+ */
+async function pluginFingerprint(dir) {
+  const parts = [];
+  for (const name of [MANIFEST_FILENAME, 'index.js']) {
+    try { parts.push(await readFile(join(dir, name), 'utf8')); }
+    catch { parts.push(''); }
+  }
+  return createHash('sha1').update(parts.join('\u0000')).digest('hex');
+}
+
+/**
+ * Which bundled plugins are installed, and which of those have fallen behind.
+ *
+ * An installed copy is what actually runs: the runtime loads from the user's
+ * plugin directory and never looks at the package's own `examples/`. So a fix
+ * shipped in a release reaches nobody until the copy is refreshed, and nothing
+ * used to say the two had diverged — the CLI ran the old code and reported
+ * the plugin as installed and enabled, which it was.
+ */
+export async function bundledPluginStates({ pluginsDir = null } = {}) {
+  const dir = pluginsDir || resolvePluginsDir();
+  const out = [];
+  for (const bundled of await listBundledPlugins()) {
+    const target = join(dir, bundled.name);
+    if (!existsSync(target)) {
+      out.push({ ...bundled, installed: false, stale: false });
+      continue;
+    }
+    const [a, b] = await Promise.all([pluginFingerprint(bundled.dir), pluginFingerprint(target)]);
+    out.push({ ...bundled, installed: true, stale: a !== b });
+  }
+  return out;
 }
 
 /**

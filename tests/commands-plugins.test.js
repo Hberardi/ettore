@@ -314,3 +314,60 @@ test('cancelling the picker installs nothing', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('plugins available flags an installed copy that has fallen behind', async () => {
+  // The installed copy is what runs — the runtime loads from the user's plugin
+  // directory and never looks at the package's own. A copy left behind by a
+  // release keeps running old code while reporting itself installed and
+  // enabled, which it is, so nothing on screen contradicts it.
+  const { cpSync, appendFileSync } = await import('node:fs');
+  const dir = await makeTmpDir();
+  try {
+    const src = new URL('../examples/plugins/hello-world', import.meta.url).pathname;
+    cpSync(src, join(dir, 'hello-world'), { recursive: true });
+    appendFileSync(join(dir, 'hello-world', 'index.js'), '\n// diverged\n');
+
+    const registry = new PluginRegistry();
+    const runtime = new PluginRuntime({ registry, pluginsDir: dir });
+    const out = await builtinCommands.plugins.handler(['available'], buildContext(runtime, registry));
+
+    assert.match(out, /Older than the copy shipped with ETTORE/);
+    assert.match(out, /hello-world — running an older copy/);
+    assert.match(out, /--force to update/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an identical installed copy is not reported as behind', async () => {
+  const { cpSync } = await import('node:fs');
+  const dir = await makeTmpDir();
+  try {
+    const src = new URL('../examples/plugins/hello-world', import.meta.url).pathname;
+    cpSync(src, join(dir, 'hello-world'), { recursive: true });
+    const registry = new PluginRegistry();
+    const runtime = new PluginRuntime({ registry, pluginsDir: dir });
+    const out = await builtinCommands.plugins.handler(['available'], buildContext(runtime, registry));
+    assert.doesNotMatch(out, /Older than the copy/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a marker file or a README does not count as falling behind', async () => {
+  // Only the files that decide behaviour are fingerprinted: enabling a plugin
+  // writes a marker into its directory, and that must not read as divergence.
+  const { cpSync, writeFileSync } = await import('node:fs');
+  const { bundledPluginStates } = await import('../src/plugins/loader.js');
+  const dir = await makeTmpDir();
+  try {
+    const src = new URL('../examples/plugins/hello-world', import.meta.url).pathname;
+    cpSync(src, join(dir, 'hello-world'), { recursive: true });
+    writeFileSync(join(dir, 'hello-world', '.enabled'), '');
+    writeFileSync(join(dir, 'hello-world', 'NOTES.md'), 'local notes');
+    const states = await bundledPluginStates({ pluginsDir: dir });
+    assert.equal(states.find(s => s.name === 'hello-world').stale, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
