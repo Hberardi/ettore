@@ -1973,7 +1973,7 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         }
         if (bundled.length) {
           if (lines.length) lines.push('');
-          lines.push(`Bundled with ETTORE (${bundled.length}) — /plugins install <name>:`);
+          lines.push(`Bundled with ETTORE (${bundled.length}) — /plugins install to pick one:`);
           for (const b of bundled) {
             const summary = b.description ? ` — ${b.description.split('.')[0]}` : '';
             lines.push(`  ${b.name}${summary}`.slice(0, 200));
@@ -1982,23 +1982,55 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         return lines.join('\n');
       }
 
-      // ── /plugins install <name> — copy a bundled plugin, then enable it ─
+      // ── /plugins install [name] — copy a bundled plugin, then enable it ─
       if (sub === 'install' || sub === 'add') {
-        if (!name) return 'Usage: /plugins install <name>\nSee /plugins available for what ships with ETTORE.';
+        let target = name;
+        // With no name, offer the choice rather than making the user retype a
+        // name they just read in a list. Reading a listing and then typing one
+        // of its entries back is a step the terminal can take for them.
+        if (!target) {
+          let choices = [];
+          try {
+            const { listBundledPlugins, discoverPlugins } = await import('../plugins/loader.js');
+            const onDisk = new Set((await discoverPlugins(runtime._pluginsDir)).map(p => p.name));
+            choices = (await listBundledPlugins()).filter(b => !onDisk.has(b.name));
+          } catch { /* handled by the empty check below */ }
+
+          if (!choices.length) return 'Nothing left to install — every bundled plugin is already on disk.';
+          // Imported here as the other interactive commands do: the bridge is
+          // only needed on this branch, and commands/index.js keeps its
+          // module-level imports to what every command needs.
+          const { uiBridge } = await import('../tools/bridge.js');
+          if (uiBridge.listenerCount('askUser') === 0) {
+            // Headless: a picker nobody can answer would hang the caller.
+            return 'Usage: /plugins install <name>\nBundled: ' + choices.map(c => c.name).join(', ');
+          }
+          const labels = choices.map(c => `${c.name} — ${String(c.description || '').split('.')[0]}`.slice(0, 90));
+          const picked = await new Promise((resolve) => {
+            uiBridge.emit('askUser', {
+              question: 'Which plugin do you want to install and enable?',
+              options: labels,
+              resolve,
+            });
+          });
+          if (!picked || picked === '__cancelled__') return 'Cancelled — nothing installed.';
+          target = String(picked).split(' — ')[0].trim();
+        }
+        const chosen = target;
         try {
           const { installBundledPlugin } = await import('../plugins/loader.js');
           const force = /(^|\s)--force(\s|$)/.test(String(args || ''));
-          const installed = await installBundledPlugin(name, { pluginsDir: runtime._pluginsDir, force });
+          const installed = await installBundledPlugin(chosen, { pluginsDir: runtime._pluginsDir, force });
           // Installing without enabling would leave the user one step short of
           // the thing they asked for.
-          const result = await runtime.enable(name);
+          const result = await runtime.enable(chosen);
           if (context.rebuildAgent) {
             try { await context.rebuildAgent(); } catch {}
           }
-          return `✓ Installed "${name}" v${result.manifest.version} to ${installed.dir}, and enabled it.\n`
-            + `  Run /plugins info ${name} to see what it adds.`;
+          return `✓ Installed "${chosen}" v${result.manifest.version} to ${installed.dir}, and enabled it.\n`
+            + `  Run /plugins info ${chosen} to see what it adds.`;
         } catch (err) {
-          return `Error installing plugin "${name}": ${err.message}`;
+          return `Error installing plugin "${chosen}": ${err.message}`;
         }
       }
 

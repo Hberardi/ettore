@@ -6,6 +6,8 @@ import { join } from 'path';
 
 import { PluginRegistry, PluginRuntime } from '../src/plugins/index.js';
 import { builtinCommands } from '../src/commands/index.js';
+import { uiBridge } from '../src/tools/bridge.js';
+import { discoverPlugins } from '../src/plugins/loader.js';
 
 async function makeTmpDir() {
   return await mkdtemp(join(tmpdir(), 'ettore-plugins-cmd-test-'));
@@ -254,4 +256,61 @@ test('plugins command: unknown subcommand returns usage', async () => {
 test('plugins command: aliases work (plugin → plugins)', async () => {
   const cmd = builtinCommands.plugins;
   assert.deepEqual(cmd.aliases, ['plugin']);
+});
+
+test('plugins install with no name offers a choice and acts on it', async () => {
+  const dir = await makeTmpDir();
+  const seen = [];
+  const onAsk = (payload) => {
+    seen.push(payload);
+    // Pick the first offered plugin, as a user pressing enter would.
+    payload.resolve(payload.options[0]);
+  };
+  uiBridge.on('askUser', onAsk);
+  try {
+    const registry = new PluginRegistry();
+    const runtime = new PluginRuntime({ registry, pluginsDir: dir });
+    const out = await builtinCommands.plugins.handler(['install'], buildContext(runtime, registry));
+
+    assert.equal(seen.length, 1, 'no choice was offered');
+    assert.ok(seen[0].options.length >= 1, 'the choice had no options');
+    assert.match(out, /✓ Installed/);
+    // Installed *and* enabled: stopping at the copy leaves the user a step
+    // short of what they asked for.
+    assert.match(out, /enabled it/);
+    assert.ok(runtime.has(seen[0].options[0].split(' — ')[0]));
+  } finally {
+    uiBridge.off('askUser', onAsk);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('plugins install falls back to a usage line where nothing can answer', async () => {
+  // A picker nobody can answer would hang a headless caller forever.
+  const dir = await makeTmpDir();
+  try {
+    const registry = new PluginRegistry();
+    const runtime = new PluginRuntime({ registry, pluginsDir: dir });
+    const out = await builtinCommands.plugins.handler(['install'], buildContext(runtime, registry));
+    assert.match(out, /Usage: \/plugins install <name>/);
+    assert.match(out, /git-history/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('cancelling the picker installs nothing', async () => {
+  const dir = await makeTmpDir();
+  const onAsk = (payload) => payload.resolve('__cancelled__');
+  uiBridge.on('askUser', onAsk);
+  try {
+    const registry = new PluginRegistry();
+    const runtime = new PluginRuntime({ registry, pluginsDir: dir });
+    const out = await builtinCommands.plugins.handler(['install'], buildContext(runtime, registry));
+    assert.match(out, /Cancelled/);
+    assert.deepEqual(await discoverPlugins(dir), []);
+  } finally {
+    uiBridge.off('askUser', onAsk);
+    await rm(dir, { recursive: true, force: true });
+  }
 });
