@@ -56,6 +56,11 @@ export function readLocalPackage() {
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+// How long startup may block on the registry when the cache has nothing
+// usable. Short enough that a slow or unreachable registry costs a beat
+// rather than a stall, and paid at most once every CACHE_TTL_MS.
+export const COLD_CHECK_TIMEOUT_MS = 2500;
+
 // The cache directory is read fresh on every call so tests that set
 // ETTORE_CONFIG_DIR after the module is first loaded (e.g. a suite
 // that flips the env between cases) are still isolated. Caching it
@@ -146,7 +151,7 @@ export async function fetchLatestVersion({ timeoutMs = 8000 } = {}) {
   }
 }
 
-export async function checkForUpdate({ force = false } = {}) {
+export async function checkForUpdate({ force = false, timeoutMs } = {}) {
   const { version: current } = readLocalPackage();
   if (!force) {
     const cached = readCache();
@@ -160,7 +165,7 @@ export async function checkForUpdate({ force = false } = {}) {
       };
     }
   }
-  const latest = await fetchLatestVersion();
+  const latest = await fetchLatestVersion(timeoutMs ? { timeoutMs } : undefined);
   if (!latest) {
     return { current, latest: null, outdated: false, fromCache: false, error: 'npm view failed' };
   }

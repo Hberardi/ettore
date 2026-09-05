@@ -8,6 +8,22 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — the first launch after an install now updates itself
+
+The startup check read only the cache, so a freshly installed copy — whose
+cache is necessarily empty — found nothing, skipped the auto-update and
+left the work to the *second* launch. That is not what "update when I run
+`ettore`" means.
+
+When the cache holds nothing usable, startup now pays one blocking
+registry call bounded by `COLD_CHECK_TIMEOUT_MS` (2.5s), passed down to
+`npm view` as its own timeout so a slow or unreachable registry costs a
+beat instead of a stall. It is paid once per cache lifetime (6h), never
+per launch. `describeInstall().updatable` is consulted *first*, so a
+development checkout — which would refuse the update anyway — never pays
+for the call at all.
+
+
 ## [1.2.1] — 2026-09-05
 
 The 1.2.0 tarball on npm predates every entry in this section. The

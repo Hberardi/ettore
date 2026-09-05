@@ -308,3 +308,26 @@ test('bin/cli.js installs before loading anything and guards the re-exec', () =>
   // The relaunch is only worth doing when npm wrote the copy we execute.
   assert.match(text, /result\.isRunningCopy/);
 });
+
+test('checkForUpdate forwards a timeout to the registry call', async () => {
+  // The startup path pays a bounded blocking call when the cache is cold;
+  // the budget has to actually reach `npm view`, or a slow registry stalls
+  // the launch it was meant to keep snappy.
+  const text = readFileSync(resolve(REPO_ROOT, 'src/cli/update.js'), 'utf8');
+  assert.match(text, /fetchLatestVersion\(timeoutMs \? \{ timeoutMs \} : undefined\)/);
+  assert.equal(typeof update.COLD_CHECK_TIMEOUT_MS, 'number');
+  assert.ok(update.COLD_CHECK_TIMEOUT_MS <= 5000, 'startup must never block for long');
+});
+
+test('bin/cli.js refreshes a cold cache before deciding to auto-update', () => {
+  const text = readFileSync(resolve(REPO_ROOT, 'bin/cli.js'), 'utf8');
+  // Without this the first run after an install does nothing and the update
+  // only happens on the second launch.
+  assert.match(text, /!updateStatus\?\.latest && describeInstall\(\)\.updatable/);
+  assert.match(text, /await checkForUpdate\(\{ timeoutMs: COLD_CHECK_TIMEOUT_MS \}\)/);
+  // A checkout must not pay for a network call whose answer it would refuse.
+  assert.ok(
+    text.indexOf('describeInstall().updatable') < text.indexOf('await checkForUpdate({ timeoutMs'),
+    'the checkout guard must be evaluated before the blocking call',
+  );
+});

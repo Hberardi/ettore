@@ -9,6 +9,7 @@ import {
   readLocalPackage,
   checkForUpdate,
   checkForUpdateSync,
+  COLD_CHECK_TIMEOUT_MS,
   describeInstall,
   formatBanner,
   planAutoUpdate,
@@ -60,6 +61,24 @@ program
     let updateStatus = null;
     if (options.updateCheck !== false) {
       updateStatus = checkForUpdateSync();
+    }
+
+    const autoUpdateWanted = options.updateCheck !== false
+      && options.autoUpdate !== false
+      && process.env.ETTORE_AUTO_UPDATE !== '0'
+      && Boolean(process.stdout.isTTY)
+      && !process.env.ETTORE_AUTO_UPDATE_DONE;
+
+    // The sync check only ever reads a fresh cache, so a first run after an
+    // install found nothing and did no work — the update landed on the
+    // SECOND launch, which is not what "update when I run ettore" means.
+    // When the cache has nothing usable, pay one short, bounded registry
+    // call here. It costs at most COLD_CHECK_TIMEOUT_MS, once per cache
+    // lifetime rather than per launch, and only when the answer could
+    // actually be acted on — a checkout is asked first, so a dev copy never
+    // pays for a call whose result it would refuse anyway.
+    if (autoUpdateWanted && !updateStatus?.latest && describeInstall().updatable) {
+      updateStatus = await checkForUpdate({ timeoutMs: COLD_CHECK_TIMEOUT_MS });
     }
 
     // Install a newer release BEFORE anything else loads, then hand over to
