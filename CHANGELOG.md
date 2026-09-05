@@ -8,6 +8,21 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-09-05
+
+### Upgrading from 1.2.x — read this one first
+
+Automatic installation of updates is now opt-in, which has a consequence
+worth stating plainly: if you are on 1.2.x with the old default, **this is
+the last release that will install itself**. From here on a new version is
+reported and you run `ettore update` to take it, or you pass `--auto-update`
+/ set `ETTORE_AUTO_UPDATE=1` to keep the old behaviour.
+
+The reason is below under "installing an update is opt-in": a version cache
+found in the wild claimed this package's latest release was `2.88.2`, which
+was another package's metadata entirely, and the old default was one
+plausible digit away from installing it.
+
 ### Fixed — `bash` appeared to hang on commands that had already finished
 
 `child_process.exec` settles when the child's stdout and stderr reach EOF,
