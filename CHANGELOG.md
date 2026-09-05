@@ -8,6 +8,8 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-09-05
+
 ### Fixed — the first launch after an install now updates itself
 
 The startup check read only the cache, so a freshly installed copy — whose
@@ -22,6 +24,12 @@ beat instead of a stall. It is paid once per cache lifetime (6h), never
 per launch. `describeInstall().updatable` is consulted *first*, so a
 development checkout — which would refuse the update anyway — never pays
 for the call at all.
+
+This also closes a gap the cache-only check left behind: in 1.2.1 the
+cache was filled by the TUI's background refresh, so a user who only ever
+ran one-shot prompts (`ettore "…"`) never populated it and therefore never
+auto-updated. The blocking check runs before the one-shot / TUI branch, so
+both modes now update on the launch that finds something new.
 
 
 ## [1.2.1] — 2026-09-05
