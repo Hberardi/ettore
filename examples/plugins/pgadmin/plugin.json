@@ -1,0 +1,10 @@
+{
+  "name": "pgadmin",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "main": "index.js",
+  "description": "PostgreSQL DBA tool: list/describe databases, schemas, tables, views, indexes, constraints, functions; run arbitrary queries; EXPLAIN/ANALYZE; pg_dump / pg_restore. Uses the `pg` module (optional dep) and falls back to the system `pg_dump` / `pg_restore` CLI for backups.",
+  "author": "ettore@example.com",
+  "license": "MIT",
+  "permissions": ["fs:read", "fs:write", "shell:exec"]
+}

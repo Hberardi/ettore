@@ -1,0 +1,10 @@
+{
+  "name": "command-palette-shortcuts",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "main": "index.js",
+  "description": "Slash commands for fast access to common session actions: /last-bash, /kill-bash, /replay-last, /where.",
+  "author": "ettore@example.com",
+  "license": "MIT",
+  "permissions": ["fs:read", "shell:exec"]
+}

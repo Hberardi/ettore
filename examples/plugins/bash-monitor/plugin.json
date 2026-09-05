@@ -1,0 +1,10 @@
+{
+  "name": "bash-monitor",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "main": "index.js",
+  "description": "Hook on bash/bash_session that tracks duration, warns on slow commands, and exposes command_history.",
+  "author": "ettore@example.com",
+  "license": "MIT",
+  "permissions": ["agent:emit", "fs:read", "fs:write"]
+}

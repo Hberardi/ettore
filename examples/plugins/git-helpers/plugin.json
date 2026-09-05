@@ -1,0 +1,10 @@
+{
+  "name": "git-helpers",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "main": "index.js",
+  "description": "More git than the built-in git_status / git_diff: blame, log, diff stat, branch audit. Uses the system `git` CLI; no extra dependencies.",
+  "author": "ettore@example.com",
+  "license": "MIT",
+  "permissions": ["shell:exec"]
+}

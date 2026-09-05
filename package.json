@@ -56,6 +56,12 @@
     "openai": "4.104.0",
     "ora": "7.0.1"
   },
+  "optionalDependencies": {
+    "better-sqlite3": "11.3.0",
+    "exceljs": "^4.4.0",
+    "pg": "8.13.1",
+    "pureimage": "0.4.13"
+  },
   "preferGlobal": true,
   "devDependencies": {
     "eslint": "^9.39.4",

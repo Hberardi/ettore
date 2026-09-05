@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>pgadmin · restore wizard</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --fg: #1f2328;
+      --muted: #656d76;
+      --border: #d0d7de;
+      --green: #1a7f37;
+      --red: #cf222e;
+      --amber: #bf8700;
+      --accent: #0969da;
+      --code-bg: #f0f1f3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 2rem;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      color: var(--fg);
+      background: var(--bg);
+    }
+    main { max-width: 880px; margin: 0 auto; }
+    h1 { font-size: 22px; margin: 0 0 1rem; }
+    h2 { font-size: 16px; margin: 1.5rem 0 .5rem; }
+    .card {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .row { display: flex; gap: .75rem; align-items: center; margin: .35rem 0; }
+    .row > label { min-width: 140px; color: var(--muted); }
+    .row > input, .row > select {
+      flex: 1;
+      padding: .4rem .55rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font: inherit;
+      background: white;
+    }
+    .row > input:disabled, .row > select:disabled { background: #fafbfc; color: var(--muted); }
+    .dot {
+      display: inline-block;
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      margin-right: .4rem;
+      vertical-align: middle;
+      background: var(--muted);
+    }
+    .dot.green { background: var(--green); box-shadow: 0 0 0 3px rgba(26,127,55,.2); }
+    .dot.red   { background: var(--red);   box-shadow: 0 0 0 3px rgba(207,34,46,.2); }
+    .dot.amber { background: var(--amber); box-shadow: 0 0 0 3px rgba(191,135,0,.2); }
+    code, pre { font: 12px/1.5 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+    code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
+    pre { background: var(--code-bg); padding: .75rem; border-radius: 6px; overflow-x: auto; }
+    button {
+      font: inherit;
+      padding: .45rem .9rem;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: white;
+      cursor: pointer;
+    }
+    button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    button.danger  { background: white; color: var(--red); border-color: var(--red); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: .5rem; }
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .table th, .table td {
+      padding: .3rem .5rem;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+    }
+    .table th { background: var(--code-bg); }
+    .table td.dim { color: var(--muted); }
+    #log {
+      max-height: 220px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      font-size: 12px;
+      margin: 0;
+    }
+    .ok    { color: var(--green); font-weight: 600; }
+    .err   { color: var(--red);   font-weight: 600; }
+    .muted { color: var(--muted); }
+    .pill {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      background: var(--code-bg);
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>PostgreSQL Restore Wizard</h1>
+
+  <div class="card" id="conn-card">
+    <h2><span class="dot" id="conn-dot"></span>Connection</h2>
+    <div class="row">
+      <label>URL</label>
+      <input id="conn-url" type="text" placeholder="postgres://user:pass@host:5432/db" />
+    </div>
+    <div class="row">
+      <label>Status</label>
+      <span id="conn-status" class="muted">untested</span>
+      <button id="conn-test">Test</button>
+    </div>
+    <div id="conn-error" class="err" style="display:none"></div>
+  </div>
+
+  <div class="card" id="db-card" style="display:none">
+    <h2>Target database <span class="pill" id="db-pill"></span></h2>
+    <div class="row">
+      <label>Name</label>
+      <input id="db-name" type="text" placeholder="e.g. dogane_2026_restored" />
+    </div>
+    <div class="row">
+      <label>Owner</label>
+      <input id="db-owner" type="text" placeholder="e.g. postgres" />
+    </div>
+    <div class="row">
+      <label>Drop if exists</label>
+      <input id="db-drop" type="checkbox" checked />
+    </div>
+  </div>
+
+  <div class="card" id="file-card" style="display:none">
+    <h2>SQL dump file <span class="pill" id="file-pill"></span></h2>
+    <div class="row">
+      <label>Path on disk</label>
+      <input id="file-path" type="text" placeholder="/path/to/dump.sql or /path/to/dump.custom" />
+    </div>
+    <div class="row">
+      <label>Detected format</label>
+      <span id="file-format" class="muted">—</span>
+    </div>
+    <div id="drop-zone" style="border:2px dashed var(--border); border-radius:6px; padding:1rem; margin-top:.75rem; text-align:center; background:#fafbfc;">
+      <div style="font-size:13px">
+        <strong>Or drag &amp; drop a file here</strong> &nbsp;·&nbsp;
+        <input type="file" id="file-upload" style="display:inline" accept=".sql,.dump,.tar,.pgdump,.custom,.pgsql" />
+        <span class="muted">(up to 200 MB; the file is uploaded to the ETTORE host into <code>/tmp/pgadmin-*</code>)</span>
+      </div>
+      <div id="upload-status" class="muted" style="margin-top:.5rem; font-size:12px"></div>
+    </div>
+  </div>
+
+  <div class="card" id="tables-card" style="display:none">
+    <h2>Existing objects in current database <span class="muted" id="tables-count"></span></h2>
+    <p class="muted" style="margin:.25rem 0 .5rem">A snapshot of what will be replaced. Select to drop specific schemas before the restore; otherwise the new dump just recreates everything from scratch.</p>
+    <table class="table" id="tables-table">
+      <thead><tr><th>Schema</th><th>Name</th><th>Type</th><th>Rows (est.)</th><th>Size</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card" id="action-card" style="display:none">
+    <h2>Execute</h2>
+    <p class="muted" style="margin:.25rem 0 .75rem">
+      Clicking <b>Drop and restore</b> will:
+      <ol style="margin:.25rem 0 .5rem 1.25rem; padding:0">
+        <li>Terminate existing connections to <code id="exec-db"></code></li>
+        <li><code id="exec-drop"></code> the target database if it exists</li>
+        <li>Create the database with owner <code id="exec-owner"></code></li>
+        <li>Apply the dump from <code id="exec-file"></code></li>
+      </ol>
+    </p>
+    <div class="row">
+      <button id="exec-cancel">Cancel</button>
+      <button id="exec-go" class="danger">Drop and restore</button>
+    </div>
+  </div>
+
+  <div class="card" id="log-card" style="display:none">
+    <h2>Log</h2>
+    <pre id="log"></pre>
+  </div>
+
+  <div class="card" id="done-card" style="display:none">
+    <h2><span id="done-icon"></span> <span id="done-title"></span></h2>
+    <p id="done-body"></p>
+    <p class="muted" style="font-size:12px">This page will close automatically in <span id="done-countdown">3</span> seconds.</p>
+  </div>
+</main>
+
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const token = params.get('token') || '';
+  const initial = {
+    connection: params.get('connection') || '',
+    file:      params.get('file') || '',
+    dbName:    params.get('db_name') || '',
+    dbOwner:   params.get('db_owner') || '',
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const setDot = (cls) => { const d = $('conn-dot'); d.className = 'dot ' + (cls || ''); };
+  const setStatus = (txt, cls) => { const s = $('conn-status'); s.textContent = txt; s.className = cls || 'muted'; };
+  const log = (txt, cls) => {
+    const el = $('log');
+    el.style.display = 'block';
+    $('log-card').style.display = 'block';
+    const line = document.createElement('div');
+    line.className = cls || '';
+    line.textContent = txt;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  };
+
+  let currentConnection = initial.connection;
+  let currentFormat = null;
+
+  // ── helpers ─────────────────────────────────────────────────────────
+  async function api(method, path, body) {
+    const url = path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
+    const init = { method, headers: {} };
+    if (body) { init.headers['content-type'] = 'application/json'; init.body = JSON.stringify(body); }
+    const res = await fetch(url, init);
+    const data = res.headers.get('content-type')?.includes('json') ? await res.json() : await res.text();
+    if (!res.ok) {
+      const err = new Error(typeof data === 'string' ? data : (data.error || res.statusText));
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  }
+
+  // ── step 1: connection test ────────────────────────────────────────
+  $('conn-url').value = initial.connection;
+  $('file-path').value = initial.file;
+  $('db-name').value = initial.dbName;
+  $('db-owner').value = initial.dbOwner;
+
+  $('conn-test').addEventListener('click', async () => {
+    currentConnection = $('conn-url').value.trim();
+    setDot('amber'); setStatus('testing…');
+    $('conn-error').style.display = 'none';
+    try {
+      const r = await api('POST', '/api/test-connection', { connection: currentConnection });
+      setDot('green');
+      setStatus(`connected to ${r.server_version} on ${r.host}:${r.port}, database "${r.database}"`, 'ok');
+      $('db-card').style.display = 'block';
+      $('file-card').style.display = 'block';
+      $('action-card').style.display = 'block';
+      // Auto-detect format
+      currentFormat = r.detected_format;
+      $('file-format').textContent = currentFormat || 'unknown';
+      $('file-pill').textContent = currentFormat || '—';
+      $('db-pill').textContent = currentConnection.split('/').pop() || '—';
+      // If file path is preset, show it
+      if (initial.file) {
+        $('file-path').value = initial.file;
+      }
+      // Load existing objects
+      await loadTables();
+    } catch (e) {
+      setDot('red');
+      setStatus('failed: ' + (e.data?.detail || e.message), 'err');
+      $('conn-error').textContent = e.data?.detail || e.message;
+      $('conn-error').style.display = 'block';
+    }
+  });
+
+  // Auto-test on load if we have an initial connection
+  if (initial.connection) $('conn-test').click();
+
+  // ── step 2: tables ────────────────────────────────────────────────
+  async function loadTables() {
+    try {
+      const r = await api('GET', '/api/tables');
+      const tbody = document.querySelector('#tables-table tbody');
+      tbody.innerHTML = '';
+      r.tables.forEach((t) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${t.schema}</td><td>${t.name}</td><td>${t.type}</td><td class="dim">${t.rows_estimate ?? ''}</td><td class="dim">${t.size_pretty ?? ''}</td>`;
+        tbody.appendChild(tr);
+      });
+      $('tables-count').textContent = r.tables.length + ' object(s)';
+      $('tables-card').style.display = 'block';
+    } catch (e) {
+      $('tables-count').textContent = '(failed to list: ' + e.message + ')';
+    }
+  }
+
+  // ── step 2.5: file upload (drag-and-drop or picker) ───────────────
+  const uploadStatus = $('upload-status');
+  async function uploadFile(file) {
+    if (!file) return;
+    // 200 MB cap, matches the server-side limit.
+    if (file.size > 200 * 1024 * 1024) {
+      uploadStatus.innerHTML = '<span class="err">File is larger than 200 MB. Use the Path on disk field instead and reference a file that is already on the ETTORE host.</span>';
+      return;
+    }
+    uploadStatus.textContent = `Uploading ${file.name} (${formatBytes(file.size)})…`;
+    try {
+      const buf = await file.arrayBuffer();
+      // base64 is ~33% larger; the server decodes and writes the file.
+      const b64 = bytesToBase64(new Uint8Array(buf));
+      const r = await api('POST', '/api/upload', { name: file.name, content_base64: b64 });
+      $('file-path').value = r.path;
+      uploadStatus.innerHTML = `<span class="ok">✓ Uploaded to ${r.path} (${formatBytes(r.size)})</span> — auto-filled the path above.`;
+      // Re-run format detection on the new path so the badge updates.
+      const t = await api('GET', '/api/tables').catch(() => null);
+      void t;
+      const fmt = await api('POST', '/api/test-connection', { connection: currentConnection, sql_file: r.path }).catch(() => null);
+      if (fmt && fmt.detected_format) {
+        $('file-format').textContent = fmt.detected_format;
+        $('file-pill').textContent = fmt.detected_format;
+      }
+    } catch (e) {
+      uploadStatus.innerHTML = `<span class="err">Upload failed: ${e.data?.detail || e.message}</span>`;
+    }
+  }
+  function bytesToBase64(bytes) {
+    let s = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(s);
+  }
+  function formatBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+  $('file-upload').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) uploadFile(f);
+  });
+  const dropZone = $('drop-zone');
+  ['dragenter', 'dragover'].forEach((ev) => dropZone.addEventListener(ev, (e) => {
+    e.preventDefault(); e.stopPropagation();
+    dropZone.style.borderColor = 'var(--accent)';
+    dropZone.style.background = '#eef4ff';
+  }));
+  ['dragleave', 'drop'].forEach((ev) => dropZone.addEventListener(ev, (e) => {
+    e.preventDefault(); e.stopPropagation();
+    dropZone.style.borderColor = '';
+    dropZone.style.background = '';
+  }));
+  dropZone.addEventListener('drop', (e) => {
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) uploadFile(f);
+  });
+
+  // ── step 3: execute ───────────────────────────────────────────────
+  $('exec-cancel').addEventListener('click', async () => {
+    try { await api('POST', '/api/cancel'); } catch {}
+    showDone('cancelled', '🟡', 'Restore cancelled', 'You can close this tab or wait for the page to redirect.');
+    setTimeout(() => location.replace('about:blank'), 1500);
+  });
+
+  $('exec-go').addEventListener('click', async () => {
+    const dbName = $('db-name').value.trim();
+    const dbOwner = $('db-owner').value.trim() || 'postgres';
+    const filePath = $('file-path').value.trim();
+    if (!dbName) { alert('Target database name is required'); return; }
+    if (!filePath) { alert('SQL file path is required'); return; }
+    $('exec-go').disabled = true;
+    $('exec-cancel').disabled = true;
+    log('Starting drop-and-restore…', 'muted');
+    $('log-card').style.display = 'block';
+    try {
+      const r = await api('POST', '/api/drop-and-restore', {
+        connection: currentConnection,
+        target_db: dbName,
+        target_owner: dbOwner,
+        sql_file: filePath,
+        drop_if_exists: $('db-drop').checked,
+      });
+      log('Done in ' + r.duration_ms + 'ms', 'ok');
+      (r.steps || []).forEach((s) => log((s.ok ? '✓ ' : '✗ ') + s.label + (s.detail ? ' — ' + s.detail : ''), s.ok ? 'ok' : 'err'));
+      showDone('ok', '🟢', 'Restore complete', 'Database "' + dbName + '" is now live with the data from the dump.');
+    } catch (e) {
+      log('FAILED: ' + (e.data?.detail || e.message), 'err');
+      (e.data?.steps || []).forEach((s) => log((s.ok ? '✓ ' : '✗ ') + s.label + (s.detail ? ' — ' + s.detail : ''), s.ok ? 'ok' : 'err'));
+      showDone('err', '🔴', 'Restore failed', e.data?.detail || e.message);
+      $('exec-go').disabled = false;
+    }
+    $('exec-cancel').disabled = false;
+  });
+
+  function showDone(status, icon, title, body) {
+    $('action-card').style.display = 'none';
+    $('log-card').style.display = 'block';
+    $('done-icon').textContent = icon;
+    $('done-title').textContent = title;
+    $('done-body').textContent = body;
+    $('done-card').style.display = 'block';
+    let n = 3;
+    const tick = () => {
+      n--;
+      $('done-countdown').textContent = n;
+      if (n > 0) setTimeout(tick, 1000);
+      else {
+        // Tell the server we're done, then close.
+        api('POST', '/api/done', { status }).catch(() => {});
+        try { window.close(); } catch {}
+        setTimeout(() => location.replace('about:blank'), 200);
+      }
+    };
+    setTimeout(tick, 1000);
+  }
+})();
+</script>
+</body>
+</html>

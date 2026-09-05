@@ -1,0 +1,10 @@
+{
+  "name": "excel-full",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "main": "index.js",
+  "description": "Full Excel plugin: read, write, edit, create, formulas, styles, charts (bar/line/pie/scatter via pureimage), reports. Uses exceljs + pureimage, declared as optionalDependencies.",
+  "author": "ettore@example.com",
+  "license": "MIT",
+  "permissions": ["fs:read", "fs:write"]
+}
