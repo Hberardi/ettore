@@ -239,6 +239,7 @@ export async function startApp(options = {}) {
 
   const config = await loadConfig(options);
   tui.safetyProfile = config.safetyProfile || 'balanced';
+  tui.effort = config.effort || null;
   tui.dynamicToolRouting = config.dynamicToolRouting !== false;
   let agent = null;
 

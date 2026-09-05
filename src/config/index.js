@@ -168,6 +168,11 @@ export async function loadConfig(options = {}) {
     // exposing tools relevant to the current request.
     dynamicToolRouting: boolFrom('dynamicToolRouting', true),
     maxToolsPerRequest: numFrom('maxToolsPerRequest'),
+    // How hard the model is asked to think: low | medium | high | xhigh | max.
+    // Unset means the API's own default, which is the right answer until
+    // someone has measured their own workload — raising it buys quality and
+    // is paid in tokens, and on a subscription that is paid in quota.
+    effort: stringFrom('effort', null),
     // safe: workspace-only; balanced: external paths require approval;
     // autonomous: external reads allowed, external writes still approved.
     safetyProfile: stringFrom('safetyProfile', 'balanced'),

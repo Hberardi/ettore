@@ -183,6 +183,7 @@ class TUI {
     this.renderPending = false;
     this.turnState = 'idle';
     this.safetyProfile = 'balanced';
+    this.effort = null;
     this.dynamicToolRouting = true;
     this.routedToolCount = 0;
     this.routedToolNames = [];
@@ -1219,6 +1220,9 @@ class TUI {
     const capability = this.modelCapability === 'full' ? `${C.ok}FULL${C.reset}` : this.modelCapability === 'lite' ? `${C.warn}LITE${C.reset}` : `${C.dim}?${C.reset}`;
     lines.push(`${C.dim}● state${C.reset} ${state} ${C.dim}· cap${C.reset} ${capability}`);
     lines.push(`${C.dim}◆ safety${C.reset} ${C.text}${String(this.safetyProfile || 'balanced').toUpperCase()}${C.reset}`);
+    // Only when set: an unset effort means the API's own default, and a row
+    // saying "default" would claim a setting nobody made.
+    if (this.effort) lines.push(`${C.dim}⚙ effort${C.reset} ${C.text}${String(this.effort).toUpperCase()}${C.reset}`);
     const routeText = this.dynamicToolRouting
       ? `${this.routedToolCount || 0} dynamic`
       : 'all tools';

@@ -258,7 +258,10 @@ export class ContextCompressor {
       const summaryMessages = [
         { role: 'user', content: summaryPrompt }
       ];
-      const innerTurn = this.client.turn(summaryMessages, [], (token) => { summary += token; }, signal);
+      // Compression is summarisation, and it is an extra call on top of the
+      // turn that triggered it. Spending the session's effort setting on it
+      // pays for depth the task does not need.
+      const innerTurn = this.client.turn(summaryMessages, [], (token) => { summary += token; }, signal, { effort: 'low' });
       let timeoutTimer;
       const timeoutPromise = new Promise((_, reject) => {
         timeoutTimer = setTimeout(

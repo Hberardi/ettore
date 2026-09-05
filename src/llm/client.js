@@ -3,18 +3,8 @@ import { spawn } from 'child_process';
 import { setMaxListeners as setTargetMaxListeners } from 'events';
 import { connectionManager } from '../providers/index.js';
 import { canonicalizeToolTurn } from '../agents/message-ledger.js';
+import { resolveOutputCap, effortFor } from './model-limits.js';
 
-// Hard cap on model output — prevents infinite generation loops
-const MAX_OUTPUT_TOKENS = 8192;
-
-// Claude 3-era models cap `max_tokens` at 4096 and reject anything above it
-// with a 400 before generating a single token. Every model since accepts the
-// default and beyond, so this is a floor for legacy ids, not a policy.
-const LEGACY_4K_OUTPUT_RE = /^claude-3-(opus|sonnet|haiku)\b/i;
-
-export function anthropicOutputCap(model, requested = MAX_OUTPUT_TOKENS) {
-  return LEGACY_4K_OUTPUT_RE.test(String(model || '')) ? Math.min(requested, 4096) : requested;
-}
 
 // Idle timeout: if no token arrives, abort the stream.
 // Reasoning models (M2.7, DeepSeek-R1) can have long pauses between tokens —
@@ -350,14 +340,18 @@ export async function openaiCompatibleTurn(client, model, messages, tools, onTok
   const params = {
     model,
     messages: normalizeMessagesForOpenAICompat(messages),
-    max_tokens: MAX_OUTPUT_TOKENS,
+    // Resolved per model as on the Anthropic path: an unknown model — which
+    // most here are — lands back on the same conservative default, but a
+    // Claude routed through OpenRouter gets its real ceiling.
+    max_tokens: resolveOutputCap(model),
     stream: true,
     stream_options: { include_usage: true },
   };
   if (tools?.length) params.tools = tools;
   // User-config LLM params (es. temperature, top_p, max_tokens) — sovrascrivono
-  // i default cablati (es. MAX_OUTPUT_TOKENS) se esplicitamente impostati.
+  // i default cablati se esplicitamente impostati.
   Object.assign(params, modelParams);
+  params.max_tokens = resolveOutputCap(model, params.max_tokens);
 
   raiseSignalListenerCap(signal);
 
@@ -527,16 +521,20 @@ export class AnthropicClient {
     this._idleMs = STREAMING_IDLE_MS;
     this._modelParams = options.modelParams || {};
   }
-  async turn(messages, tools, onToken, signal) {
+  async turn(messages, tools, onToken, signal, options = {}) {
     const system = messages.find(m => m.role === 'system')?.content || '';
     const userMessages = normalizeMessagesForAnthropic(messages);
-    const params = { model: this.model, max_tokens: MAX_OUTPUT_TOKENS, messages: userMessages };
+    const params = { model: this.model, messages: userMessages };
     // User-config LLM params (es. temperature, top_p, max_tokens) — sovrascrivono
-    // i default cablati (es. MAX_OUTPUT_TOKENS) se esplicitamente impostati.
+    // i default cablati se esplicitamente impostati.
     Object.assign(params, this._modelParams);
-    // Applied last so a legacy model is clamped whether the ceiling came from
-    // the default or from user config.
-    params.max_tokens = anthropicOutputCap(this.model, params.max_tokens);
+    // Applied last so the ceiling is clamped to what the model accepts whether
+    // it came from the default or from user config.
+    params.max_tokens = resolveOutputCap(this.model, params.max_tokens);
+    // Omitted unless we have an opinion: no `output_config` means the API's
+    // own default, which is the right answer wherever the caller has none.
+    const effort = effortFor(this.model, options.effort);
+    if (effort) params.output_config = { ...params.output_config, effort };
     // System prompt is stable across turns — cache it.
     if (system) {
       params.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
@@ -771,8 +769,10 @@ export function parseClaudeCodeToolCalls(text) {
   return { calls, content };
 }
 
-export function buildClaudeCodeArgs(model, systemPrompt) {
+export function buildClaudeCodeArgs(model, systemPrompt, effort = null) {
+  const level = effortFor(model, effort);
   return [
+    ...(level ? ['--effort', level] : []),
     '--print',
     '--verbose',
     '--output-format', 'stream-json',
@@ -815,7 +815,7 @@ export class ClaudeCodeClient {
     this._spawn = options.spawn || spawn;
   }
 
-  async turn(messages, tools, onToken, signal) {
+  async turn(messages, tools, onToken, signal, options = {}) {
     const system = buildClaudeCodeSystemPrompt(
       messages.find(m => m.role === 'system')?.content || '',
       tools,
@@ -829,9 +829,19 @@ export class ClaudeCodeClient {
       throw err;
     }
 
-    const child = this._spawn(this.bin, buildClaudeCodeArgs(this.model, system), {
+    const child = this._spawn(this.bin, buildClaudeCodeArgs(this.model, system, options.effort), {
       cwd: this.cwd,
-      env: sanitizeClaudeEnv(),
+      // The CLI has no flag for the output ceiling, but it reads one from the
+      // environment — and it needs raising for the same reason the API path
+      // does: on a thinking model the budget covers reasoning and answer
+      // together. `sanitizeClaudeEnv` strips every CLAUDE_CODE_* variable as
+      // session state, so a value the user set has to be read before that and
+      // put back, or theirs would be dropped in favour of ours.
+      env: {
+        ...sanitizeClaudeEnv(),
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS:
+          process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS || String(resolveOutputCap(this.model)),
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

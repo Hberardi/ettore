@@ -832,6 +832,18 @@ export class Agent {
     }
   }
 
+  /**
+   * Effort for this turn. Plan mode reads and reasons but writes nothing, so
+   * it is the one place a lower setting is a saving rather than a trade; build
+   * mode defers to the user, and to the API's default when they have no
+   * opinion. An explicit setting wins in both, including a deliberate `max` in
+   * plan mode.
+   */
+  _effortForMode() {
+    if (this.config?.effort) return this.config.effort;
+    return this.mode === 'plan' ? 'medium' : null;
+  }
+
   _renderActiveSystemPrompt() {
     const base = this._systemPromptBase || this._systemTemplate || '';
     const skillPrompt = String(this._activeSkillPrompt || '').trim();
@@ -1396,7 +1408,7 @@ export class Agent {
           }
           emitTurnState('model', { iteration: iterations });
           result = await Promise.race([
-            this.client.turn(this.messages, tools, onToken, signal),
+            this.client.turn(this.messages, tools, onToken, signal, { effort: this._effortForMode() }),
             turnTimeout,
           ]);
         } finally {

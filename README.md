@@ -49,6 +49,35 @@ chmod +x install.sh
 ./install.sh
 ```
 
+## Tuning how hard the model thinks
+
+Two settings in `.ettore/config.json` decide how much room a turn gets. Both
+are optional, and both do nothing on a model that does not support them.
+
+```jsonc
+{
+  "effort": "xhigh",   // low | medium | high | xhigh | max
+  "maxTokens": 32768   // ceiling on one turn's output
+}
+```
+
+`effort` is unset by default, which means the API's own default. Raising it
+buys depth on hard coding and agentic work and is paid in tokens — on a
+subscription, in quota — so it is worth measuring on your own workload before
+making it permanent. Lowering it to `low` is the cheaper direction and often
+costs nothing on routine turns. Plan mode already runs a step lower than build
+mode: it reads and reasons but writes nothing, so it is the one place a lower
+setting is a saving rather than a trade. Context compression always runs at
+`low` — it is summarisation, and an extra call on top of the turn that
+triggered it.
+
+`maxTokens` is a stop, not a target: you are billed for what the model writes,
+not for the room it was given. It matters because on a model with adaptive
+thinking the budget covers reasoning *and* the answer, so a ceiling tuned for
+answers alone cuts the thinking off first. ETTORE now resolves it per model —
+room to think where the model allows it, and a clamp where it does not, since
+asking Claude 3 for 8192 is a rejected request rather than a longer answer.
+
 ## Staying up to date
 
 At startup ETTORE asks npm whether a newer release exists — at most once

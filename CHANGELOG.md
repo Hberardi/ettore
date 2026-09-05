@@ -8,6 +8,36 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Changed — a turn gets room to think, sized to the model
+
+`max_tokens` was one number, 8192, standing in for every model at once. On a
+model with adaptive thinking that number is a ceiling over reasoning *and*
+answer together, so a hard turn ran out of room to think before it reached an
+answer — while the model in use reports a limit of 64,000.
+
+It is now resolved per model: room to think where the model allows it, the
+conservative default where we know nothing about it, and a clamp where the
+model would reject the request outright (Claude 3 answers 8192 with a 400
+rather than a longer answer). A ceiling set in config is honoured and then
+clamped the same way. The ceiling is a stop, not a target — output is billed
+as written, not as allowed.
+
+### Added — `effort`
+
+`output_config.effort` was never sent, so every turn ran at the API's default.
+It is now a setting (`low` | `medium` | `high` | `xhigh` | `max`), unset by
+default so the default still stands, and it reaches both transports: the
+parameter on the API path, `--effort` on the Claude Code bridge.
+
+It is gated on the model, because Sonnet 4.5 and Haiku 4.5 reject the
+parameter and sending it there turns a working request into a 400; a model
+with a shorter ladder is clamped rather than refused. Plan mode runs a step
+lower than build mode, and context compression always runs at `low`.
+
+Measured on Opus through the bridge, same question: `low` returned 581 output
+tokens in 14.0s against the default's 788 in 17.9s — 21% less spend for the
+turns that do not need the depth.
+
 ### Changed — installing an update is opt-in
 
 Launching the CLI used to be enough to have it replace itself: on a terminal

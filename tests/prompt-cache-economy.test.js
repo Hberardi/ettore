@@ -1,11 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import {
-  applyRollingCacheBreakpoint,
-  anthropicOutputCap,
-  normalizeMessagesForAnthropic,
-} from '../src/llm/client.js';
+import { applyRollingCacheBreakpoint, normalizeMessagesForAnthropic } from '../src/llm/client.js';
+import { resolveOutputCap } from '../src/llm/model-limits.js';
 import { getModelPricing, calcCost } from '../src/utils/pricing.js';
 import { attachVerboseTokenLogger } from '../src/cli/index.js';
 import { connectionManager } from '../src/providers/index.js';
@@ -54,16 +51,16 @@ test('applyRollingCacheBreakpoint is a no-op on an empty transcript', () => {
 
 // ── Legacy output cap ────────────────────────────────────────────────────────
 
-test('anthropicOutputCap clamps Claude 3 models to their 4096 ceiling', () => {
-  assert.equal(anthropicOutputCap('claude-3-opus-20240229'), 4096);
-  assert.equal(anthropicOutputCap('claude-3-haiku-20240307', 8192), 4096);
-  // A user-set ceiling below the legacy cap is left alone.
-  assert.equal(anthropicOutputCap('claude-3-opus-20240229', 1000), 1000);
+test('the output cap clamps Claude 3 models to their 4096 ceiling', () => {
+  assert.equal(resolveOutputCap('claude-3-opus-20240229'), 4096);
+  assert.equal(resolveOutputCap('claude-3-haiku-20240307', 8192), 4096);
+  // A user-set ceiling below the model's own is left alone.
+  assert.equal(resolveOutputCap('claude-3-opus-20240229', 1000), 1000);
 });
 
-test('anthropicOutputCap leaves current models untouched', () => {
-  assert.equal(anthropicOutputCap('claude-opus-5', 8192), 8192);
-  assert.equal(anthropicOutputCap('claude-3-5-sonnet-20241022', 8192), 8192);
+test('the output cap honours a user ceiling on a current model', () => {
+  assert.equal(resolveOutputCap('claude-opus-5', 8192), 8192);
+  assert.equal(resolveOutputCap('claude-3-5-sonnet-20241022', 8192), 8192);
 });
 
 // ── Pricing lookup ───────────────────────────────────────────────────────────
