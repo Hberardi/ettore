@@ -82,10 +82,21 @@ export function selectToolDefinitions(definitions = [], context = {}) {
   if (mode === 'build') addMany(selected, MUTATION_TOOLS);
   const contextualPriority = [];
   // Plugin tools are not part of the static core tool lists above. When a
-  // registry is attached, keep their schemas discoverable in build mode so
-  // dynamic routing does not silently make an enabled plugin unusable.
-  const pluginToolNames = mode === 'build' && context.includePluginTools
-    ? definitions.filter(tool => tool?._pluginTool).map(tool => tool.function?.name).filter(Boolean)
+  // registry is attached, keep their schemas discoverable so dynamic routing
+  // does not silently make an enabled plugin unusable.
+  //
+  // Plan mode promises to read and not to write, and the host cannot inspect
+  // what a plugin's handler does — so a tool of unstated risk stays out of it,
+  // which is why an enabled plugin used to be invisible there entirely. A tool
+  // its author declares `risk: 'low'` is admitted: the claim is explicit and
+  // greppable, made by the same author whose code was already chosen to run,
+  // and without it a read-only plugin is unusable in the mode built for
+  // reading.
+  const pluginToolNames = context.includePluginTools
+    ? definitions
+      .filter(tool => tool?._pluginTool && (mode === 'build' || tool._risk === 'low'))
+      .map(tool => tool.function?.name)
+      .filter(Boolean)
     : [];
   for (const name of pluginToolNames) selected.add(name);
   const editIntent = mode === 'build' && (

@@ -90,6 +90,8 @@ function boundedInt(value, fallback, { min = 1, max = 1000 } = {}) {
 
 export const tools = {
   git_log: {
+    // Read-only, which is what admits it to plan mode.
+    risk: 'low',
     description:
       'Commit history, newest first, optionally scoped to a file or directory. Use it to find out when and why something changed, who has been working on an area, or what a recent change set contains. Read-only.',
     parameters: {
@@ -137,6 +139,8 @@ export const tools = {
   },
 
   git_blame: {
+    // Read-only, which is what admits it to plan mode.
+    risk: 'low',
     description:
       'Who last changed each line of a file, and in which commit. Consecutive lines from the same commit are grouped, so the answer reads as a handful of changes rather than one row per line. Use it before editing code whose reason is unclear. Read-only.',
     parameters: {
@@ -224,6 +228,8 @@ export const tools = {
   },
 
   git_show: {
+    // Read-only, which is what admits it to plan mode.
+    risk: 'low',
     description:
       'One commit in full: its message, the files it touched, and optionally its diff. Use it after git_log or git_blame has named a commit worth reading. Read-only.',
     parameters: {

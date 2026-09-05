@@ -307,3 +307,111 @@ test('an unknown name is refused, and lists what there is', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ── The agent actually reaches them ──────────────────────────────────────────
+
+/** Drives a real Agent with a fake model that calls one plugin tool. */
+async function runAgentWith({ registry, mode, toolName, args = {} }) {
+  const { Agent } = await import('../src/agents/index.js');
+  const { EventEmitter } = await import('node:events');
+  const call = { id: 'c1', type: 'function', function: { name: toolName, arguments: JSON.stringify(args) } };
+  const seen = { routed: [], result: null };
+  let turn = 0;
+  const client = {
+    async turn(messages, tools) {
+      turn++;
+      seen.routed.push(tools.map(t => t.function.name));
+      if (turn === 1) {
+        return { type: 'tool_calls', tool_calls: [call], message: { role: 'assistant', content: '', tool_calls: [call] } };
+      }
+      seen.result = messages.filter(m => m.role === 'tool').map(m => m.content).join('\n');
+      return { type: 'text', content: 'done' };
+    },
+  };
+  const agent = new Agent(client, {
+    provider: 'test', model: 'gpt-4o', modelCapability: 'full',
+    workdir: process.cwd(), contextWindow: 128000, verifyAfterEdit: false,
+    pluginRegistry: registry,
+  }, mode);
+  await agent.run('show me the recent history of this repo', new EventEmitter());
+  return seen;
+}
+
+/** An enabled git-history, in a temp plugin dir, as a fresh session would load it. */
+async function bootedRegistry() {
+  const { installBundledPlugin } = await import('../src/plugins/loader.js');
+  const { PluginRegistry } = await import('../src/plugins/registry.js');
+  const { PluginRuntime } = await import('../src/plugins/runtime.js');
+  const dir = await mkdtemp(join(tmpdir(), 'ettore-e2e-'));
+  await installBundledPlugin('git-history', { pluginsDir: dir });
+  // Copying is not enabling: the marker is what a later session reads.
+  await new PluginRuntime({ registry: new PluginRegistry(), pluginsDir: dir }).enable('git-history');
+  const registry = new PluginRegistry();
+  const report = await new PluginRuntime({ registry, pluginsDir: dir }).boot();
+  return { registry, dir, report };
+}
+
+test('an enabled plugin survives into a new session', async () => {
+  const { registry, dir, report } = await bootedRegistry();
+  try {
+    assert.deepEqual(report, { enabled: ['git-history'], failed: [] });
+    const names = registry.getAllToolDefinitions().map(d => d.function.name);
+    assert.deepEqual(names.sort(), ['git_blame', 'git_log', 'git_show']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the agent routes a plugin tool to the model and runs it, in build mode', async () => {
+  const { registry, dir } = await bootedRegistry();
+  try {
+    const seen = await runAgentWith({ registry, mode: 'build', toolName: 'git_log', args: { limit: 2 } });
+    assert.ok(seen.routed[0].includes('git_log'), `not offered: ${seen.routed[0].join(',')}`);
+    // Offered is not enough — the handler has to have run and answered.
+    assert.match(seen.result, /"commits"/);
+    assert.doesNotMatch(seen.result, /Unknown tool/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a read-only plugin tool is usable in plan mode', async () => {
+  // Plan mode reads and reasons, which is exactly where repository history is
+  // wanted. Plugin tools used to be dropped there wholesale, so an enabled
+  // plugin was silently invisible in half the CLI.
+  const { registry, dir } = await bootedRegistry();
+  try {
+    const seen = await runAgentWith({ registry, mode: 'plan', toolName: 'git_log', args: { limit: 2 } });
+    assert.ok(seen.routed[0].includes('git_log'), `not offered in plan: ${seen.routed[0].join(',')}`);
+    assert.match(seen.result, /"commits"/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a plugin tool of unstated risk stays out of plan mode', async () => {
+  // The host cannot inspect what a handler does, so plan mode's read-only
+  // promise holds only for tools whose author declared them safe.
+  const { selectToolDefinitions } = await import('../src/agents/tool-router.js');
+  const defs = [
+    { type: 'function', function: { name: 'safe_read', description: 'd', parameters: {} }, _pluginTool: true, _risk: 'low' },
+    { type: 'function', function: { name: 'unknown_risk', description: 'd', parameters: {} }, _pluginTool: true, _risk: 'medium' },
+    { type: 'function', function: { name: 'writes_things', description: 'd', parameters: {} }, _pluginTool: true, _risk: 'high' },
+  ];
+  const plan = selectToolDefinitions(defs, { mode: 'plan', prompt: 'look at this', includePluginTools: true, maxTools: 20 })
+    .map(t => t.function.name);
+  assert.deepEqual(plan, ['safe_read']);
+
+  // Build mode still gets all of them: it is the mode that may change things.
+  const build = selectToolDefinitions(defs, { mode: 'build', prompt: 'change this', includePluginTools: true, maxTools: 20 })
+    .map(t => t.function.name);
+  for (const n of ['safe_read', 'unknown_risk', 'writes_things']) assert.ok(build.includes(n), n);
+});
+
+test('every git-history tool declares itself read-only', async () => {
+  // The declaration is what admits them to plan mode, so it is worth asserting
+  // rather than trusting to stay true.
+  for (const [name, def] of Object.entries(tools)) {
+    assert.equal(def.risk, 'low', `${name} must declare risk: 'low'`);
+  }
+});
