@@ -168,10 +168,6 @@ export async function loadConfig(options = {}) {
     // exposing tools relevant to the current request.
     dynamicToolRouting: boolFrom('dynamicToolRouting', true),
     maxToolsPerRequest: numFrom('maxToolsPerRequest'),
-    // Live directory panel in the sidebar. It holds a filesystem watch on the
-    // working directory for as long as the session runs, so it is switchable
-    // off for anyone who would rather it did not.
-    fileTree: boolFrom('fileTree', true),
     // safe: workspace-only; balanced: external paths require approval;
     // autonomous: external reads allowed, external writes still approved.
     safetyProfile: stringFrom('safetyProfile', 'balanced'),
