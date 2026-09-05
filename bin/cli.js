@@ -9,7 +9,9 @@ import {
   readLocalPackage,
   checkForUpdate,
   checkForUpdateSync,
+  describeInstall,
   formatBanner,
+  planAutoUpdate,
   runUpdate,
 } from '../src/cli/update.js';
 
@@ -36,6 +38,7 @@ program
   .option('--debug', 'Enable debug trace logs')
   .option('--verbose-tokens', 'Print per-turn input/output token counts and cumulative cost to stderr')
   .option('--no-update-check', 'Skip the npm version check at startup')
+  .option('--no-auto-update', 'Do not install a newer version automatically at startup')
   .argument('[prompt...]', 'Run a one-shot prompt (non-interactive)')
   .action(async (promptArgs, options) => {
     // ETTORE <version>. Print BEFORE the agent starts so the user can
@@ -57,9 +60,51 @@ program
     let updateStatus = null;
     if (options.updateCheck !== false) {
       updateStatus = checkForUpdateSync();
+    }
+
+    // Install a newer release BEFORE anything else loads, then hand over to
+    // it by re-executing. npm replaces files under the running process and
+    // this CLI imports modules lazily for the whole session (the TUI, tools,
+    // providers), so swapping them mid-session would mix old and new code in
+    // one process. Install-then-restart is the only safe shape, and it is
+    // why the update cannot be applied to the session that discovers it.
+    const autoPlan = planAutoUpdate({
+      status: updateStatus,
+      enabled: options.autoUpdate !== false && process.env.ETTORE_AUTO_UPDATE !== '0',
+    });
+    if (autoPlan.run) {
+      process.stdout.write(`↻ ETTORE ${autoPlan.from} → ${autoPlan.to}: installing…\n`);
+      try {
+        const result = await runUpdate({ target: 'latest', stream: true });
+        if (result.installed && result.installed !== autoPlan.from && result.isRunningCopy) {
+          process.stdout.write(`${dim}✓ ${result.installed} installed — restarting${reset}\n`);
+          const { spawnSync } = await import('node:child_process');
+          const relaunch = spawnSync(process.execPath, process.argv.slice(1), {
+            stdio: 'inherit',
+            env: { ...process.env, ETTORE_AUTO_UPDATE_DONE: '1' },
+          });
+          process.exit(relaunch.status ?? 0);
+        }
+        // npm succeeded but the copy on PATH is not the one it wrote: this
+        // machine has a second install, or a prefix whose bin/ is not on
+        // PATH. Say so, with both paths, instead of claiming an update.
+        process.stderr.write(
+          `${dim}auto-update: npm installed ${result.installed || 'an unknown version'} in ${result.installedAt || 'the global prefix'}, `
+          + `but you are running ${process.argv[1]} (${autoPlan.from}). Continuing on ${autoPlan.from}.${reset}\n`,
+        );
+      } catch (error) {
+        // Never block the session on this: a failed install (no network, a
+        // prefix that needs sudo) leaves the working build in place.
+        process.stderr.write(`${dim}auto-update skipped: ${error.message}${reset}\n`);
+      }
+    } else if (updateStatus?.outdated) {
+      // Not updating automatically — fall back to telling the user.
       const banner = formatBanner(updateStatus);
       if (banner && process.stdout.isTTY) {
         process.stdout.write(`${banner}\n`);
+      }
+      if (autoPlan.reason && options.debug) {
+        process.stderr.write(`${dim}auto-update: ${autoPlan.reason}${reset}\n`);
       }
     }
 
@@ -141,19 +186,44 @@ program
   .command('update')
   .description('Update ETTORE to the latest version from npm')
   .option('-t, --target <version>', 'Install a specific version instead of @latest')
+  .option('-f, --force', 'Update even from a git checkout (replaces a linked install)')
   .action(async (options) => {
     const { version: current } = readLocalPackage();
     const dim = process.stdout.isTTY ? '\x1b[2m' : '';
     const reset = process.stdout.isTTY ? '\x1b[0m' : '';
+    const install = describeInstall();
+    if (!install.updatable && !options.force) {
+      // Refuse rather than replace a development checkout with a registry
+      // copy — the command would "succeed" and disconnect the CLI from the
+      // repo it is linked to.
+      process.stderr.write(`${install.reason}\n`);
+      process.stderr.write(`${dim}Pass --force if you really want to install the published build over it.${reset}\n`);
+      process.exit(1);
+    }
     process.stdout.write(`Updating ${current} → ${options.target || 'latest'}…\n`);
     try {
-      const result = await runUpdate({ target: options.target || 'latest', stream: true });
-      // Re-read the package.json to see the newly installed version.
-      const { version: next } = readLocalPackage();
+      const result = await runUpdate({
+        target: options.target || 'latest',
+        stream: true,
+        force: Boolean(options.force),
+      });
       const green = process.stdout.isTTY ? '\x1b[32m' : '';
-      process.stdout.write(`\n${green}✓ ETTORE updated to ${next}.${reset}\n`);
-      if (next === current) {
-        process.stdout.write(`${dim}(no version bump — you may already be on the latest published build)${reset}\n`);
+      const yellow = process.stdout.isTTY ? '\x1b[33m' : '';
+      // Report what npm left on disk, not what this process booted with:
+      // the running package.json is not the file npm just replaced.
+      const installed = result.installed;
+      if (!installed) {
+        process.stdout.write(`\n${yellow}npm reported success, but no installed version could be read from ${result.installedAt || 'the global prefix'}.${reset}\n`);
+      } else if (!result.isRunningCopy) {
+        process.stdout.write(`\n${yellow}↻ ${installed} installed in ${result.installedAt}.${reset}\n`);
+        process.stdout.write(
+          `${yellow}But the command you run is ${process.argv[1]}, which npm did not touch — `
+          + `that prefix's bin/ is probably not on your PATH, so you would keep launching ${current}.${reset}\n`,
+        );
+      } else if (installed === current) {
+        process.stdout.write(`\n${green}✓ ${installed} is already the published build — nothing changed.${reset}\n`);
+      } else {
+        process.stdout.write(`\n${green}✓ ETTORE updated ${current} → ${installed}.${reset}\n`);
       }
       process.stdout.write(`${dim}Restart the CLI to pick up the new build.${reset}\n`);
     } catch (error) {

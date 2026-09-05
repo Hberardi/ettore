@@ -12,8 +12,8 @@
 // `runUpdate()` shells out to `npm install -g` and surfaces the same
 // output the user would have seen if they had run npm themselves.
 
-import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { execFile, execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -208,16 +208,102 @@ export function formatBanner(status, { color = true } = {}) {
 // Run `npm install -g <pkg>@<version>` (or `@latest`). The output is
 // streamed to the parent's stdout so the user sees npm's progress
 // bars; we only return metadata about the outcome.
+// ---------------------------------------------------------------------------
+// Where are we actually installed?
+//
+// `npm install -g` writes into npm's global prefix. That is not necessarily
+// the copy the user executes: a machine can carry two prefixes, a prefix
+// whose bin/ is not on PATH, or a `npm link`ed checkout. In all three cases
+// the old command kept running while the update reported success, which is
+// exactly the "update does nothing" report that started this.
+// ---------------------------------------------------------------------------
+
+let cachedPrefix;
+
+export function npmGlobalPrefix() {
+  if (cachedPrefix !== undefined) return cachedPrefix;
+  try {
+    const out = execFileSync(NPM_BIN, ['prefix', '-g'], {
+      encoding: 'utf8',
+      timeout: 8000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      ...SHELL_OPTS,
+    });
+    cachedPrefix = String(out || '').trim() || null;
+  } catch {
+    cachedPrefix = null;
+  }
+  return cachedPrefix;
+}
+
+// <prefix>/lib/node_modules/<name> on POSIX, <prefix>/node_modules/<name>
+// on Windows.
+export function globalPackageDir(name = readLocalPackage().name) {
+  const prefix = npmGlobalPrefix();
+  if (!prefix) return null;
+  return IS_WINDOWS ? join(prefix, 'node_modules', name) : join(prefix, 'lib', 'node_modules', name);
+}
+
+// The version npm has on disk after an install — NOT the one this process
+// booted with. Re-reading our own package.json is what let `ettore update`
+// print "✓ updated" while nothing the user runs had changed.
+export function installedVersion() {
+  const dir = globalPackageDir();
+  if (!dir) return null;
+  try {
+    return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).version || null;
+  } catch {
+    return null;
+  }
+}
+
+// Is the copy we are executing the one npm would overwrite?
+export function runningIsGlobalInstall() {
+  const dir = globalPackageDir();
+  if (!dir) return false;
+  try {
+    return realpathSync(dir) === realpathSync(ROOT);
+  } catch {
+    return false;
+  }
+}
+
+// A published install is a plain directory under the global node_modules. A
+// development copy has a .git alongside it and is usually symlinked there by
+// `npm link`, so `npm install -g <pkg>@latest` would replace the link with a
+// registry copy and silently disconnect the command from the repo. Refuse
+// that instead of performing it.
+export function describeInstall({ root = ROOT } = {}) {
+  const { name, version } = readLocalPackage();
+  const isCheckout = existsSync(join(root, '.git'));
+  return {
+    name,
+    version,
+    root,
+    isCheckout,
+    updatable: !isCheckout,
+    reason: isCheckout
+      ? `${root} is a git checkout, so \`npm install -g ${name}@latest\` would install a separate copy and, if this one is linked, replace the link. Update it with \`git pull\` instead.`
+      : null,
+  };
+}
+
 // A dist-tag ("latest", "next") or a version ("1.2.0", "1.3.0-beta.1").
 // Anything else is refused: on Windows these arguments reach cmd.exe.
 const SAFE_TARGET_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-export function runUpdate({ target = 'latest', stream = true } = {}) {
-  const { name } = readLocalPackage();
+export function runUpdate({ target = 'latest', stream = true, force = false } = {}) {
+  const { name, version: before } = readLocalPackage();
   return new Promise((resolveUpdate, reject) => {
     const wanted = String(target || 'latest').trim();
     if (!SAFE_TARGET_RE.test(wanted)) {
       reject(new Error(`invalid target "${wanted}" — expected a version like 1.2.0 or a tag like latest`));
+      return;
+    }
+    const install = describeInstall();
+    if (!install.updatable && !force) {
+      reject(new Error(install.reason));
       return;
     }
     const args = ['install', '-g', `${name}@${wanted}`];
@@ -235,17 +321,53 @@ export function runUpdate({ target = 'latest', stream = true } = {}) {
         // version.
         cachedName = null;
         cachedVersion = null;
+        cachedPrefix = undefined;
         // Drop the cache so the next check pulls a fresh comparison.
         try {
           const p = getCachePath();
           if (existsSync(p)) unlinkSync(p);
         } catch {}
-        resolveUpdate({ ok: true, code, package: name, target });
+        // Report what npm actually left on disk, and whether that is the
+        // copy this machine executes. Both can disagree with `before`, and
+        // saying "updated" regardless is how the command came to look like
+        // it did nothing.
+        resolveUpdate({
+          ok: true,
+          code,
+          package: name,
+          target: wanted,
+          before,
+          installed: installedVersion(),
+          installedAt: globalPackageDir(),
+          isRunningCopy: runningIsGlobalInstall(),
+        });
       } else {
         reject(new Error(`npm install exited with code ${code}`));
       }
     });
   });
+}
+
+// Decide whether the CLI should install a new release before the agent
+// starts. Every condition that makes this unsafe or pointless is a "skip",
+// never a failure: the user asked to run ETTORE, not to install software.
+export function planAutoUpdate({
+  status = null,
+  enabled = true,
+  isTTY = Boolean(process.stdout?.isTTY),
+  alreadyRan = Boolean(process.env.ETTORE_AUTO_UPDATE_DONE),
+  install = null,
+} = {}) {
+  if (!enabled) return { run: false, reason: 'auto-update is disabled' };
+  // The caller re-executes into the new build; without this guard a build
+  // that keeps reporting the old version would relaunch itself forever.
+  if (alreadyRan) return { run: false, reason: 'already updated during this launch' };
+  // Never install software in a pipe, a CI job or a one-shot script run.
+  if (!isTTY) return { run: false, reason: 'not an interactive terminal' };
+  if (!status?.outdated || !status.latest) return { run: false, reason: 'no newer version is known yet' };
+  const info = install || describeInstall();
+  if (!info.updatable) return { run: false, reason: info.reason };
+  return { run: true, from: status.current, to: status.latest, reason: null };
 }
 
 // Convenience: kick off the async check and return a promise. Used by

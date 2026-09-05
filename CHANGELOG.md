@@ -8,6 +8,60 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Added — the CLI updates itself, and stops lying when it cannot
+
+`ettore update` used to run `npm install -g`, re-read its own
+`package.json`, and report `✓ ETTORE updated to <version>` — the file
+npm had just replaced was not the one it read back, so the command
+announced success while nothing the user runs had changed. Three
+things are fixed.
+
+**It reports what npm actually left on disk.** `installedVersion()`
+reads the package.json under npm's global prefix
+(`<prefix>/lib/node_modules/<pkg>`, `<prefix>/node_modules/<pkg>` on
+Windows), and `runningIsGlobalInstall()` says whether that is the copy
+being executed. When the two disagree — a second prefix, or a prefix
+whose `bin/` is not on `PATH` — the command prints both paths and says
+you would keep launching the old build, instead of claiming an
+upgrade.
+
+**It refuses to overwrite a development checkout.** `describeInstall()`
+treats a package root containing `.git` as not updatable: for a
+`npm link`ed repo, `npm install -g <pkg>@latest` replaces the link with
+a registry copy and silently disconnects the command from the repo.
+`ettore update` now stops with "update it with `git pull` instead" and
+a `--force` escape hatch.
+
+**It installs automatically at startup.** When the cached check says a
+newer version exists, the CLI installs it *before loading anything
+else* and re-executes into the new build, passing the user's original
+argv through. Doing it up front is what makes it safe: npm replaces
+files under the running process, and this CLI imports modules lazily
+for the whole session (TUI, tools, providers), so a mid-session swap
+would mix old and new code in one process. That is also why the update
+can never be applied to the session that discovers it.
+
+`planAutoUpdate()` holds the conditions, and every one of them is a
+skip rather than a failure — the user asked to run ETTORE, not to
+install software:
+
+- `--no-auto-update`, or `ETTORE_AUTO_UPDATE=0`
+- not a TTY (never install under a pipe, a CI job or a one-shot run)
+- `ETTORE_AUTO_UPDATE_DONE` is set — the re-exec guard, without which a
+  build that keeps reporting the old version relaunches itself forever
+- nothing newer is known (the 6h cache is cold or current)
+- the running copy is a git checkout
+
+A failed install (offline, or a prefix that needs sudo) prints one
+dimmed line and the session continues on the working build. With
+`--debug` the skip reason is printed too.
+
+Tests: `tests/update.test.js` covers `describeInstall` on a checkout,
+`runUpdate` refusing it, `globalPackageDir` per platform, all six
+`planAutoUpdate` branches, and a contract test pinning the re-exec
+guard in `bin/cli.js`.
+
+
 ## [1.2.0] — 2026-09-05
 
 ### Added — Windows desktop backend

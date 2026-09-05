@@ -258,3 +258,53 @@ test('npm is spawned in a way that works on Windows', () => {
     'npm must be spawned through the platform-resolved binary, not the literal "npm"',
   );
 });
+
+test('describeInstall refuses to npm-install over a git checkout', () => {
+  // This repo IS a checkout, which is precisely the case that must not be
+  // "updated": `npm install -g` would drop a registry copy next to it and,
+  // on a linked install, replace the link that makes `ettore` run the repo.
+  const install = update.describeInstall();
+  assert.equal(install.isCheckout, true);
+  assert.equal(install.updatable, false);
+  assert.match(install.reason, /git pull/);
+});
+
+test('runUpdate refuses a checkout unless forced', async () => {
+  await assert.rejects(() => update.runUpdate({ target: 'latest', stream: false }), /git checkout/);
+});
+
+test('globalPackageDir points at the prefix npm installs into', () => {
+  const dir = update.globalPackageDir();
+  if (!dir) return; // no npm on PATH in this environment
+  const expected = process.platform === 'win32' ? /node_modules[\\/]ettore-ai-assistant$/ : /lib[\\/]node_modules[\\/]ettore-ai-assistant$/;
+  assert.match(dir, expected);
+});
+
+test('planAutoUpdate only runs when it is safe and useful', () => {
+  const status = { current: '1.2.0', latest: '1.3.0', outdated: true };
+  const ok = { status, isTTY: true, alreadyRan: false, install: { updatable: true } };
+
+  assert.equal(update.planAutoUpdate(ok).run, true);
+  assert.equal(update.planAutoUpdate({ ...ok, enabled: false }).run, false);
+  // A pipe or a CI job must never have software installed under it.
+  assert.equal(update.planAutoUpdate({ ...ok, isTTY: false }).run, false);
+  // The re-exec guard: without it a build that keeps reporting the old
+  // version would relaunch itself forever.
+  assert.equal(update.planAutoUpdate({ ...ok, alreadyRan: true }).run, false);
+  assert.match(update.planAutoUpdate({ ...ok, alreadyRan: true }).reason, /already updated/);
+  assert.equal(update.planAutoUpdate({ ...ok, status: { current: '1.2.0', latest: '1.2.0', outdated: false } }).run, false);
+  // A checkout is reported with the same reason the update command prints.
+  const onCheckout = update.planAutoUpdate({ ...ok, install: undefined });
+  assert.equal(onCheckout.run, false);
+  assert.match(onCheckout.reason, /git pull/);
+});
+
+test('bin/cli.js installs before loading anything and guards the re-exec', () => {
+  const text = readFileSync(resolve(REPO_ROOT, 'bin/cli.js'), 'utf8');
+  assert.match(text, /--no-auto-update/);
+  assert.match(text, /planAutoUpdate\(/);
+  assert.match(text, /ETTORE_AUTO_UPDATE_DONE:\s*'1'/, 'the relaunch must mark itself to avoid a restart loop');
+  assert.match(text, /spawnSync\(process\.execPath/);
+  // The relaunch is only worth doing when npm wrote the copy we execute.
+  assert.match(text, /result\.isRunningCopy/);
+});
