@@ -1149,20 +1149,31 @@ export async function startApp(options = {}) {
     tui.needsRender = true;
   });
 
-  emitter.on('usage', ({ inputTokens, outputTokens }) => {
-    if (!inputTokens && !outputTokens) return;
-    mission.addUsage({ inputTokens, outputTokens });
+  emitter.on('usage', ({ inputTokens, outputTokens, cacheCreate, cacheRead }) => {
+    // Anthropic reports cached input in its own two counters; `input_tokens`
+    // holds only the uncached remainder. Reading that field alone made a warm
+    // turn look like six tokens when the request really carried several
+    // thousand — the meter read empty and the context bar collapsed with it.
+    const uncachedIn = Number(inputTokens) || 0;
+    const outN       = Number(outputTokens) || 0;
+    const createN    = Number(cacheCreate) || 0;
+    const readN      = Number(cacheRead) || 0;
+    // What the request actually carried, cached or not: the honest prompt size.
+    const promptN    = uncachedIn + createN + readN;
+    if (!promptN && !outN) return;
+    mission.addUsage({ inputTokens: promptN, outputTokens: outN });
     syncMission();
-    tui.inputTokensTotal  += inputTokens  || 0;
-    tui.outputTokensTotal += outputTokens || 0;
-    // Update context estimate from latest input tokens
-    if (inputTokens) tui.tokenCount = inputTokens;
+    tui.inputTokensTotal  += promptN;
+    tui.outputTokensTotal += outN;
+    tui.cachedTokensTotal = (tui.cachedTokensTotal || 0) + createN + readN;
+    // Context estimate: the full prompt, not just the part that missed cache.
+    if (promptN) tui.tokenCount = promptN;
     // Calculate cost
     const modelId = connectionManager.activeModel || '';
     const provider = connectionManager.activeProvider || '';
     const cost = NON_METERED_PROVIDERS.has(provider)
       ? 0
-      : calcCost(inputTokens || 0, outputTokens || 0, modelId);
+      : calcCost(uncachedIn, outN, modelId, createN, readN);
     if (cost !== null) {
       tui.sessionCost += cost;
       tui.costKnown    = true;
@@ -1173,8 +1184,9 @@ export async function startApp(options = {}) {
       const costStr = NON_METERED_PROVIDERS.has(provider)
         ? 'n/a'
         : `$${tui.sessionCost.toFixed(4)}`;
+      const cacheStr = createN || readN ? ` (cache w=${createN} r=${readN})` : '';
       process.stderr.write(
-        `📊 turn: in=${inputTokens || 0} out=${outputTokens || 0}  ·  session in=${tui.inputTokensTotal} out=${tui.outputTokensTotal} cost=${costStr}\n`,
+        `📊 turn: in=${promptN}${cacheStr} out=${outN}  ·  session in=${tui.inputTokensTotal} out=${tui.outputTokensTotal} cost=${costStr}\n`,
       );
     }
     tui.needsRender = true;

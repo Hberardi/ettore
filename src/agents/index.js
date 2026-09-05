@@ -990,6 +990,9 @@ export class Agent {
     const turnRecoveryState = this._createTurnRecoveryState();
     let mutationToolUsed = false;
     let verificationDone = false;
+    // Memoized tool route for this turn — see the routing block inside the loop.
+    let routedTools = null;
+    let routedToolsKey = null;
     let repoMapUsedThisTurn = false;
     let toolCallCount = 0;
     let readOnlyToolBatchCount = 0;
@@ -1079,23 +1082,54 @@ export class Agent {
         this._debugLog(emitter, 'turn.iteration', { iterations, maxIterations: this.maxIterations, messageCount: this.messages.length });
         this._refreshActiveSystemPrompt();
 
+        // The tool list is the head of the provider's prompt-cache prefix, so
+        // any change to it — a reordering included — throws away the cached
+        // system prompt along with it. Routing used to be recomputed from
+        // scratch on every iteration against state that shifts *during* the
+        // loop (`mutationToolUsed`, `verificationNeeded`, `touchedFiles`),
+        // which meant a plain edit turn re-wrote the whole prefix two or three
+        // times: measured on the claude-code bridge, 8.3k tokens re-cached at
+        // 1.25x instead of 7.2k read back at 0.1x.
+        //
+        // Two changes keep it byte-stable for the length of a turn. The
+        // widening flags are anticipated up front, so the set a mutation would
+        // later unlock is already present on the first iteration; and the
+        // result is memoized against the inputs, so an unchanged route reuses
+        // the very same array. An overlay arriving mid-turn still re-routes —
+        // that path is rare and worth the cache miss.
+        const editIntentLikely = this._editIntentActive
+          || mutationToolUsed
+          || touchedFiles.size > 0
+          || promptHasEditIntent(promptText);
         const toolRouteContext = {
           mode: this.mode,
           prompt: promptText,
           overlay: this._pendingTurnOverlay,
           isLite: this._isLite,
-          mutationToolUsed,
-          touchedFiles: touchedFiles.size,
-          verificationNeeded: mutationToolUsed && !verificationDone,
+          mutationToolUsed: mutationToolUsed || editIntentLikely,
+          // Normalized to 0/1: the router only asks whether anything was
+          // touched, and the raw count would churn the memo key for nothing.
+          touchedFiles: editIntentLikely ? 1 : 0,
+          // Deliberately not gated on `verificationDone`: letting the set
+          // shrink again mid-turn would cost a second cache write to save
+          // four tool schemas.
+          verificationNeeded: editIntentLikely,
           maxTools: this.maxToolsPerRequest,
           includePluginTools: Boolean(this._pluginRegistry),
           editIntentSticky: this._editIntentActive,
         };
-        const tools = forceTextOnlyNextTurn || this._isLite
-          ? []
-          : this.dynamicToolRouting
-            ? selectToolDefinitions(this._getAllToolDefinitions(), toolRouteContext)
-            : this.mode === 'plan' ? PLAN_TOOLS : this._getAllToolDefinitions();
+        const toolRouteKey = forceTextOnlyNextTurn || this._isLite
+          ? 'none'
+          : JSON.stringify(toolRouteContext);
+        if (toolRouteKey !== routedToolsKey) {
+          routedToolsKey = toolRouteKey;
+          routedTools = forceTextOnlyNextTurn || this._isLite
+            ? []
+            : this.dynamicToolRouting
+              ? selectToolDefinitions(this._getAllToolDefinitions(), toolRouteContext)
+              : this.mode === 'plan' ? PLAN_TOOLS : this._getAllToolDefinitions();
+        }
+        const tools = routedTools;
         this.workingMemory.routedTools = selectedToolNames(tools);
         emitter?.emit('toolRoute', {
           count: tools.length,

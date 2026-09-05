@@ -7,6 +7,15 @@ import { canonicalizeToolTurn } from '../agents/message-ledger.js';
 // Hard cap on model output — prevents infinite generation loops
 const MAX_OUTPUT_TOKENS = 8192;
 
+// Claude 3-era models cap `max_tokens` at 4096 and reject anything above it
+// with a 400 before generating a single token. Every model since accepts the
+// default and beyond, so this is a floor for legacy ids, not a policy.
+const LEGACY_4K_OUTPUT_RE = /^claude-3-(opus|sonnet|haiku)\b/i;
+
+export function anthropicOutputCap(model, requested = MAX_OUTPUT_TOKENS) {
+  return LEGACY_4K_OUTPUT_RE.test(String(model || '')) ? Math.min(requested, 4096) : requested;
+}
+
 // Idle timeout: if no token arrives, abort the stream.
 // Reasoning models (M2.7, DeepSeek-R1) can have long pauses between tokens —
 // MiniMax M2.7 in particular emits no chunks during internal reasoning, so it
@@ -465,6 +474,48 @@ export class OpenAICompatClient {
 // Beta header required by SDK 0.21.x for cache_control. Newer SDKs accept it natively.
 const ANTHROPIC_CACHE_HEADER = { 'anthropic-beta': 'prompt-caching-2024-07-31' };
 
+// Anthropic accepts at most four cache breakpoints per request. We spend them
+// on, in order of how much they save: the tool list, the system prompt, the
+// compressed-context summary, and a rolling one at the end of the transcript.
+const ANTHROPIC_MAX_CACHE_BREAKPOINTS = 4;
+
+/**
+ * Tags the end of the transcript so the *next* turn reads the whole history
+ * back from cache instead of re-sending it at full price.
+ *
+ * Without this the only cached blocks are the system prompt and the tool list,
+ * so every turn pays full input price for the entire conversation again — a
+ * cost that grows quadratically over an agentic loop. The breakpoint rolls
+ * forward each turn: the prefix it wrote last turn is what this turn hits.
+ *
+ * Mutates `messages` in place (they are freshly built by the normalizer) and
+ * returns the number of breakpoints now present.
+ */
+export function applyRollingCacheBreakpoint(messages, budget) {
+  let used = 0;
+  for (const msg of messages) {
+    if (!Array.isArray(msg?.content)) continue;
+    for (const block of msg.content) {
+      if (block && typeof block === 'object' && block.cache_control) used++;
+    }
+  }
+  if (used >= budget) return used;
+
+  // Walk back to the last message carrying a taggable block. A trailing
+  // message with no content blocks (or only unknown shapes) is skipped rather
+  // than silently dropping the breakpoint.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const content = messages[i]?.content;
+    if (!Array.isArray(content) || !content.length) continue;
+    const block = content[content.length - 1];
+    if (!block || typeof block !== 'object') continue;
+    if (block.cache_control) return used;
+    block.cache_control = { type: 'ephemeral' };
+    return used + 1;
+  }
+  return used;
+}
+
 export class AnthropicClient {
   constructor(apiKey, model, options = {}) {
     this.client = new Anthropic({
@@ -483,6 +534,9 @@ export class AnthropicClient {
     // User-config LLM params (es. temperature, top_p, max_tokens) — sovrascrivono
     // i default cablati (es. MAX_OUTPUT_TOKENS) se esplicitamente impostati.
     Object.assign(params, this._modelParams);
+    // Applied last so a legacy model is clamped whether the ceiling came from
+    // the default or from user config.
+    params.max_tokens = anthropicOutputCap(this.model, params.max_tokens);
     // System prompt is stable across turns — cache it.
     if (system) {
       params.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
@@ -497,6 +551,12 @@ export class AnthropicClient {
       mapped[mapped.length - 1].cache_control = { type: 'ephemeral' };
       params.tools = mapped;
     }
+    // Whatever is left of the four-breakpoint budget after the system prompt
+    // and the tool list goes to the transcript.
+    applyRollingCacheBreakpoint(
+      userMessages,
+      ANTHROPIC_MAX_CACHE_BREAKPOINTS - (params.system ? 1 : 0) - (params.tools ? 1 : 0),
+    );
     const reqOpts = { headers: ANTHROPIC_CACHE_HEADER };
 
     raiseSignalListenerCap(signal);

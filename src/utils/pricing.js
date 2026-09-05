@@ -12,7 +12,20 @@ const PRICING = {
   'o3':                  { in: 10.00, out: 40.00, ctx: 200000  },
   'o3-mini':             { in: 1.10,  out: 4.40,  ctx: 200000  },
   'o4-mini':             { in: 1.10,  out: 4.40,  ctx: 200000  },
-  // Anthropic
+  // Anthropic — current generation. Rates are Anthropic first-party API list
+  // prices per 1M tokens; Bedrock and Vertex bill separately. Longest-key-wins
+  // lookup (see getModelPricing) keeps `claude-opus-4-8` off the `claude-opus-4`
+  // row, so specific ids can be added here in any order.
+  'claude-fable-5-1':    { in: 10.00, out: 50.00, ctx: 1000000 },
+  'claude-fable-5':      { in: 10.00, out: 50.00, ctx: 1000000 },
+  'claude-opus-5':       { in: 5.00,  out: 25.00, ctx: 1000000 },
+  'claude-opus-4-8':     { in: 5.00,  out: 25.00, ctx: 1000000 },
+  'claude-opus-4-7':     { in: 5.00,  out: 25.00, ctx: 1000000 },
+  'claude-opus-4-6':     { in: 5.00,  out: 25.00, ctx: 1000000 },
+  'claude-sonnet-5':     { in: 2.00,  out: 10.00, ctx: 1000000 },
+  'claude-sonnet-4-6':   { in: 3.00,  out: 15.00, ctx: 1000000 },
+  'claude-haiku-4-5':    { in: 1.00,  out: 5.00,  ctx: 200000  },
+  // Anthropic — older ids kept for sessions pinned to them.
   'claude-opus-4':       { in: 15.00, out: 75.00, ctx: 200000  },
   'claude-sonnet-4':     { in: 3.00,  out: 15.00, ctx: 200000  },
   'claude-3-5-sonnet':   { in: 3.00,  out: 15.00, ctx: 200000  },
@@ -118,17 +131,41 @@ export function getModelPricing(modelId) {
   if (!modelId) return { in: null, out: null, ctx: 128000 };
   const id = modelId.toLowerCase();
   if (PRICING[id]) return PRICING[id];
-  // prefix / substring match (handles versioned names like gpt-4o-2024-11-20)
+  // Prefix / substring match, handling versioned names like
+  // `gpt-4o-2024-11-20`. The *longest* matching key wins: first-match order
+  // would price `claude-opus-4-8` off the `claude-opus-4` row and understate
+  // nothing but overstate by 3x, and the same trap waits for every future
+  // point release.
+  let best = null;
+  let bestLen = 0;
   for (const [key, val] of Object.entries(PRICING)) {
-    if (id.startsWith(key) || id.includes(key)) return val;
+    if (key.length <= bestLen) continue;
+    if (id.startsWith(key) || id.includes(key)) {
+      best = val;
+      bestLen = key.length;
+    }
   }
-  return { in: null, out: null, ctx: 128000 };
+  return best || { in: null, out: null, ctx: 128000 };
 }
 
-export function calcCost(inputTokens, outputTokens, modelId) {
+// Anthropic bills a cache write at 1.25x the input rate and a cache read at
+// 0.1x. Providers without prompt caching report zeroes here and are unaffected.
+const CACHE_WRITE_MULTIPLIER = 1.25;
+const CACHE_READ_MULTIPLIER = 0.10;
+
+/**
+ * Cost of one turn. `cacheCreate`/`cacheRead` are the cached-input counters
+ * Anthropic reports alongside `input_tokens` — they are *not* included in it,
+ * so a caller that passes only `inputTokens` under-reports a cached turn by
+ * whatever the cache covered, which on a warm agent turn is nearly all of it.
+ */
+export function calcCost(inputTokens, outputTokens, modelId, cacheCreate = 0, cacheRead = 0) {
   const p = getModelPricing(modelId);
   if (p.in === null) return null;
-  return (inputTokens / 1e6) * p.in + (outputTokens / 1e6) * p.out;
+  return (inputTokens / 1e6) * p.in
+    + (cacheCreate / 1e6) * p.in * CACHE_WRITE_MULTIPLIER
+    + (cacheRead / 1e6) * p.in * CACHE_READ_MULTIPLIER
+    + (outputTokens / 1e6) * p.out;
 }
 
 export function formatCost(dollars) {

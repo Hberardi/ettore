@@ -7,16 +7,18 @@ export class AnthropicProvider {
   }
   
   async listModels() {
+    // Only reached when `models.list()` fails, so it must not offer models the
+    // API would refuse: every Claude 3.x snapshot has been retired, and the
+    // previous list was made entirely of those. Aliases are preferred over
+    // pinned snapshots because they never go stale.
     const fallback = [
-      { id: 'claude-opus-4-20250514',      description: 'Claude Opus 4' },
-      { id: 'claude-sonnet-4-20250514',    description: 'Claude Sonnet 4' },
-      { id: 'claude-3-7-sonnet-20250219',  description: 'Claude 3.7 Sonnet' },
-      { id: 'claude-3-5-sonnet-20241022',  description: 'Claude 3.5 Sonnet' },
-      { id: 'claude-3-5-haiku-20241022',   description: 'Claude 3.5 Haiku' },
-      { id: 'claude-3-5-sonnet-20240620',  description: 'Claude 3.5 Sonnet (June)' },
-      { id: 'claude-3-opus-20240229',      description: 'Claude 3 Opus' },
-      { id: 'claude-3-sonnet-20240229',    description: 'Claude 3 Sonnet' },
-      { id: 'claude-3-haiku-20240307',     description: 'Claude 3 Haiku' },
+      { id: 'claude-opus-5',     description: 'Claude Opus 5 — most capable' },
+      { id: 'claude-sonnet-5',   description: 'Claude Sonnet 5 — balanced' },
+      { id: 'claude-haiku-4-5',  description: 'Claude Haiku 4.5 — fastest' },
+      { id: 'claude-opus-4-8',   description: 'Claude Opus 4.8' },
+      { id: 'claude-opus-4-7',   description: 'Claude Opus 4.7' },
+      { id: 'claude-opus-4-6',   description: 'Claude Opus 4.6' },
+      { id: 'claude-sonnet-4-6', description: 'Claude Sonnet 4.6' },
     ];
     try {
       const response = await this.client.models.list();
@@ -49,10 +51,10 @@ export class AnthropicProvider {
       name: 'Anthropic',
       description: 'Claude models',
       models: [
-        { id: 'claude-sonnet-4-20250514', description: 'Claude Sonnet 4' },
-        { id: 'claude-3-5-sonnet-20241022', description: 'Claude 3.5 Sonnet' },
-        { id: 'claude-3-opus-20240229', description: 'Claude 3 Opus' },
-        { id: 'claude-3-haiku-20240307', description: 'Claude 3 Haiku' }
+        { id: 'claude-opus-5', description: 'Claude Opus 5' },
+        { id: 'claude-sonnet-5', description: 'Claude Sonnet 5' },
+        { id: 'claude-opus-4-8', description: 'Claude Opus 4.8' },
+        { id: 'claude-haiku-4-5', description: 'Claude Haiku 4.5' }
       ]
     };
   }

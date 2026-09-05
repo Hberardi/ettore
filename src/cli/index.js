@@ -22,26 +22,42 @@ const NON_METERED_PROVIDERS = new Set(['ollama', 'nvidia', 'minimax', 'claude-co
 export function attachVerboseTokenLogger(em) {
   let inputTotal = 0;
   let outputTotal = 0;
+  let cachedTotal = 0;
   let costTotal = 0;
   let turn = 0;
-  em.on('usage', ({ inputTokens, outputTokens }) => {
+  em.on('usage', ({ inputTokens, outputTokens, cacheCreate, cacheRead }) => {
+    // On a cached Anthropic turn `input_tokens` counts only what the cache did
+    // not cover — a warm agent turn reports single digits while several
+    // thousand tokens are actually being billed. The two cache counters carry
+    // the rest, so the line has to add them or it reports a fiction.
     const inN = Number(inputTokens) || 0;
     const outN = Number(outputTokens) || 0;
-    inputTotal += inN;
+    const createN = Number(cacheCreate) || 0;
+    const readN = Number(cacheRead) || 0;
+    const promptN = inN + createN + readN;
+    inputTotal += promptN;
     outputTotal += outN;
+    cachedTotal += createN + readN;
     turn += 1;
     const provider = connectionManager.activeProvider || '';
     const modelId = connectionManager.activeModel || '';
     const cost = NON_METERED_PROVIDERS.has(provider)
       ? null
-      : calcCost(inN, outN, modelId);
+      : calcCost(inN, outN, modelId, createN, readN);
     if (cost !== null) costTotal += cost;
     const costStr = cost === null ? 'n/a' : `$${cost.toFixed(4)}`;
+    const cacheStr = createN || readN ? ` (cache w=${createN} r=${readN})` : '';
     process.stderr.write(
-      `📊 turn ${turn}: in=${inN} out=${outN}  ·  session in=${inputTotal} out=${outputTotal} cost=$${costTotal.toFixed(4)} (this turn: ${costStr})\n`,
+      `📊 turn ${turn}: in=${promptN}${cacheStr} out=${outN}  ·  session in=${inputTotal} out=${outputTotal} cost=$${costTotal.toFixed(4)} (this turn: ${costStr})\n`,
     );
   });
-  return { turn: () => turn, inputTotal: () => inputTotal, outputTotal: () => outputTotal, costTotal: () => costTotal };
+  return {
+    turn: () => turn,
+    inputTotal: () => inputTotal,
+    outputTotal: () => outputTotal,
+    cachedTotal: () => cachedTotal,
+    costTotal: () => costTotal,
+  };
 }
 
 export async function runPrompt(prompt, options = {}) {
