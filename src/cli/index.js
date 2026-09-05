@@ -122,9 +122,13 @@ For local models, start Ollama and run /connect ollama.`);
     hadError = true;
     process.stderr.write('\nCancelled.\n');
   });
-  em.on('toolStart', ({ name, args }) => {
+  em.on('toolStart', ({ name, args, plugin }) => {
     const preview = Object.values(args || {})[0];
-    process.stderr.write(`\n⚙ ${name}(${cleanOutput(String(preview || '').slice(0, 60), { maxBytes: 200 })})\n`);
+    // Which plugin supplied the tool, on the one line this mode prints for it.
+    // A run that pipes its output somewhere should still show that a third
+    // party's code ran.
+    const from = plugin ? ` ⧉${plugin}` : '';
+    process.stderr.write(`\n⚙ ${name}${from}(${cleanOutput(String(preview || '').slice(0, 60), { maxBytes: 200 })})\n`);
   });
   em.on('toolEnd', ({ output }) => {
     const text = String(output || '');

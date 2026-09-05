@@ -133,17 +133,21 @@ export class MissionControl {
     this.currentWave = null;
   }
 
-  toolStart({ id, name, args = {} } = {}) {
+  toolStart({ id, name, args = {}, plugin = null } = {}) {
     const entry = {
       id: text(id, shortId('tool')),
       name: text(name, 'tool'),
       args: args && typeof args === 'object' ? clone(args) : {},
+      // Null for a built-in. Kept so a mission record says which tools were
+      // the CLI's own and which came from an installed plugin — the field was
+      // being passed in and dropped here.
+      plugin: plugin ? text(plugin, '') || null : null,
       status: 'running',
       startedAt: now(),
     };
     this.tools.push(entry);
     if (this.tools.length > MAX_TOOLS) this.tools.shift();
-    this._event('tool', `${entry.name} started`);
+    this._event('tool', `${entry.name}${entry.plugin ? ` (${entry.plugin})` : ''} started`);
   }
 
   toolEnd({ id, name, output = '' } = {}) {
@@ -275,6 +279,13 @@ export class MissionControl {
     if (state.decisions.length) {
       lines.push('', 'Recent decisions:');
       state.decisions.forEach(decision => lines.push(`  - ${decision.text}`));
+    }
+    // Which third-party code ran during this mission. Storing the plugin on
+    // each tool and never showing it would repeat the mistake the field was
+    // added to fix.
+    const plugins = [...new Set(this.tools.filter(t => t.plugin).map(t => t.plugin))];
+    if (plugins.length) {
+      lines.push('', `Plugin tools used: ${plugins.join(', ')}`);
     }
     if (state.lastEvent) lines.push('', `Last event: ${state.lastEvent.detail}`);
     return lines.join('\n');

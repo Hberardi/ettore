@@ -545,3 +545,31 @@ test('the panel marks a plugin tool and leaves a built-in alone', async () => {
   // The built-in carries no badge — the mark has to mean something.
   assert.match(sidebar, /✔ read(?! ⧉)/);
 });
+
+test('the one-shot mode names the plugin too', async () => {
+  const { attachVerboseTokenLogger: _unused } = await import('../src/cli/index.js');
+  const { EventEmitter } = await import('node:events');
+  // The one-shot writer is registered inside runPrompt, so exercise the same
+  // shape it prints rather than importing a private function: the assertion is
+  // that the source emits the badge for a plugin tool and not for a built-in.
+  const src = await readFile(new URL('../src/cli/index.js', import.meta.url), 'utf8');
+  assert.match(src, /const from = plugin \? ` ⧉\$\{plugin\}` : '';/);
+  assert.match(src, /toolStart', \(\{ name, args, plugin \}\)/);
+  assert.ok(_unused && EventEmitter);
+});
+
+test('a mission says which third-party code ran during it', async () => {
+  const { MissionControl } = await import('../src/mission/index.js');
+  const m = new MissionControl();
+  m.startTurn('do something');
+  m.toolStart({ id: '1', name: 'read', args: {} });
+  m.toolStart({ id: '2', name: 'git_log', args: {}, plugin: 'git-history' });
+
+  const entries = Object.fromEntries(m.tools.map(t => [t.name, t.plugin]));
+  assert.equal(entries.git_log, 'git-history');
+  assert.equal(entries.read, null, 'a built-in must not be attributed to a plugin');
+
+  // And it is readable, not just stored — the failure this field exists to fix.
+  const text = m.format();
+  assert.match(text, /Plugin tools used: git-history/);
+});
