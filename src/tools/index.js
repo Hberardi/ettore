@@ -4,6 +4,7 @@ import { getBashSession } from './bash-session.js';
 import { sanitizeOutput } from '../utils/output.js';
 import { promisify } from 'util';
 import { readFile, writeFile, readdir, stat, access, readlink } from 'fs/promises';
+import { existsSync } from 'fs';
 import { join, extname, dirname } from 'path';
 import { glob as globby } from 'glob';
 import { uiBridge } from './bridge.js';
@@ -1423,6 +1424,14 @@ export const toolHandlers = {
     virtual_display = null,
     debug_port = null,
     ms = 1000,
+    record = true,
+    ascii = false,
+    ascii_width = 80,
+    ascii_height = 24,
+    invert = false,
+    interval_ms = 500,
+    duration_ms = 10000,
+    out_dir,
   } = {}) {
     const act = String(action || 'status').toLowerCase();
     const appId = String(id || 'default');
@@ -1489,6 +1498,59 @@ export const toolHandlers = {
         return stopped ? `Desktop app "${appId}" stopped.` : `No desktop app "${appId}".`;
       }
 
+      if (act === 'watch') {
+        if (typeof desktop.watch !== 'function') {
+          return 'Error: desktop_app action=watch is currently Windows-only. On Linux, use action=screenshot in a loop or install a screen-recording tool and tail its output.';
+        }
+        emitToolProgress('desktop_app', { action: act, id: appId }, 'Capturing frames…');
+        const result = await desktop.watch({
+          app: desktop.getApp(appId),
+          intervalMs: Math.max(50, Math.min(Number(interval_ms) || 500, 5000)),
+          durationMs: Math.max(500, Math.min(Number(duration_ms) || 10000, 600000)),
+          windowId: window_id || null,
+          outDir: out_dir || null,
+        });
+        if (ascii && typeof desktop.asciiPreview === 'function') {
+          try {
+            const preview = await desktop.asciiPreview(result.latest, {
+              width: Math.max(20, Math.min(Number(ascii_width) || 80, 240)),
+              height: Math.max(6, Math.min(Number(ascii_height) || 24, 80)),
+              invert: Boolean(invert),
+            });
+            return [
+              `Captured ${result.frames.length} frame(s) over ${Math.round(result.durationMs / 100) / 10}s.`,
+              `dir: ${result.dir}`,
+              `latest: ${result.latest}`,
+              '',
+              preview.ascii,
+            ].join('\n');
+          } catch (error) {
+            return `Captured ${result.frames.length} frame(s) over ${Math.round(result.durationMs / 100) / 10}s.\nlatest: ${result.latest}\n(ascii preview failed: ${error.message})`;
+          }
+        }
+        return [
+          `Captured ${result.frames.length} frame(s) over ${Math.round(result.durationMs / 100) / 10}s.`,
+          `dir: ${result.dir}`,
+          `latest: ${result.latest}`,
+        ].join('\n');
+      }
+
+      if (act === 'preview') {
+        if (typeof desktop.asciiPreview !== 'function') {
+          return 'Error: desktop_app action=preview is currently Windows-only.';
+        }
+        const sourcePath = file_path || join('.ettore', 'watch', appId, 'latest.png');
+        if (!existsSync(sourcePath)) {
+          return `Error: no screenshot to preview at ${sourcePath} — call action=screenshot first or run action=watch.`;
+        }
+        const preview = await desktop.asciiPreview(sourcePath, {
+          width: Math.max(20, Math.min(Number(ascii_width) || 80, 240)),
+          height: Math.max(6, Math.min(Number(ascii_height) || 24, 80)),
+          invert: Boolean(invert),
+        });
+        return `Source: ${sourcePath} (${preview.width}x${preview.height})\n\n${preview.ascii}`;
+      }
+
       const app = requireApp();
 
       if (act === 'status') {
@@ -1548,7 +1610,20 @@ export const toolHandlers = {
         }
         emitToolProgress('desktop_app', { action: act, id: appId }, 'Capturing the window…');
         const shot = await desktop.captureWindow({ windowId: target, path: shotPath(), display: app.display });
-        return `Screenshot saved to ${shot.path} (${shot.tool}${target ? `, window ${target}` : ', full screen'}).`;
+        let text = `Screenshot saved to ${shot.path} (${shot.tool}${target ? `, window ${target}` : ', full screen'}).`;
+        if (ascii && typeof desktop.asciiPreview === 'function') {
+          try {
+            const preview = await desktop.asciiPreview(shot.path, {
+              width: Math.max(20, Math.min(Number(ascii_width) || 80, 240)),
+              height: Math.max(6, Math.min(Number(ascii_height) || 24, 80)),
+              invert: Boolean(invert),
+            });
+            text += `\n\n${preview.ascii}`;
+          } catch (error) {
+            text += `\n(ascii preview failed: ${error.message})`;
+          }
+        }
+        return text;
       }
 
       if (act === 'click') {
@@ -1563,28 +1638,79 @@ export const toolHandlers = {
           windowId: window_id || null,
           display: app.display,
           windows,
+          record: record !== false,
         });
         await new Promise(done => { setTimeout(done, 400); });
         const fresh = desktop.detectAppErrors(app.logs.slice(-30));
-        const head = `Clicked at ${point.x},${point.y}.`;
-        return fresh.length ? `${head}\nRecent suspicious output:\n${fresh.map(f => f.line).join('\n')}` : head;
+        const head = [
+          `→ click @ (${point.x}, ${point.y}) button=${point.button}`,
+          point.screenshot ? `  post-shot: ${point.screenshot}` : null,
+        ].filter(Boolean).join('\n');
+        let body = fresh.length ? `${head}\nRecent suspicious output:\n${fresh.map(f => f.line).join('\n')}` : head;
+        if (ascii && point.screenshot && typeof desktop.asciiPreview === 'function') {
+          try {
+            const preview = await desktop.asciiPreview(point.screenshot, {
+              width: Math.max(20, Math.min(Number(ascii_width) || 80, 240)),
+              height: Math.max(6, Math.min(Number(ascii_height) || 24, 80)),
+              invert: Boolean(invert),
+            });
+            body += `\n\n${preview.ascii}`;
+          } catch (error) {
+            body += `\n(ascii preview failed: ${error.message})`;
+          }
+        }
+        return body;
       }
 
       if (act === 'type') {
         if (text === undefined || text === null) return 'Error: desktop_app type requires "text".';
-        await desktop.typeText({ text: String(text), windowId: window_id || null, display: app.display });
+        const result = await desktop.typeText({ text: String(text), windowId: window_id || null, display: app.display, record: record !== false });
         await new Promise(done => { setTimeout(done, 300); });
-        return `Typed ${String(text).length} character(s) into the focused widget.`;
+        const head = [
+          `→ type ${result.length} char(s)`,
+          result.screenshot ? `  post-shot: ${result.screenshot}` : null,
+        ].filter(Boolean).join('\n');
+        let body = head;
+        if (ascii && result.screenshot && typeof desktop.asciiPreview === 'function') {
+          try {
+            const preview = await desktop.asciiPreview(result.screenshot, {
+              width: Math.max(20, Math.min(Number(ascii_width) || 80, 240)),
+              height: Math.max(6, Math.min(Number(ascii_height) || 24, 80)),
+              invert: Boolean(invert),
+            });
+            body += `\n\n${preview.ascii}`;
+          } catch (error) {
+            body += `\n(ascii preview failed: ${error.message})`;
+          }
+        }
+        return body;
       }
 
       if (act === 'press') {
         if (!keys) return 'Error: desktop_app press requires "keys" (e.g. Return, ctrl+s, alt+F4).';
-        await desktop.pressKeys({ keys: String(keys), windowId: window_id || null, display: app.display });
+        const result = await desktop.pressKeys({ keys: String(keys), windowId: window_id || null, display: app.display, record: record !== false });
         await new Promise(done => { setTimeout(done, 300); });
-        return `Pressed ${keys}.`;
+        const head = [
+          `→ press "${result.keys}"`,
+          result.screenshot ? `  post-shot: ${result.screenshot}` : null,
+        ].filter(Boolean).join('\n');
+        let body = head;
+        if (ascii && result.screenshot && typeof desktop.asciiPreview === 'function') {
+          try {
+            const preview = await desktop.asciiPreview(result.screenshot, {
+              width: Math.max(20, Math.min(Number(ascii_width) || 80, 240)),
+              height: Math.max(6, Math.min(Number(ascii_height) || 24, 80)),
+              invert: Boolean(invert),
+            });
+            body += `\n\n${preview.ascii}`;
+          } catch (error) {
+            body += `\n(ascii preview failed: ${error.message})`;
+          }
+        }
+        return body;
       }
 
-      return `Error: unsupported action "${action}". Use open|logs|errors|windows|wait|focus|screenshot|click|type|press|status|list|stop|capabilities.`;
+      return `Error: unsupported action "${action}". Use open|logs|errors|windows|wait|focus|screenshot|click|type|press|watch|preview|status|list|stop|capabilities.`;
     } catch (error) {
       return `Error: ${error.message}`;
     }

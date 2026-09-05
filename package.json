@@ -1,6 +1,6 @@
 {
   "name": "ettore-ai-assistant",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "ETTORE - Advanced AI CLI Assistant",
   "type": "module",
   "main": "src/cli/index.js",

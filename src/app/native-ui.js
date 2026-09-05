@@ -19,6 +19,7 @@ import { chooseFiles } from '../utils/file-picker.js';
 import * as loops from '../loops/index.js';
 import { MissionControl } from '../mission/index.js';
 import { autoResumeDecision, DEFAULT_MAX_AUTO_RESUMES } from './auto-resume.js';
+import { checkForUpdate, readLocalPackage } from '../cli/update.js';
 
 const NON_METERED_PROVIDERS = new Set(['ollama', 'nvidia', 'minimax', 'claude-code']);
 
@@ -207,6 +208,24 @@ export async function startApp(options = {}) {
     tui.mission = mission.snapshot();
     tui.needsRender = true;
   };
+  // Surface the running build and the cached update status in the
+  // sidebar header. The CLI already ran a sync check (so we have a
+  // cache hit or a miss), but on cold cache we still want the banner
+  // to land as soon as npm responds — that runs in the background.
+  const localPkg = readLocalPackage();
+  tui.version = options.version || localPkg.version || '';
+  tui.updateStatus = options.updateStatus || null;
+  // Refresh whenever the CLI handed us no usable number — the sync check
+  // returns `latest: null` for a cold OR a stale (>6h) cache, and both
+  // cases want the same background call. Testing the object itself would
+  // never refresh, because the CLI always passes one.
+  if (options.updateCheck !== false && !tui.updateStatus?.latest && tui.version) {
+    checkForUpdate().then((status) => {
+      if (!status) return;
+      tui.updateStatus = status;
+      tui.needsRender = true;
+    }).catch(() => {});
+  }
   tui.updateSize();
   const originalMessagesPush = tui.messages.push.bind(tui.messages);
   tui.messages.push = (...items) => {

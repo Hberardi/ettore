@@ -5,6 +5,13 @@ import { Command } from 'commander';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import {
+  readLocalPackage,
+  checkForUpdate,
+  checkForUpdateSync,
+  formatBanner,
+  runUpdate,
+} from '../src/cli/update.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -19,7 +26,7 @@ function collect(value, previous) {
 program
   .name('ettore')
   .description('ETTORE — Open source AI coding agent')
-  .version(packageJson.version)
+  .version(packageJson.version, '-V, --version', 'Print the ETTORE version and exit')
   .option('-m, --model <model>', 'Model to use')
   .option('--no-stream', 'Disable streaming')
   .option('-c, --context <dir>', 'Working directory')
@@ -28,8 +35,34 @@ program
   .option('-i, --image <path>', 'Attach an image (repeatable; JPEG, PNG, GIF, WebP)', collect, [])
   .option('--debug', 'Enable debug trace logs')
   .option('--verbose-tokens', 'Print per-turn input/output token counts and cumulative cost to stderr')
+  .option('--no-update-check', 'Skip the npm version check at startup')
   .argument('[prompt...]', 'Run a one-shot prompt (non-interactive)')
   .action(async (promptArgs, options) => {
+    // ETTORE <version>. Print BEFORE the agent starts so the user can
+    // confirm the build they think they're running. In a TTY the line
+    // is dimmed; in a non-TTY (CI, piped output) it is plain text.
+    const dim = process.stdout.isTTY ? '\x1b[2m' : '';
+    const reset = process.stdout.isTTY ? '\x1b[0m' : '';
+    if (process.stdout.isTTY) {
+      process.stdout.write(`${dim}ettore ${packageJson.version}${reset}\n`);
+    }
+
+    // The sync check reads the 6h cache and nothing else, so it costs
+    // nothing and never delays the first prompt. A cold or stale cache
+    // gives back `latest: null` and simply prints no banner; the refresh
+    // that fills the cache runs inside the TUI (native-ui.js), which is
+    // the only mode where the process lives long enough for an npm call
+    // to land. Doing it here as well would keep a one-shot run alive for
+    // the npm timeout after the answer was already printed.
+    let updateStatus = null;
+    if (options.updateCheck !== false) {
+      updateStatus = checkForUpdateSync();
+      const banner = formatBanner(updateStatus);
+      if (banner && process.stdout.isTTY) {
+        process.stdout.write(`${banner}\n`);
+      }
+    }
+
     const cliOptions = {
       model:   options.model,
       stream:  options.stream,
@@ -48,8 +81,133 @@ program
   } else {
     // Interactive TUI mode - use native UI instead of Ink
     const { startApp } = await import('../src/app/native-ui.js');
-    await startApp(cliOptions);
+    // Carry the version + sync update status into the TUI so the
+    // sidebar header can show the running build and propose
+    // `ettore update` when npm has a newer release.
+    const tuiOptions = {
+      ...cliOptions,
+      version: packageJson.version,
+      updateStatus,
+      // --no-update-check has to reach the TUI too: it is the TUI that
+      // runs the background refresh, so honouring the flag only here
+      // would still hit the registry.
+      updateCheck: options.updateCheck !== false,
+    };
+    await startApp(tuiOptions);
   }
+  });
+
+// `ettore version` — same as `--version` but prints extra info: the
+// latest npm version, whether the install is up to date, and the
+// cache path used by the periodic check.
+program
+  .command('version')
+  .description('Print version information and check for updates')
+  .option('--no-fetch', 'Use the cached value only, do not call npm view')
+  .action(async (options) => {
+    const { name, version: current } = readLocalPackage();
+    const dim = process.stdout.isTTY ? '\x1b[2m' : '';
+    const reset = process.stdout.isTTY ? '\x1b[0m' : '';
+    const green = process.stdout.isTTY ? '\x1b[32m' : '';
+    const yellow = process.stdout.isTTY ? '\x1b[33m' : '';
+    process.stdout.write(`${name} ${current}\n`);
+    if (options.fetch !== false) {
+      const status = await checkForUpdate({ force: true });
+      if (status.error || !status.latest) {
+        process.stdout.write(`${dim}could not reach the npm registry (${status.error || 'unknown'})${reset}\n`);
+      } else if (status.outdated) {
+        process.stdout.write(`${yellow}↻ update available: ${status.latest} — run \`ettore update\`${reset}\n`);
+      } else {
+        process.stdout.write(`${green}✓ up to date${reset}\n`);
+      }
+    } else {
+      const cached = checkForUpdateSync();
+      if (cached.latest) {
+        if (cached.outdated) {
+          process.stdout.write(`${yellow}↻ update available: ${cached.latest} (cached) — run \`ettore update\`${reset}\n`);
+        } else {
+          process.stdout.write(`${green}✓ up to date (cached)${reset}\n`);
+        }
+      } else {
+        process.stdout.write(`${dim}no cached version info — run without --no-fetch to check now${reset}\n`);
+      }
+    }
+  });
+
+// `ettore update` — install the latest version of ETTORE globally
+// through npm and report the outcome. After a successful update the
+// CLI prints a one-liner reminding the user to restart the process.
+program
+  .command('update')
+  .description('Update ETTORE to the latest version from npm')
+  .option('-t, --target <version>', 'Install a specific version instead of @latest')
+  .action(async (options) => {
+    const { version: current } = readLocalPackage();
+    const dim = process.stdout.isTTY ? '\x1b[2m' : '';
+    const reset = process.stdout.isTTY ? '\x1b[0m' : '';
+    process.stdout.write(`Updating ${current} → ${options.target || 'latest'}…\n`);
+    try {
+      const result = await runUpdate({ target: options.target || 'latest', stream: true });
+      // Re-read the package.json to see the newly installed version.
+      const { version: next } = readLocalPackage();
+      const green = process.stdout.isTTY ? '\x1b[32m' : '';
+      process.stdout.write(`\n${green}✓ ETTORE updated to ${next}.${reset}\n`);
+      if (next === current) {
+        process.stdout.write(`${dim}(no version bump — you may already be on the latest published build)${reset}\n`);
+      }
+      process.stdout.write(`${dim}Restart the CLI to pick up the new build.${reset}\n`);
+    } catch (error) {
+      const red = process.stdout.isTTY ? '\x1b[31m' : '';
+      process.stderr.write(`\n${red}✗ update failed: ${error.message}${reset}\n`);
+      const { name } = readLocalPackage();
+      process.stderr.write(`Tip: try \`npm install -g ${name}@latest\` directly.\n`);
+      process.exit(1);
+    }
+  });
+
+// `ettore preview <app-id>` — watch what the agent is doing on the
+// desktop from a SECOND terminal. It polls the frame the agent writes
+// after every action; it deliberately does not talk to the agent
+// process, which is what makes it usable from anywhere.
+program
+  .command('preview [appId]')
+  .description('Live ASCII preview of a desktop app the agent is driving (Windows)')
+  .option('-i, --interval <ms>', 'Redraw interval in milliseconds', '400')
+  .option('-w, --width <cols>', 'Preview width in characters', '80')
+  // No short flag: -h stays commander's help alias.
+  .option('--height <rows>', 'Preview height in characters', '24')
+  .option('--invert', 'Invert the luminance ramp (for light-on-dark apps)')
+  .option('--once', 'Render a single frame and exit')
+  .action(async (appId, options) => {
+    const { livePreview, renderFrame } = await import('../src/cli/preview.js');
+    const id = appId || 'default';
+    const width = Math.max(20, Math.min(Number(options.width) || 80, 240));
+    const height = Math.max(6, Math.min(Number(options.height) || 24, 80));
+    const invert = Boolean(options.invert);
+
+    if (options.once) {
+      const frame = await renderFrame(id, { width, height, invert });
+      if (!frame.ok) {
+        process.stderr.write(`${frame.reason}\n`);
+        process.exit(1);
+      }
+      process.stdout.write(`${frame.ascii}\n`);
+      return;
+    }
+
+    const controller = new AbortController();
+    const stop = () => {
+      controller.abort();
+      process.stdout.write('\x1b[2J\x1b[H');
+    };
+    process.on('SIGINT', () => { stop(); process.exit(0); });
+    await livePreview(id, {
+      intervalMs: Number(options.interval) || 400,
+      width,
+      height,
+      invert,
+      signal: controller.signal,
+    });
   });
 
 program.parse();

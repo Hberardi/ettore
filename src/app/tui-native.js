@@ -170,6 +170,12 @@ class TUI {
     this.model = '';
     this.sessionId = '';
     this.gitBranch = '';
+    // Local package version (e.g. "1.1.1") and the optional update status
+    // produced by the async check at startup. The sidebar renders both
+    // directly under the "ETTORE SESSION" header so the user always knows
+    // which build they are on and whether `ettore update` would change it.
+    this.version = '';
+    this.updateStatus = null;
     this.detectedLang = '';
     this.availableHeight = 0;
     this.scrollOffset = 0;
@@ -1133,6 +1139,23 @@ class TUI {
     const lines = [];
     const header = `${C.bold}${C.accent}▌ ETTORE${C.reset} ${C.dim}SESSION${C.reset}`;
     lines.push(header);
+    if (this.version) {
+      const versionStr = `${C.dim}v${C.reset}${C.text}${this.version}${C.reset}`;
+      const updateSuffix = (() => {
+        if (!this.updateStatus?.outdated) return '';
+        return `  ${C.warn}↻ ${this.updateStatus.latest}${C.reset}`;
+      })();
+      lines.push(`${versionStr}${updateSuffix}`);
+      if (this.updateStatus?.outdated) {
+        // Two short, dimmed hints: which command runs the upgrade, and
+        // where to check the version once done. The actual `update` is
+        // a subcommand so a typo'd `npm install -g` does not happen by
+        // accident.
+        lines.push(`  ${C.warn}→ \`ettore update\` to upgrade${C.reset}`);
+      }
+    } else {
+      lines.push(`${C.dim}version unknown${C.reset}`);
+    }
     lines.push(`${C.border}${'━'.repeat(Math.max(4, width))}${C.reset}`);
 
     // /loop section: only when there's something to show. Either an active

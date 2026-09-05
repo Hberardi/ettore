@@ -8,6 +8,229 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-05
+
+### Added — Windows desktop backend
+
+`desktop_app` is now a platform dispatcher. On Linux the existing
+xdotool/wmctrl/Xvfb backend is unchanged. On Windows a new
+`src/tools/desktop-app-windows.js` module drives any native GUI app
+through a long-running PowerShell host (`src/tools/desktop-host.ps1`)
+that uses Win32 `SendInput` for mouse and keyboard, P/Invoke
+`EnumWindows`/`GetWindowRect`/`SetForegroundWindow` for window
+enumeration, and `System.Drawing` for screenshots. No install is
+required: PowerShell ships with every Windows install. The original
+Linux code is preserved untouched in `src/tools/desktop-app-linux.js`.
+
+The host is started once per app session and stays alive on a
+stdin/stdout JSON pipe; that avoids the 500-1000ms PowerShell cold
+start on every click. A separate process kill is wired on exit/SIGINT
+so a Ctrl-C in the CLI never leaves Notepad or the PowerShell host
+running. For Electron/Chromium apps, the renderer console is still
+read through `browser_app action=attach port=9222` as before — this
+release just makes the surrounding native window driveable too.
+
+Components:
+
+- `src/tools/desktop-host.ps1` — 250-line PowerShell host. Reads JSON
+  commands on stdin, writes JSON responses on stdout. Actions:
+  `list-windows`, `get-window`, `screenshot`, `ascii-preview`, `focus`,
+  `click`, `press`, `type`, `ping`, `quit`. Win32 P/Invoke and
+  `[System.Windows.Forms.Keys]` key mapping cover the standard
+  control/alt/shift/F-key/symbol set.
+- `src/tools/desktop-app-windows.js` — Node module that spawns the
+  host, exposes the same `openApp` / `stopApp` / `listWindows` /
+  `clickAt` / `typeText` / `pressKeys` / `captureWindow` /
+  `waitForWindow` / `focusWindow` surface as the Linux backend, plus
+  `watch()` and `asciiPreview()` helpers.
+- `src/tools/desktop-app-linux.js` — the original 511-line
+  implementation, lifted verbatim into a sibling module.
+- `src/tools/desktop-app.js` — thin dispatcher: `import * as linux`
+  + `import * as windows`, picks on `process.platform === 'win32'`.
+  Re-exports 25 symbols so the rest of the agent (tool router, TUI,
+  system prompts) is unaware of the split.
+- `src/agents/prompts.js` — the "RUN THE APP TO FIND THE BUG
+  (desktop)" section now describes both backends and the Windows
+  built-in-no-install path.
+
+Tests:
+
+- `tests/desktop-app-dispatch.test.js` — 9 unit tests on the
+  dispatcher surface (right backend picked, identity preservation,
+  Windows-only parsers are safe no-ops, `detectAppErrors` patterns,
+  `looksLikeElectron`).
+- `tests/desktop-app-windows.integration.test.js` — live test that
+  opens notepad, waits for its window, takes a screenshot (verifies
+  the PNG magic `89 50 4E 47`), types into the document, reads
+  the captured logs, and closes the app. Skips on non-Windows.
+
+### Added — live visual feedback for the desktop backend
+
+Clicking too fast is a real bug: a person watching the screen
+physically cannot follow a click that completes in 16ms. The new
+behaviour makes the agent's actions visible in three complementary
+ways.
+
+1. **Slower inputs.** `Do-Focus` now waits 400ms after
+   `SetForegroundWindow` (was 200ms — too short on DPI-mismatched
+   monitors) and `Do-Click` waits 150ms after `SetCursorPos` (was
+   50ms) before `SendInput`. The user sees the cursor land on the
+   target.
+
+2. **Auto-screenshot after every action.** `clickAt`, `typeText`
+   and `pressKeys` now save a frame to
+   `.ettore/watch/<id>/<prefix>-<ts>.png` and update
+   `.ettore/watch/<id>/latest.png` by default. The tool response
+   returns the path so the caller can read the frame. Set
+   `record=false` to skip.
+
+3. **ASCII preview, optionally inline.** A new
+   `desktop-host.ps1` action resizes the captured PNG to 80×24 (or
+   whatever the caller asks for) with `System.Drawing.Graphics`,
+   samples luminance with the standard Rec. 601 weights, and maps it
+   onto a 10-char ramp `' .:-=+*#%@'`. The agent can opt in with
+   `ascii=true` on click/type/press/screenshot and receive the
+   rendered text inline; the TUI can also poll the file
+   independently.
+
+A new `desktop_app action=watch interval_ms=400 duration_ms=10000
+ascii=true` captures a stream of frames and prints them as ASCII.
+For long debugging sessions the user can run `ettore preview <id>`
+in a second terminal — it redraws the ASCII frame in place with
+`ESC[2J ESC[H` so the cursor movement and UI changes are visible in
+real time without leaving the CLI.
+
+The preview reads the frame *file* rather than the desktop backend's
+app registry, which lives in the agent's process memory: a second
+process would always have found it empty. The PNG→ASCII conversion
+therefore runs on a PowerShell host of its own, started lazily and
+torn down by the same exit hook that kills the app hosts.
+
+Frames are retained as a bounded ring — the newest
+`ETTORE_WATCH_MAX_FRAMES` (default 200) per app, with `latest.png`
+never a candidate. A full-screen PNG after every click plus a
+`watch` at 50ms would otherwise leave gigabytes in the user's
+working directory, and `.ettore/` is gitignored in this repo, not
+in theirs.
+
+Components:
+
+- `src/tools/desktop-host.ps1` — new `Do-AsciiPreview` action,
+  luminance ramp, `[System.Drawing.Drawing2D.InterpolationMode]
+  ::HighQualityBicubic` downscale.
+- `src/tools/desktop-app-windows.js` — `host.asciiPreview`,
+  `recordFrame()`, `watch({app, intervalMs, durationMs, windowId,
+  outDir})`, `asciiPreview(path, {width, height, invert})`,
+  `pruneFrames(dir, max)` and a standalone host for app-less ASCII
+  rendering. New `record` parameter on click/type/press.
+- `src/tools/index.js` — `desktop_app` tool grew `record`, `ascii`,
+  `ascii_width`, `ascii_height`, `invert`, `interval_ms`,
+  `duration_ms`, `out_dir` parameters and `action=watch` and
+  `action=preview` branches. On Linux the new helpers are
+  `null` and the tool surfaces a clear "Windows-only" message.
+- `src/agents/prompts.js` — instructs the LLM to use `ascii=true`
+  on click/type/press/screenshot to see the screen and to recommend
+  `ettore preview <id>` to the user.
+- `src/cli/preview.js` — `framePath`, `renderFrame`, `drawFrame`,
+  `livePreview`. Shipped code, not a script: `files` in
+  package.json publishes `bin/` and `src/` only, so a helper under
+  `scripts/` could never have been run from an installed copy — and
+  a relative `node scripts/...` would have resolved against the
+  user's own project anyway.
+- `bin/cli.js` — `ettore preview [appId]` with `--interval`,
+  `--width`, `--height`, `--invert`, `--once`.
+- `scripts/desktop-live-preview.js` — reduced to a dev shim over
+  `src/cli/preview.js`.
+- `scripts/demo-desktop-windows.js` — updated demo: opens Notepad,
+  prints ASCII previews around the type, runs a 2-second watch,
+  prints the frame count.
+
+Tests:
+
+- `tests/desktop-app-preview.test.js` — verifies the dispatcher
+  exposes `watch`/`asciiPreview` on Windows and `null` on Linux,
+  and that the `action=watch` / `action=preview` branches in the
+  tool surface return clear errors when the helpers are missing.
+
+### Added — version check, sidebar banner, and `ettore update`
+
+ETTORE now notices when a newer version is on npm and tells the
+user how to upgrade. The check is intentionally cheap: one
+`npm view <pkg> version --json` call, cached for 6 hours at
+`~/.config/ettore/version-cache.json` (overridable through
+`ETTORE_CONFIG_DIR` for CI), and never blocks the first prompt. A
+failsilent return on registry/network errors means offline sessions
+do not show a banner and do not show an error.
+
+Three new CLI surfaces:
+
+- `ettore` — prints `ettore <version>` in dim and, if a newer
+  release is available, a yellow `↻ A new version of ETTORE is
+  available: 1.1.1 → 1.2.0. Run \`ettore update\` to upgrade.` line.
+  Skippable with `--no-update-check`.
+- `ettore version` — same plus an explicit check (with `--no-fetch`
+  to use the cache only) and a colour-coded status: green
+  "✓ up to date" / yellow "↻ update available".
+- `ettore update` — shells out to `npm install -g
+  ettore-ai-assistant@latest` (or `@<version>` with
+  `-t <version>`), streams the npm output to the user, and
+  invalidates the version cache so the next start reflects the
+  freshly installed build.
+
+The same status is rendered in the right-hand sidebar of the
+interactive TUI: a `v1.1.1` line directly under the `ETTORE SESSION`
+header, with the `↻ 1.2.0` badge and a `→ \`ettore update\` to
+upgrade` hint when an upgrade is available. The CLI runs the sync
+check once and hands the result to both the banner and the sidebar;
+the TUI refreshes a cold or stale cache in the background. A
+one-shot `ettore "prompt"` run deliberately does not, so the npm
+call cannot hold the process open after the answer is printed.
+
+Components:
+
+- `src/cli/update.js` — `readLocalPackage`, `compareVersions`,
+  `isOutdated`, `fetchLatestVersion`, `checkForUpdate`,
+  `checkForUpdateSync`, `formatBanner`, `runUpdate`,
+  `startBackgroundCheck`. 6h TTL, ETTORE_CONFIG_DIR override, ANSI
+  colours only when `process.stdout.isTTY`. npm is spawned as
+  `npm.cmd` with `shell: true` on Windows — child_process refuses a
+  bare `.cmd` since the fix for CVE-2024-27980, and the fail-silent
+  path would have hidden it on the one platform where the CLI is
+  the only upgrade route. `runUpdate` validates its target because
+  that shell makes the argument reachable by cmd.exe.
+  `compareVersions` sorts a prerelease before its release, so a
+  beta build still sees the stable upgrade.
+- `bin/cli.js` — registers the `version` and `update` subcommands,
+  adds `--no-update-check`, prints the version line and the banner
+  before the main action.
+- `src/app/tui-native.js` — `TUI.version` and `TUI.updateStatus`
+  fields; `_renderSidebar` prints the version immediately after the
+  `ETTORE SESSION` header and appends the update hint when
+  outdated.
+- `src/app/native-ui.js` — reads `options.version` and
+  `options.updateStatus` from the CLI, falls back to
+  `readLocalPackage()` and a background `checkForUpdate()` call if
+  the cache was cold.
+
+Tests:
+
+- `tests/update.test.js` — 11 tests using a fake `npm` shim to
+  avoid network calls. Covers `compareVersions` (including
+  `v`-prefix and length mismatches), `formatBanner` (null when
+  not outdated, includes the bump + hint when outdated),
+  `checkForUpdateSync` (cache hit, miss, stale), `fetchLatestVersion`
+  (returns null on missing PATH, parses JSON of a fake `npm`),
+  `checkForUpdate` ignoring a 7h-old cache, prerelease ordering,
+  the rejected `runUpdate` target, and a contract test pinning the
+  Windows npm spawn.
+- `tests/tui-sidebar-version.test.js` — 6 tests asserting the
+  sidebar contains the version, the upgrade hint when outdated, and
+  the "version unknown" fallback when empty, plus contract tests
+  that `bin/cli.js` and `native-ui.js` actually wire the new
+  fields.
+
+
+
 ## [1.1.1] — 2026-08-24
 
 ### Fixed — a `read` loop no longer burns the whole turn
