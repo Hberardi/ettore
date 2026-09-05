@@ -20,7 +20,7 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 - 💾 **Persistent Config** - API keys saved with `0600` permissions in `~/.config/ettore/`
 - 🧠 **Context Tools** - compression, project memory, working memory, sessions, auto-approve
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn
-- 🧩 **Plugin System** - extend ETTORE with local plugins (`~/.config/ettore/plugins/<name>/`)
+- 🧩 **Seven plugins included** - PostgreSQL, Excel, extended git, shell history, palette shortcuts — installed with `/plugins install`, and you can write your own
 
 ## Installation
 
@@ -185,7 +185,7 @@ installed, ETTORE keeps its native PDF and binary-text fallbacks.
 | `/sessions` / `/resume` / `/new` | Session management |
 | `/history [n]` | Show recent commands |
 | `/team` | Multi-agent team orchestration |
-| `/plugins [list\|available\|enable\|disable\|reload\|info] [name]` | Manage plugins |
+| `/plugins [list\|available\|install\|enable\|disable\|reload\|info] [name]` | Manage plugins; `install` with no name offers a picker |
 | `/select [provider]` | Pick a model interactively |
 | `/system` | Platform and runtime info |
 | `/version` | Show ETTORE version |
@@ -250,41 +250,102 @@ progress, parallel tool waves, changed files, decisions, and token usage.
 
 ## Plugins
 
-ETTORE is extensible via local plugins. A plugin is a directory under
-`~/.config/ettore/plugins/<name>/` (override the location with the
-`ETTORE_PLUGINS_DIR` environment variable) containing two files:
-
-1. **`plugin.json`** — the manifest: `name`, `version`, `apiVersion`,
-   `main`, optional `description` / `author` / `license` /
-   `permissions`.
-2. **`<main>`** (default `index.js`) — the ESM module. It exports
-   `tools`, `commands`, and `hooks` (with `onLoad` and `onUnload`).
-
-Two plugins ship with the repository. `hello-world` is the minimal shape of one;
-`git-history` is a real one — three read-only tools (`git_log`, `git_blame`,
-`git_show`) that answer "why is this code like this", which `git_status` and
-`git_diff` cannot. See `examples/plugins/git-history/README.md`.
+ETTORE ships seven plugins and can load your own. A plugin adds **tools** the
+agent can call and **slash commands** you can type — they merge with the
+built-in set rather than replacing it.
 
 ```bash
 # in the TUI
-/plugins available             # installed, plus what ships with ETTORE
-/plugins install               # pick one from a list, installed and enabled
-/plugins install git-history   # or name it outright
-
-# in the TUI
-/plugins list                  # show enabled plugins
-/plugins available             # show what is on disk
-/plugins enable hello-world
-/plugins info hello-world
-/plugins reload hello-world    # re-import after editing the plugin
-/plugins disable hello-world
+/plugins available             # what is installed, and what ships with ETTORE
+/plugins install               # pick one from a list; installed and enabled
+/plugins install pgadmin       # or name it outright
+/plugins list                  # what is enabled right now
+/plugins info pgadmin          # what it adds
+/plugins disable pgadmin
 ```
 
-Plugin tool handlers receive a controlled `ctx` object (`{ plugin, tool,
-signal, workspace, agentMode, safetyProfile }`) — they never see the
-agent's internals. See `examples/plugins/README.md` for the full
-authoring guide and the list of reserved tool names that plugins
-cannot override.
+### What ships
+
+| Plugin | Adds | Needs |
+|---|---|---|
+| **pgadmin** | PostgreSQL from the terminal: list and describe databases, schemas, tables, views, indexes, constraints and functions; run queries; `EXPLAIN`/`ANALYZE`; `pg_dump` and `pg_restore`, the latter through a local web wizard | `pg` |
+| **excel-full** | Read, create and edit `.xlsx`: formulas, cell styles, number formats, sheet management, charts, one-page reports | `exceljs`, `pureimage` |
+| **git-helpers** | Beyond the built-in `git_status` / `git_diff`: blame, log, diff stat, branch audit | — |
+| **git-history** | Read-only history: commit log, line-range blame grouped by change, single-commit inspection | — |
+| **bash-monitor** | Times every shell command, warns on slow ones, keeps a queryable history | — |
+| **command-palette-shortcuts** | `/last-bash`, `/kill-bash`, `/replay-last`, `/where` | — |
+| **hello-world** | The minimal shape of a plugin, to copy from | — |
+
+The dependencies are declared as `optionalDependencies`, so a normal
+`npm install` brings them and a plugin whose dependency is missing says which
+one rather than failing obscurely.
+
+### You can see when a plugin is running
+
+A tool from a plugin is marked wherever tools are shown — the running-tool
+line, the sidebar, the one-shot output, and the `/mission` summary:
+
+```
+○ pg_query ⧉pgadmin [2s]
+✔ git_log ⧉git-helpers
+✔ read
+```
+
+A built-in gets no badge. Running code you installed yourself is worth seeing,
+and it is what tells you which tool to blame when something misbehaves.
+
+### Which tools reach the model
+
+The agent is offered a bounded set of tools each turn, chosen from what the
+prompt asks for. Plugin tools take a guaranteed share of it and are ranked by
+how well their name and description match the request, so asking about a
+database restore surfaces `pg_restore_wizard` rather than whichever plugin
+happened to load first — and the core toolset is never crowded out.
+
+Plan mode is read-only, and ETTORE cannot inspect what a plugin's handler does.
+A plugin tool is offered there only if it declares `risk: 'low'`, which is the
+author stating that it does not write.
+
+### Writing one
+
+A plugin is a directory under `~/.config/ettore/plugins/<name>/` (override with
+`ETTORE_PLUGINS_DIR`) containing:
+
+1. **`plugin.json`** — the manifest: `name`, `version`, `apiVersion`, `main`,
+   optional `description` / `author` / `license` / `permissions`.
+2. **`<main>`** (default `index.js`) — an ES module exporting `tools`,
+   `commands`, and `hooks` (`onLoad`, `onUnload`).
+
+```js
+export const tools = {
+  say_hello: {
+    description: 'Greet someone by name.',
+    risk: 'low',                       // admits it to plan mode
+    parameters: {
+      type: 'object',
+      properties: { name: { type: 'string' } },
+      required: ['name'],
+      additionalProperties: false,
+    },
+    handler: async ({ name }, ctx) => `Hello, ${name} — from ${ctx.plugin}.`,
+  },
+};
+```
+
+It is an ES module: use `import`, and `createRequire(import.meta.url)` if you
+need to reach an optional dependency. Handlers receive a controlled `ctx`
+(`{ plugin, tool, signal, workspace, agentMode, safetyProfile }`) and never see
+the agent's internals. `examples/plugins/README.md` has the full guide and the
+reserved tool names a plugin cannot override.
+
+**A plugin runs with your privileges.** The `permissions` in the manifest state
+intent; they are not a sandbox. Enabling a plugin is the moment you decide to
+run its code, so read one you did not write, as you would any script.
+
+An installed plugin is a copy: the one under `~/.config/ettore/plugins/` is what
+runs, and it does not change when a new ETTORE ships a newer version of it.
+`/plugins available` says which copies have fallen behind, and
+`/plugins install <name> --force` updates one.
 
 ## Examples
 
@@ -400,6 +461,11 @@ to the CLI on models that accept it.
 
 - Node.js 18+ (Node 22+ for `browser_app`, which uses the built-in WebSocket client)
 - An API key for OpenAI, Anthropic, or another supported provider (Ollama runs locally and `claude-code` reuses your Claude login — both without a key)
+
+Bundled plugins declare their own dependencies as `optionalDependencies`, so
+`npm install` brings them. `pgadmin` also needs `psql`, `pg_dump` and
+`pg_restore` on `PATH` for the dump and restore tools; everything else in it
+works without them.
 
 Optional, only for driving applications:
 
