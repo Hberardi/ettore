@@ -249,3 +249,24 @@ test('a deprecation notice is printed whatever the install is', () => {
   const banner = update.formatBanner(status, { color: false, install: { updatable: false } });
   assert.match(banner, /deprecated: do not use/);
 });
+
+// ── A check that cannot answer must not read as "up to date" ────────────────
+
+test('the cold-check budget is large enough on Windows to ever succeed', async () => {
+  // `npm` there is `npm.cmd` through a shell, so the cost is process startup
+  // rather than the network and routinely exceeds a budget that is generous on
+  // Linux. A budget too small to succeed does not save time; it makes the
+  // check useless, and a check that never answers looks exactly like being up
+  // to date.
+  const src = readFileSync(new URL('../src/cli/update.js', import.meta.url), 'utf8');
+  assert.match(src, /COLD_CHECK_TIMEOUT_MS = IS_WINDOWS \? \d{4,} : \d+/);
+});
+
+test('bin/cli.js says so when the check came back with nothing', async () => {
+  // Both the update branch and the banner branch need a version to talk about,
+  // so a failed check used to fall through to silence: no update, no banner,
+  // no reason.
+  const src = readFileSync(new URL('../bin/cli.js', import.meta.url), 'utf8');
+  assert.match(src, /autoUpdateWanted && !updateStatus\?\.latest/);
+  assert.match(src, /update check did not complete/);
+});

@@ -78,7 +78,12 @@ function cacheIsFresh(cached, current, now = Date.now()) {
 // How long startup may block on the registry when the cache has nothing
 // usable. Short enough that a slow or unreachable registry costs a beat
 // rather than a stall, and paid at most once every CACHE_TTL_MS.
-export const COLD_CHECK_TIMEOUT_MS = 2500;
+// Windows gets longer. `npm` there is `npm.cmd` run through a shell, so the
+// cost is process startup rather than the network, and it routinely exceeds a
+// budget that is generous on Linux — where the same call takes about half a
+// second. A budget too small to ever succeed does not save time, it just makes
+// the check useless.
+export const COLD_CHECK_TIMEOUT_MS = IS_WINDOWS ? 8000 : 2500;
 
 // The cache directory is read fresh on every call so tests that set
 // ETTORE_CONFIG_DIR after the module is first loaded (e.g. a suite

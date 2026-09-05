@@ -128,6 +128,16 @@ program
         // prefix that needs sudo) leaves the working build in place.
         process.stderr.write(`${dim}auto-update skipped: ${error.message}${reset}\n`);
       }
+    } else if (autoUpdateWanted && !updateStatus?.latest) {
+      // The check was wanted and came back with nothing — a slow npm, no
+      // network, a registry that did not answer. Both branches below need a
+      // version to talk about, so this used to fall through to silence: no
+      // update, no banner, no reason. "I could not tell" is a different thing
+      // from "you are up to date", and only one of them is true here.
+      process.stderr.write(
+        `${dim}update check did not complete (${updateStatus?.error || 'no answer'}); `
+        + `run \`ettore update\` to upgrade directly.${reset}\n`,
+      );
     } else if (updateStatus?.outdated || updateStatus?.deprecated) {
       // Not updating automatically — fall back to telling the user. A
       // deprecated release is worth saying out loud even when no newer

@@ -8,6 +8,25 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.3.4] — 2026-09-06
+
+### Fixed — on Windows, the update check could not finish, and said nothing about it
+
+The check at startup had 2.5 seconds. On Linux `npm view` costs about half a
+second; on Windows `npm` is `npm.cmd` run through a shell, so the cost is
+process startup rather than the network and routinely exceeds that. A budget
+too small to succeed does not save time — it makes the check useless.
+
+Worse than useless, because of what happened next: with no version to report,
+neither the update branch nor the banner branch ran, and nothing was printed.
+A Windows install sat on 1.3.2 with 1.3.3 published, told nothing, looking
+exactly like an install that was up to date. Reported by a user whose CLI knew
+the new version existed the moment it was asked with no time limit.
+
+Windows now gets 8 seconds, and a check that comes back with nothing says so:
+"I could not tell" and "you are up to date" are different answers, and only one
+of them was true.
+
 ## [1.3.3] — 2026-09-06
 
 ### Added — seven plugins, and a way to install them
