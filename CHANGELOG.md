@@ -8,7 +8,72 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-09-05
+
+The 1.2.0 tarball on npm predates every entry in this section. The
+feature descriptions under `[1.2.0]` describe those subsystems as they
+stand *here*; the published 1.2.0 does not contain the fixes below.
+
+### Fixed — the version check and `ettore update` were dead on Windows
+
+`execFile('npm', ...)` cannot work on Windows: the entry point is
+`npm.cmd`, and since the fix for CVE-2024-27980 child_process refuses
+to spawn a `.cmd` without a shell. The check failed, the fail-silent
+path swallowed the error (so no banner ever appeared) and
+`ettore update` rejected — on the one platform 1.2.0 was built for and
+where the CLI is the only upgrade route. npm is now spawned as
+`npm.cmd` with `shell: true` there, and because that routes arguments
+through cmd.exe, `runUpdate` validates its target against
+`/^[A-Za-z0-9][A-Za-z0-9._-]*$/` before it gets there.
+
+`compareVersions` also ignored prerelease tags: splitting on `.` turned
+`Number('0-beta')` into `NaN` → 0, so `1.3.0-beta` compared equal to
+`1.3.0` and a beta install could never see the stable release. It now
+sorts a prerelease before its release and drops build metadata.
+
+### Fixed — the live preview could not run where it was documented to run
+
+The prompt told users to run `node scripts/desktop-live-preview.js <id>`
+in a second terminal. That could not work twice over: `scripts/` is not
+in package.json `files`, so an installed copy does not have the file,
+and a relative `node scripts/...` would resolve against the user's own
+project anyway. Worse, the script called `getApp(id)`, which reads a
+Map living in the *agent's* process — a second process always found it
+empty.
+
+The preview is now `ettore preview [appId]` (`--interval`, `--width`,
+`--height`, `--invert`, `--once`), implemented in `src/cli/preview.js`
+and shipped with the package. It reads the frame *file* the agent
+writes, so it works from anywhere, and the PNG→ASCII conversion runs on
+a PowerShell host of its own — the conversion never needed an app
+session. That host is torn down by the same exit hook that kills the
+app hosts, so a Ctrl-C in the preview cannot leave one running.
+`scripts/desktop-live-preview.js` is now a dev shim over the same code.
+
+### Fixed — watch frames grew without bound inside the user's project
+
+Every click/type/press saves a full-screen PNG, and `watch` can add one
+every 50ms for up to ten minutes, all under `process.cwd()/.ettore/`.
+`.ettore/` is gitignored in this repo, not in the user's. Frames are
+now a bounded ring — the newest `ETTORE_WATCH_MAX_FRAMES` (default 200)
+per app, ordered by the timestamp rather than the filename, since the
+prefixes differ per action. `latest.png` is never a candidate, and
+`watch` reports only the frames still on disk.
+
+### Changed — the startup version check does less
+
+The CLI called `checkForUpdateSync()` twice and then started a
+background refresh in both branches of a condition whose comment
+described the opposite of what it did. It now calls it once and shares
+the result between the banner and the sidebar. The background refresh
+lives only in the TUI, which is the only mode that stays alive long
+enough for an npm call to land — in a one-shot run it kept the process
+alive for the npm timeout after the answer had already been printed.
+`--no-update-check` now also reaches the TUI, which was still hitting
+the registry despite the flag.
+
 ### Added — the CLI updates itself, and stops lying when it cannot
+
 
 `ettore update` used to run `npm install -g`, re-read its own
 `package.json`, and report `✓ ETTORE updated to <version>` — the file
@@ -61,6 +126,13 @@ Tests: `tests/update.test.js` covers `describeInstall` on a checkout,
 `planAutoUpdate` branches, and a contract test pinning the re-exec
 guard in `bin/cli.js`.
 
+### Fixed — `/skills list` is one line per skill
+
+A description carrying newlines bled into the next skill, and a single
+400-character description wrapped to 20-30 rows that buried every other
+entry: the TUI renders one ◆ line per `\n`-separated chunk. Descriptions
+are flattened and capped at 80 characters with an ellipsis; the full
+text is still one `/skills show <name>` away.
 
 ## [1.2.0] — 2026-09-05
 
