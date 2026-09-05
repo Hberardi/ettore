@@ -260,9 +260,14 @@ ETTORE is extensible via local plugins. A plugin is a directory under
 2. **`<main>`** (default `index.js`) — the ESM module. It exports
    `tools`, `commands`, and `hooks` (with `onLoad` and `onUnload`).
 
+Two plugins ship with the repository. `hello-world` is the minimal shape of one;
+`git-history` is a real one — three read-only tools (`git_log`, `git_blame`,
+`git_show`) that answer "why is this code like this", which `git_status` and
+`git_diff` cannot. See `examples/plugins/git-history/README.md`.
+
 ```bash
-# install the bundled example
-cp -r examples/plugins/hello-world ~/.config/ettore/plugins/
+# install a bundled plugin
+cp -r examples/plugins/git-history ~/.config/ettore/plugins/
 
 # in the TUI
 /plugins list                  # show enabled plugins

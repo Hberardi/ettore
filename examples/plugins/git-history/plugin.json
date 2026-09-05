@@ -1,0 +1,10 @@
+{
+  "name": "git-history",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "main": "index.js",
+  "description": "Read-only access to a repository's past: commit log, line-range blame, and single-commit inspection. Answers \"why is this code like this\", which git_status and git_diff cannot.",
+  "author": "ettore",
+  "license": "MIT",
+  "permissions": ["fs:read", "shell:exec"]
+}

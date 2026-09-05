@@ -8,6 +8,26 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Added — a `git-history` plugin, and a real example of what one is for
+
+`git_status` and `git_diff` describe the working tree as it is. Nothing
+answered "why is this code like this", which is the question that decides
+whether a change is safe to make.
+
+The plugin adds `git_log`, `git_blame` and `git_show`, all read-only. The agent
+could already reach git through `bash`, and that is what it replaces: shell git
+is a moving target for a model — porcelain that differs per subcommand, `-L`
+syntax nothing else uses, a forgotten `--no-pager` that hangs on a terminal — 
+where a typed schema is chosen deliberately and validated first. `git_blame`
+groups consecutive lines from one commit, so its answer is a handful of changes
+rather than one row per line.
+
+Every call goes through `execFile` with an argument array rather than a shell
+string, and paths are refused before git sees them if they leave the workspace.
+
+It also serves as the example `hello-world` could not be: a plugin worth
+installing, rather than a demonstration of the file layout.
+
 ## [1.3.2] — 2026-09-05
 
 ### Changed — updates install themselves again
