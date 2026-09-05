@@ -218,3 +218,30 @@ test('even a fresh positive answer goes stale eventually', () => {
     assert.equal(update.checkForUpdateSync().latest, null);
   });
 });
+
+// ── The banner has to name a command that works where it is printed ──────────
+
+test('on a checkout the banner points at git pull, not at a command that refuses', () => {
+  // `ettore update` exits 1 on a checkout — it would install a separate copy
+  // over the link — so advising it there sends the reader nowhere.
+  const status = { current: '1.3.0', latest: '1.3.1', outdated: true };
+  const banner = update.formatBanner(status, {
+    color: false,
+    install: { updatable: false, reason: 'is a git checkout' },
+  });
+  assert.match(banner, /git pull/);
+  assert.doesNotMatch(banner, /ettore update/);
+});
+
+test('on an npm install the banner still points at ettore update', () => {
+  const status = { current: '1.3.0', latest: '1.3.1', outdated: true };
+  const banner = update.formatBanner(status, { color: false, install: { updatable: true } });
+  assert.match(banner, /ettore update/);
+  assert.doesNotMatch(banner, /git pull/);
+});
+
+test('a deprecation notice is printed whatever the install is', () => {
+  const status = { current: '1.3.0', latest: '1.3.0', outdated: false, deprecated: 'do not use' };
+  const banner = update.formatBanner(status, { color: false, install: { updatable: false } });
+  assert.match(banner, /deprecated: do not use/);
+});

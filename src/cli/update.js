@@ -284,8 +284,13 @@ export function checkForUpdateSync() {
 // "there is something newer" and "the thing you are running is no longer
 // supported" are different messages, and the second one is the one that
 // should make a user stop and read.
-export function formatBanner(status, { color = true } = {}) {
+export function formatBanner(status, { color = true, install = null } = {}) {
   if (!status?.outdated && !status?.deprecated) return null;
+  // `ettore update` refuses on a git checkout — it would install a separate
+  // copy over the link — so telling a checkout to run it sends the reader to a
+  // command that exits 1 and explains why. Name the command that works here.
+  const where = install || describeInstall();
+  const upgradeCmd = where.updatable ? 'ettore update' : 'git pull';
   const useColor = color && process.stdout?.isTTY;
   const YELLOW = useColor ? '\x1b[33m' : '';
   const RED = useColor ? '\x1b[31m' : '';
@@ -297,7 +302,7 @@ export function formatBanner(status, { color = true } = {}) {
     lines.push(`${RED}⚠ ETTORE ${status.current} is deprecated: ${status.deprecated}${RESET}`);
   }
   if (status.outdated) {
-    lines.push(`${YELLOW}↻ A new version of ETTORE is available: ${status.current} → ${status.latest}. Run \`${BOLD}ettore update${RESET}${YELLOW}\` to upgrade.${RESET}`);
+    lines.push(`${YELLOW}↻ A new version of ETTORE is available: ${status.current} → ${status.latest}. Run \`${BOLD}${upgradeCmd}${RESET}${YELLOW}\` to upgrade.${RESET}`);
   } else if (status.deprecated) {
     // Deprecated but already on the newest release: `ettore update` would be
     // a no-op, so point at the message instead of a command that does nothing.

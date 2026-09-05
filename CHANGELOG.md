@@ -8,6 +8,14 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — the update banner named a command that refuses where it was printed
+
+On a git checkout the banner said "Run `ettore update` to upgrade", and
+`ettore update` refuses on a checkout: installing the published build would
+put a separate copy over the link and disconnect the CLI from the repo. The
+advice sent the reader to a command that exits 1 to explain why it will not
+run. It now names `git pull` there, and `ettore update` everywhere it works.
+
 ## [1.3.1] — 2026-09-05
 
 ### Fixed — the README described behaviour the code no longer had

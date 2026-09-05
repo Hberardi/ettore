@@ -52,7 +52,12 @@ test('formatBanner returns null when not outdated', () => {
 });
 
 test('formatBanner includes the version bump and the update hint', () => {
-  const text = update.formatBanner({ current: '1.2.3', latest: '1.2.4', outdated: true }, { color: false });
+  // The advised command depends on where the CLI is installed, so the test
+  // states it rather than inheriting whatever the repo happens to be.
+  const text = update.formatBanner(
+    { current: '1.2.3', latest: '1.2.4', outdated: true },
+    { color: false, install: { updatable: true } },
+  );
   assert.ok(text.includes('1.2.3'));
   assert.ok(text.includes('1.2.4'));
   assert.ok(text.includes('ettore update'));
@@ -408,7 +413,7 @@ test('formatBanner warns about a deprecated version above the upgrade line', () 
     latest: '1.2.3',
     outdated: true,
     deprecated: 'Old release: upgrade',
-  }, { color: false });
+  }, { color: false, install: { updatable: true } });
   const lines = text.split('\n');
   assert.equal(lines.length, 2);
   assert.ok(lines[0].includes('deprecated'), 'the deprecation comes first');
