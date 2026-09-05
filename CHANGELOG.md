@@ -8,6 +8,32 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — `bash` appeared to hang on commands that had already finished
+
+`child_process.exec` settles when the child's stdout and stderr reach EOF,
+not when the child exits. Anything a command leaves running in the background
+inherits those pipes and holds them open, so the tool waited out its entire
+timeout on a command that was already done:
+
+```
+sleep 20 & echo started        →  5023ms with a 5s timeout (120s by default)
+sleep 20 >/dev/null & echo     →    10ms, same command, stdout redirected
+```
+
+The difference is only who holds stdout, which is why "the CLI hangs on
+bash" and "bash works fine" were both true depending on the command —
+starting a dev server, a watcher, or anything with `&` took the first shape.
+
+`bash` now waits for the process rather than for its pipes (`exit`, with a
+short grace period for output still in flight, falling back to `close` when
+it comes first). The same case now returns in 192ms.
+
+Three things came with it:
+
+- stdin is closed on the child instead of redirected inside the command string, so a command that reads it gets EOF whatever quoting or heredoc it uses.
+- A timeout signals the whole process group, so a runaway build no longer leaves its children behind.
+- A non-zero exit is reported with its output and `[exit code N]` rather than raised as an error, since what the command printed is usually the answer.
+
 ### Fixed — skills matched the wrong prompts, in both directions at once
 
 Skills are activated automatically on every prompt, and the scoring was a

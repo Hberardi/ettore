@@ -1,4 +1,4 @@
-import { exec, execFile, spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { getBashSession } from './bash-session.js';
 import { sanitizeOutput } from '../utils/output.js';
@@ -8,6 +8,7 @@ import { existsSync } from 'fs';
 import { join, extname, dirname } from 'path';
 import { glob as globby } from 'glob';
 import { uiBridge } from './bridge.js';
+import { runShellCommand } from './shell-run.js';
 import { transcribeVideo, renderTranscript } from './video-transcript.js';
 import { describeVideo } from './video-describe.js';
 import { fetchWebImage } from './web-image.js';
@@ -17,7 +18,6 @@ import { extractPdfTextWithSuperOcr, isLikelyUsablePdfText } from './pdf-ocr.js'
 import * as browser from './browser-driver.js';
 import * as desktop from './desktop-app.js';
 
-const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 const DEFAULT_READ_LIMIT = 200;
 const MAX_READ_LIMIT = 1000;
@@ -1951,27 +1951,39 @@ export const toolHandlers = {
         emitToolProgress('bash', { command }, `Running… ${elapsed}s elapsed`);
       }, 5000);
       try {
-        // Same stdin trap as the persistent session: `exec` hands the child a
-        // stdin pipe nobody ever writes to or closes, so anything that reads
-        // stdin (a prompt, a REPL, `git commit` with no -m) blocks forever.
-        // `execFile` drops a `stdio` option, so the redirect has to live in the
-        // command itself; a heredoc or explicit `< file` still takes priority.
-        const { stdout, stderr } = await execAsync(`{ ${command}\n} < /dev/null`, {
+        // Waits for the command, not for its pipes. `exec` settled at stdout
+        // EOF, so anything the command left running in the background held it
+        // open and a command that finished instantly still cost the full
+        // timeout — `sleep 20 & echo started` took 120s, the same line with
+        // stdout redirected took 10ms. See src/tools/shell-run.js.
+        const result = await runShellCommand(command, {
           cwd: workdir || process.cwd(),
-          maxBuffer: 10 * 1024 * 1024,
-          timeout: timeoutMs,
+          timeoutMs,
           signal: getToolAbortSignal(),
+          maxBytes: 10 * 1024 * 1024,
         });
+        if (result.timedOut) {
+          const partial = sanitizeOutput(`${result.stdout}${result.stderr}`, { maxBytes: 10_000 });
+          return `${partial.output}\n[timeout — command killed. Re-run with a larger timeout_ms, or make it non-interactive.]`.trim();
+        }
+        if (result.aborted) {
+          const partial = sanitizeOutput(`${result.stdout}${result.stderr}`, { maxBytes: 10_000 });
+          return `${partial.output}\n[cancelled]`.trim();
+        }
+        // A non-zero exit is a result, not an exception: the command ran and
+        // what it printed is what the model needs to see.
+        const body = result.stdout || result.stderr || '(no output)';
+        const suffix = result.code ? `\n[exit code ${result.code}]` : '';
         // Cap and clean so chat clients don't truncate silently. The bash
         // tool is the most common source of runaway output (e.g. a `cat` on
         // a large file, or a Python script that prints verbosely) and the
         // truncated "Need to re-run" message downstream is confusing.
-        const cleaned = sanitizeOutput(stdout || stderr || '(no output)', { maxBytes: 50_000 });
-        if (cleaned.truncated) {
+        const cleaned = sanitizeOutput(body, { maxBytes: 50_000 });
+        if (cleaned.truncated || result.truncated) {
           return cleaned.output +
             `\n\n[bash output was ${cleaned.originalBytes} bytes; cap is 50KB — see "Run command directly" hint]`;
         }
-        return cleaned.output;
+        return cleaned.output + suffix;
       } finally {
         clearInterval(heartbeat);
       }
