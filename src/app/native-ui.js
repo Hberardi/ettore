@@ -18,6 +18,7 @@ import { buildAttachmentPrompt, loadAttachments } from '../utils/attachments.js'
 import { chooseFiles } from '../utils/file-picker.js';
 import * as loops from '../loops/index.js';
 import { MissionControl } from '../mission/index.js';
+import { DirectoryTree } from './dir-tree.js';
 import { autoResumeDecision, DEFAULT_MAX_AUTO_RESUMES } from './auto-resume.js';
 import { checkForUpdate, readLocalPackage } from '../cli/update.js';
 
@@ -212,6 +213,27 @@ export async function startApp(options = {}) {
   // sidebar header. The CLI already ran a sync check (so we have a
   // cache hit or a miss), but on cold cache we still want the banner
   // to land as soon as npm responds — that runs in the background.
+  // Live working-directory tree for the sidebar. Started detached: the first
+  // scan must never delay the prompt appearing, and a filesystem that cannot
+  // be watched degrades to no panel rather than to a failed startup.
+  let fileTree = null;
+  const startFileTree = (root) => {
+    if (fileTree) { fileTree.stop(); fileTree = null; }
+    if (!root || options.fileTree === false || config.fileTree === false) { tui.fileTree = null; return; }
+    const tree = new DirectoryTree(root, {
+      onChange: (t) => { tui.fileTree = t; tui.needsRender = true; },
+    });
+    fileTree = tree;
+    tui.fileTreeRoot = root;
+    tree.start().then(() => {
+      // Only adopt it if this watcher is still the current one — a workdir
+      // change while the first scan was in flight must not resurrect the old
+      // tree over the new one.
+      if (fileTree !== tree) { tree.stop(); return; }
+      tui.fileTree = tree;
+      tui.needsRender = true;
+    }).catch(() => { if (fileTree === tree) { tui.fileTree = null; } });
+  };
   const localPkg = readLocalPackage();
   tui.version = options.version || localPkg.version || '';
   tui.updateStatus = options.updateStatus || null;
@@ -238,6 +260,7 @@ export async function startApp(options = {}) {
   };
 
   const config = await loadConfig(options);
+  startFileTree(config.workdir || process.cwd());
   tui.safetyProfile = config.safetyProfile || 'balanced';
   tui.dynamicToolRouting = config.dynamicToolRouting !== false;
   let agent = null;
@@ -2402,6 +2425,7 @@ if (cmdName === 'connect') {
 
   const cleanup = () => {
     running = false;
+    fileTree?.stop();
     clearInterval(renderLoop);
     stopStallWatchdog();
     process.stdout.off('resize', onResize);

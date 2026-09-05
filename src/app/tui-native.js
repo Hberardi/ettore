@@ -211,6 +211,11 @@ class TUI {
     // the renderer makes sidebar drawing pure and avoids coupling the TUI to
     // agent internals.
     this.mission = null;
+    // Live working-directory tree, owned by native-ui.js. Null until the
+    // watcher has produced its first scan, and left null entirely when the
+    // panel is switched off.
+    this.fileTree = null;
+    this.fileTreeRoot = '';
   }
 
   updateSize() {
@@ -1275,8 +1280,104 @@ class TUI {
     lines.push(`${C.accent}!${C.reset} ${C.dim}shell cmd${C.reset}`);
     lines.push(`${C.accent}tab${C.reset} ${C.dim}build/plan${C.reset}`);
 
+    // The tree is last and takes what is left, so it grows with the terminal
+    // and never squeezes out a section that has a fixed thing to say.
+    const changeLine = this._renderFileTreeChange(width);
+    const treeRows = this.availableHeight - lines.length - (changeLine ? 1 : 0);
+    const treeLines = this._renderFileTree(width, treeRows);
+    if (treeLines.length) {
+      lines.push(...treeLines);
+      if (changeLine) lines.push(changeLine);
+    }
+
     while (lines.length < this.availableHeight) lines.push('');
     return lines.slice(0, this.availableHeight).map(l => this._padVisual(l, width));
+  }
+
+  /**
+   * Draws the working directory as a tree in the space the fixed sidebar
+   * sections leave over. Returns [] when there is not enough room for a header
+   * plus a couple of rows — a two-line stub would cost more than it shows.
+   */
+  _renderFileTree(width, maxRows) {
+    const tree = this.fileTree;
+    if (!tree || maxRows < 3) return [];
+
+    const now = Date.now();
+    const noticeMs = tree.changeNoticeMs ?? 5000;
+    const entries = tree.entries || [];
+    const lines = [];
+    const rootName = (this.fileTreeRoot || '').split(/[\\/]/).filter(Boolean).pop() || '/';
+    lines.push(`${C.bold}${C.accent}▸ FILES${C.reset} ${C.dim}${this._truncate(rootName, Math.max(4, width - 9))}${C.reset}`);
+
+    if (tree.error) lines.push(`${C.dim}${this._truncate(tree.error, width)}${C.reset}`);
+    if (!entries.length) {
+      lines.push(`${C.dim}empty${C.reset}`);
+      return lines.slice(0, maxRows);
+    }
+
+    // A change the user just caused is the whole point of the panel being
+    // live, so if it sits below the fold, scroll it into view rather than
+    // showing the top of the tree it did not happen in.
+    let bodyRows = Math.max(1, maxRows - lines.length - 1);
+    let start = 0;
+    if (entries.length > bodyRows) {
+      const recent = entries.findIndex(e => e.addedAt && now - e.addedAt < noticeMs);
+      if (recent >= bodyRows) {
+        // One row goes to the "above" marker once the window is scrolled.
+        bodyRows = Math.max(1, bodyRows - 1);
+        start = Math.max(0, Math.min(recent - Math.floor(bodyRows / 2), entries.length - bodyRows));
+        lines.push(`${C.dim}↑ ${start} above${C.reset}`);
+      }
+    }
+    const window = entries.slice(start, start + bodyRows);
+
+    // `isLast` per row drives both the elbow and whether ancestor levels keep
+    // drawing their vertical bar.
+    const ancestorIsLast = [];
+    for (let i = 0; i < window.length; i++) {
+      const entry = window[i];
+      const absolute = start + i;
+      let isLast = true;
+      for (let j = absolute + 1; j < entries.length; j++) {
+        if (entries[j].depth < entry.depth) break;
+        if (entries[j].depth === entry.depth) { isLast = false; break; }
+      }
+      ancestorIsLast[entry.depth] = isLast;
+
+      let indent = '';
+      for (let d = 0; d < entry.depth; d++) indent += ancestorIsLast[d] ? '  ' : `${C.border}│ ${C.reset}`;
+      const elbow = `${C.border}${isLast ? '└' : '├'}${C.reset} `;
+      const fresh = entry.addedAt && now - entry.addedAt < noticeMs;
+      const nameColor = fresh ? C.ok : entry.isDir ? C.accent : C.text;
+      const label = entry.isDir ? `${entry.name}/` : entry.name;
+      // Two columns for the elbow and one for the space after it.
+      // Two columns per ancestor level, two for the elbow and its space, and
+      // one more when the freshness mark is shown.
+      const room = Math.max(4, width - entry.depth * 2 - 2 - (fresh ? 1 : 0));
+      const mark = fresh ? `${C.ok}+${C.reset}` : '';
+      lines.push(`${indent}${elbow}${mark}${nameColor}${this._truncate(label, room)}${C.reset}`);
+    }
+
+    const hiddenBelow = entries.length - (start + window.length);
+    if (tree.truncated || hiddenBelow > 0) {
+      const note = hiddenBelow > 0
+        ? `↓ ${hiddenBelow} more${tree.truncated ? ' (capped)' : ''}`
+        : `${entries.length} shown (capped)`;
+      lines.push(`${C.dim}${note}${C.reset}`);
+    }
+    return lines.slice(0, maxRows);
+  }
+
+  /** One-line "what just happened" under the tree, blank once it goes stale. */
+  _renderFileTreeChange(width) {
+    const change = this.fileTree?.lastChange;
+    if (!change) return null;
+    const noticeMs = this.fileTree.changeNoticeMs ?? 5000;
+    if (Date.now() - change.at > noticeMs) return null;
+    const isAdd = change.kind === 'added';
+    const sign = isAdd ? `${C.ok}+${C.reset}` : `${C.err}−${C.reset}`;
+    return `${sign} ${C.dim}${this._truncate(change.path, Math.max(4, width - 2))}${C.reset}`;
   }
 
   _statusCostText() {
