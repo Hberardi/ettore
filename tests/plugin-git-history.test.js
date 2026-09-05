@@ -573,3 +573,69 @@ test('a mission says which third-party code ran during it', async () => {
   const text = m.format();
   assert.match(text, /Plugin tools used: git-history/);
 });
+
+// ── Which plugin tools the prompt gets ───────────────────────────────────────
+
+function pluginDef(name, description, plugin) {
+  return {
+    type: 'function',
+    function: { name, description, parameters: {} },
+    _pluginTool: true, _pluginName: plugin, _risk: 'medium',
+  };
+}
+
+test('the prompt decides which plugin tools are offered, not registration order', async () => {
+  // Registration order put excel-full's thirteen tools ahead of everything and
+  // left all seventeen of pgadmin's out, so asking for a database restore
+  // reached a model that had never been offered the tool that does it.
+  const { selectToolDefinitions } = await import('../src/agents/tool-router.js');
+  const { toolDefinitions } = await import('../src/tools/index.js');
+  const defs = [
+    ...toolDefinitions,
+    ...Array.from({ length: 13 }, (_, i) => pluginDef(`excel_thing_${i}`, 'spreadsheet cells and sheets', 'excel-full')),
+    pluginDef('pg_restore_wizard', 'Open a browser wizard to restore a database from a dump file', 'pgadmin'),
+    pluginDef('pg_dump', 'Dump a database to a file', 'pgadmin'),
+  ];
+
+  const picked = selectToolDefinitions(defs, {
+    mode: 'build', prompt: 'fai il restore del database dal dump',
+    includePluginTools: true, maxTools: 16,
+  }).map(t => t.function.name);
+
+  assert.ok(picked.includes('pg_restore_wizard'), `wizard not offered: ${picked.join(',')}`);
+  assert.ok(picked.includes('pg_dump'));
+});
+
+test('a prompt with nothing to match spreads the slots across plugins', async () => {
+  // Otherwise the whole floor goes to whichever plugin registered first, and
+  // five others are never seen at all.
+  const { rankPluginTools } = await import('../src/agents/tool-router.js');
+  const defs = [
+    pluginDef('a_one', 'alpha', 'plugin-a'), pluginDef('a_two', 'alpha', 'plugin-a'),
+    pluginDef('a_three', 'alpha', 'plugin-a'),
+    pluginDef('b_one', 'beta', 'plugin-b'), pluginDef('c_one', 'gamma', 'plugin-c'),
+  ];
+  const names = defs.map(d => d.function.name);
+  const order = rankPluginTools(defs, names, 'something entirely unrelated');
+
+  // First three come from three different plugins rather than all from A.
+  const plugins = order.slice(0, 3).map(n => defs.find(d => d.function.name === n)._pluginName);
+  assert.equal(new Set(plugins).size, 3, `not spread: ${order.slice(0, 3).join(',')}`);
+});
+
+test('a scored match outranks the spread', async () => {
+  const { rankPluginTools } = await import('../src/agents/tool-router.js');
+  const defs = [
+    pluginDef('a_one', 'alpha', 'plugin-a'), pluginDef('a_two', 'alpha', 'plugin-a'),
+    pluginDef('restore_database', 'restore a database from a dump', 'plugin-z'),
+  ];
+  const order = rankPluginTools(defs, defs.map(d => d.function.name), 'restore the database');
+  assert.equal(order[0], 'restore_database', order.join(','));
+});
+
+test('ranking leaves a single plugin tool alone', async () => {
+  const { rankPluginTools } = await import('../src/agents/tool-router.js');
+  const defs = [pluginDef('only_one', 'x', 'p')];
+  assert.deepEqual(rankPluginTools(defs, ['only_one'], 'anything'), ['only_one']);
+  assert.deepEqual(rankPluginTools(defs, ['only_one'], ''), ['only_one']);
+});

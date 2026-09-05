@@ -71,6 +71,81 @@ function addMany(target, names) {
   for (const name of names) target.add(name);
 }
 
+
+// Words too common to distinguish one tool from another, in the two languages
+// prompts here are written in.
+const RANK_STOP = new Set([
+  'the', 'and', 'for', 'with', 'from', 'this', 'that', 'into', 'use', 'using',
+  'run', 'get', 'set', 'all', 'any', 'per', 'del', 'della', 'delle', 'dei',
+  'con', 'una', 'uno', 'che', 'come', 'nel', 'nella', 'sul', 'sulla', 'fai',
+  'tool', 'file', 'data',
+]);
+
+function rankTokens(value) {
+  return new Set(String(value || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/[^a-z0-9]+/)
+    .filter(w => w.length >= 4 && !RANK_STOP.has(w)));
+}
+
+/**
+ * Orders plugin tool names by how well each matches the prompt.
+ *
+ * Lexical only — name and description against the words asked for, with a
+ * shared prefix counting for less than an exact word so an Italian prompt can
+ * still reach an English tool name. It cannot know what a plugin does; it can
+ * tell that "restore del database" has more to do with `pg_restore_wizard`
+ * than with `excel_set_style`, and that is the whole of what the arbitrary
+ * ordering was missing. Ties keep their original order, so a prompt that
+ * matches nothing behaves exactly as before.
+ */
+export function rankPluginTools(definitions, names, prompt) {
+  const wanted = rankTokens(prompt);
+  if (!wanted.size || names.length <= 1) return names.slice();
+  const byName = new Map(definitions.map(d => [d.function?.name, d]));
+
+  const ranked = names
+    .map((name, index) => {
+      const def = byName.get(name);
+      const terms = rankTokens(`${name} ${def?.function?.description || ''}`);
+      let score = 0;
+      for (const term of terms) {
+        if (wanted.has(term)) { score += 1; continue; }
+        for (const word of wanted) {
+          const [short, long] = word.length <= term.length ? [word, term] : [term, word];
+          if (short.length >= 4 && long.startsWith(short) && long.length - short.length <= 3) {
+            score += 0.5;
+            break;
+          }
+        }
+      }
+      return { name, score, index };
+    })
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+
+  // A prompt that matches nothing leaves every tool at zero, and strict order
+  // then hands the whole floor to whichever plugin registered first — six
+  // plugins, four slots, one plugin. Spreading the unmatched ones round-robin
+  // gives each plugin a chance to be seen. Scored tools are untouched: when
+  // the prompt does say something, it decides.
+  const scored = ranked.filter(r => r.score > 0).map(r => r.name);
+  const unscored = ranked.filter(r => r.score === 0);
+  const byPlugin = new Map();
+  for (const item of unscored) {
+    const plugin = byName.get(item.name)?._pluginName || '';
+    if (!byPlugin.has(plugin)) byPlugin.set(plugin, []);
+    byPlugin.get(plugin).push(item.name);
+  }
+  const spread = [];
+  const queues = [...byPlugin.values()];
+  while (queues.some(q => q.length)) {
+    for (const q of queues) if (q.length) spread.push(q.shift());
+  }
+  return [...scored, ...spread];
+}
+
 export function selectToolDefinitions(definitions = [], context = {}) {
   if (context.isLite) return [];
 
@@ -166,9 +241,17 @@ export function selectToolDefinitions(definitions = [], context = {}) {
   // entirely, and the remainder queues behind them to fill whatever the core
   // set leaves. Capping the share instead would waste slots — six plugins and
   // a cap of 28 left seven empty while excluding twenty-eight tools.
+  //
+  // Which ones make the cut is decided by the prompt, not by the order the
+  // plugins happened to register in. That order put `excel-full`'s thirteen
+  // tools ahead of everything and left all seventeen of `pgadmin`'s out, so
+  // asking for a database restore reached a model that had never been offered
+  // `pg_restore_wizard` — the page could not open because the tool was not
+  // there to call.
+  const ranked = rankPluginTools(definitions, pluginToolNames, `${prompt} ${overlay}`);
   const pluginFloor = Math.max(1, Math.floor(maxTools / 4));
-  const pluginGuaranteed = pluginToolNames.slice(0, pluginFloor);
-  const pluginRest = pluginToolNames.slice(pluginFloor);
+  const pluginGuaranteed = ranked.slice(0, pluginFloor);
+  const pluginRest = ranked.slice(pluginFloor);
 
   const priority = [
     'repo_map',
