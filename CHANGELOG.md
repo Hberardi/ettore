@@ -8,6 +8,22 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — a machine that checked just before a release kept reporting itself current
+
+The version cache held one answer for six hours, but the two answers it can
+hold do not decay alike. "1.3.0 exists" only becomes more true with age.
+"There is nothing newer" stops being true the instant something is published,
+and then stays wrong for the rest of the window.
+
+Which is exactly what happened to 1.3.0: machines that had checked in the six
+hours before it went out went on saying they were up to date, with the release
+already on npm.
+
+A cached "nothing newer" now expires after 30 minutes; a cached newer version
+still holds for six hours, since re-asking about it is wasted work. `ettore
+update` was never affected — it calls npm directly and ignores the cache
+entirely, which is the way to take a release the moment it lands.
+
 ## [1.3.0] — 2026-09-05
 
 ### Upgrading from 1.2.x — read this one first

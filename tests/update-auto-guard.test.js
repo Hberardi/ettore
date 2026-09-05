@@ -164,3 +164,57 @@ test('what the checker writes is what it will accept back', () => {
     assert.equal(update.checkForUpdateSync().latest, '99.0.0');
   });
 });
+
+// ── Cache freshness is asymmetric ────────────────────────────────────────────
+
+test('"nothing newer" expires quickly, because publishing makes it wrong', () => {
+  // The case that hid a real release: a machine that checked shortly before
+  // 1.3.0 was published kept reporting itself current for the whole window.
+  withConfigDir((dir) => {
+    mkdirSync(dir, { recursive: true });
+    const { name, version } = update.readLocalPackage();
+    writeFileSync(join(dir, 'version-cache.json'), JSON.stringify({
+      name, latest: version, cachedAt: Date.now() - 50 * 60 * 1000,
+    }));
+    // Discarded, so the next check asks npm again.
+    assert.equal(update.checkForUpdateSync().latest, null);
+  });
+});
+
+test('a known newer version is trusted for the full window', () => {
+  // This answer only becomes more true with age, so re-asking is wasted work.
+  withConfigDir((dir) => {
+    mkdirSync(dir, { recursive: true });
+    const { name } = update.readLocalPackage();
+    writeFileSync(join(dir, 'version-cache.json'), JSON.stringify({
+      name, latest: '99.0.0', cachedAt: Date.now() - 50 * 60 * 1000,
+    }));
+    const result = update.checkForUpdateSync();
+    assert.equal(result.latest, '99.0.0');
+    assert.equal(result.fromCache, true);
+  });
+});
+
+test('a "nothing newer" answer is still trusted while it is fresh', () => {
+  withConfigDir((dir) => {
+    mkdirSync(dir, { recursive: true });
+    const { name, version } = update.readLocalPackage();
+    writeFileSync(join(dir, 'version-cache.json'), JSON.stringify({
+      name, latest: version, cachedAt: Date.now() - 60 * 1000,
+    }));
+    const result = update.checkForUpdateSync();
+    assert.equal(result.latest, version);
+    assert.equal(result.outdated, false);
+  });
+});
+
+test('even a fresh positive answer goes stale eventually', () => {
+  withConfigDir((dir) => {
+    mkdirSync(dir, { recursive: true });
+    const { name } = update.readLocalPackage();
+    writeFileSync(join(dir, 'version-cache.json'), JSON.stringify({
+      name, latest: '99.0.0', cachedAt: Date.now() - 7 * 60 * 60 * 1000,
+    }));
+    assert.equal(update.checkForUpdateSync().latest, null);
+  });
+});

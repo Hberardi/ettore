@@ -56,6 +56,25 @@ export function readLocalPackage() {
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+// "There is nothing newer" is the one answer that goes stale the instant it
+// stops being true — a release published a minute after the check is invisible
+// for the rest of the window. "1.3.0 exists" only becomes more true with age.
+// The two answers decay differently, so they expire differently: this is why a
+// machine that checked shortly before a publish kept reporting itself current.
+const NEGATIVE_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/** How long this particular cached answer is worth trusting. */
+function cacheTtlFor(cached, current) {
+  const latest = cached?.latest;
+  if (!latest) return NEGATIVE_CACHE_TTL_MS;
+  return isOutdated(current, latest) ? CACHE_TTL_MS : NEGATIVE_CACHE_TTL_MS;
+}
+
+function cacheIsFresh(cached, current, now = Date.now()) {
+  if (!cached) return false;
+  return now - Number(cached.cachedAt || 0) < cacheTtlFor(cached, current);
+}
+
 // How long startup may block on the registry when the cache has nothing
 // usable. Short enough that a slow or unreachable registry costs a beat
 // rather than a stall, and paid at most once every CACHE_TTL_MS.
@@ -200,7 +219,7 @@ export async function checkForUpdate({ force = false, timeoutMs } = {}) {
   const { version: current } = readLocalPackage();
   if (!force) {
     const cached = readCache();
-    if (cached && Date.now() - Number(cached.cachedAt || 0) < CACHE_TTL_MS) {
+    if (cacheIsFresh(cached, current)) {
       return {
         current,
         latest: cached.latest || current,
@@ -244,7 +263,7 @@ export function checkForUpdateSync() {
   if (!cached || !cached.latest) {
     return { current, latest: null, outdated: false, deprecated: null, fromCache: false, error: null };
   }
-  if (Date.now() - Number(cached.cachedAt || 0) >= CACHE_TTL_MS) {
+  if (!cacheIsFresh(cached, current)) {
     return { current, latest: null, outdated: false, deprecated: null, fromCache: false, error: null };
   }
   return {
