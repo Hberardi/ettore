@@ -41,6 +41,12 @@ with ETTORE alongside what is on disk, and `/plugins install <name>` copies
 one into place and enables it in a single step. Installing over an existing
 copy is refused unless forced, since a plugin on disk may have been edited.
 
+`/plugins install` with no name opens a picker — the same selection overlay
+the loop planner uses — rather than asking you to retype a name you just read
+in a listing. Where nothing can answer a prompt, such as a pipe or a one-shot
+run, it prints the usage line and the available names instead: a picker nobody
+can answer is a hang rather than a question.
+
 ## [1.3.2] — 2026-09-05
 
 ### Changed — updates install themselves again
