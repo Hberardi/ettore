@@ -8,6 +8,63 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.3.3] — 2026-09-06
+
+### Added — seven plugins, and a way to install them
+
+`files` already published `examples/plugins`, but nothing could reach them: a
+bundled plugin meant copying a directory out of the global npm prefix by hand.
+`/plugins install` now copies one into place and enables it in a step, with a
+picker when no name is given, and `/plugins available` lists what ships
+alongside what is on disk.
+
+What ships: **pgadmin** (PostgreSQL, including a web wizard for restores),
+**excel-full** (xlsx read/write with formulas, styles and charts),
+**git-helpers** and **git-history** (blame, log, diff stat, branch audit,
+single-commit inspection), **bash-monitor** (times commands, keeps a queryable
+history), **command-palette-shortcuts**, and **hello-world**.
+
+None of them ran before this release. Every one called `require()` inside an ES
+module, where it does not exist, so `try { require('pg') }` threw
+ReferenceError and the catch reported it as a missing optional dependency — the
+plugin claimed its dependency was absent whether or not it was. The test files
+had the same fault in their skip guards, so the suite called them skipped
+rather than broken.
+
+### Changed — excel-full moved from SheetJS to ExcelJS
+
+The community `xlsx` build writes neither cell styles nor embedded images, both
+being paid features, so `excel_set_style` reported success and wrote nothing and
+charts were drawn and then dropped on save. It also carries two high-severity
+advisories with no fix available, SheetJS having left npm. All thirteen tools
+were rewritten against `exceljs`; styles, formulas and images now survive a
+round-trip, and `xlsx` is no longer a dependency.
+
+### Added — the CLI says when a tool came from a plugin
+
+A plugin tool looked exactly like one the CLI ships. It is now marked wherever
+tools are shown — the running-tool line, the sidebar, the one-shot output and
+the `/mission` summary — and a built-in gets no badge.
+
+### Fixed — plugin tools no longer crowd out the CLI's own
+
+With six plugins enabled the model was offered 28 tools of which 21 were plugin
+tools, leaving it without `bash`, `run_tests`, `todo_write` or `git_status`:
+able to operate every plugin and unable to read a directory. They now take a
+guaranteed share rather than blanket priority, and which ones make the cut is
+decided by the prompt instead of by registration order — asking for a database
+restore used to reach a model that had never been offered the tool that does it.
+
+Plan mode dropped every plugin tool, so an enabled plugin was invisible in half
+the CLI. One declaring `risk: 'low'` is now offered there.
+
+### Fixed — an installed plugin that has fallen behind says so
+
+The runtime loads from the user's plugin directory and never looks at the
+package's own, so a fix shipped in a release reaches nobody until that copy is
+refreshed — and nothing said the two had diverged. `/plugins available` now
+names them.
+
 ### Added — a `git-history` plugin, and a real example of what one is for
 
 `git_status` and `git_diff` describe the working tree as it is. Nothing
