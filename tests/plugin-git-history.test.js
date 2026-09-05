@@ -415,3 +415,78 @@ test('every git-history tool declares itself read-only', async () => {
     assert.equal(def.risk, 'low', `${name} must declare risk: 'low'`);
   }
 });
+
+// ── Plugin tools must not crowd out the CLI's own ────────────────────────────
+
+test('many plugin tools cannot displace the core toolkit', async () => {
+  // Harmless while a plugin meant two tools, fatal once six plugins meant
+  // thirty-seven: they filled 21 of 28 slots and left the agent without
+  // `bash`, `run_tests`, `todo_write` or `git_status` — unable to do its own
+  // job while perfectly able to do theirs.
+  const { selectToolDefinitions } = await import('../src/agents/tool-router.js');
+  const { toolDefinitions } = await import('../src/tools/index.js');
+  const flood = Array.from({ length: 37 }, (_, i) => ({
+    type: 'function',
+    function: { name: `plug_${i}`, description: 'd', parameters: {} },
+    _pluginTool: true,
+    _risk: 'medium',
+  }));
+
+  const picked = selectToolDefinitions([...toolDefinitions, ...flood], {
+    mode: 'build', prompt: 'modifica il file e lancia i test',
+    includePluginTools: true, maxTools: 16,
+  }).map(t => t.function.name);
+
+  for (const core of ['read', 'write', 'edit', 'grep', 'repo_map', 'git_status', 'run_tests']) {
+    assert.ok(picked.includes(core), `core tool ${core} was displaced: ${picked.join(',')}`);
+  }
+});
+
+test('an enabled plugin is never squeezed out entirely', async () => {
+  // The other half of the trade: putting plugins last would keep the core
+  // intact and make every enabled plugin invisible at the default cap.
+  const { selectToolDefinitions } = await import('../src/agents/tool-router.js');
+  const { toolDefinitions } = await import('../src/tools/index.js');
+  const flood = Array.from({ length: 37 }, (_, i) => ({
+    type: 'function',
+    function: { name: `plug_${i}`, description: 'd', parameters: {} },
+    _pluginTool: true,
+    _risk: 'medium',
+  }));
+
+  const picked = selectToolDefinitions([...toolDefinitions, ...flood], {
+    mode: 'build', prompt: 'modifica il file e lancia i test',
+    includePluginTools: true, maxTools: 16,
+  }).map(t => t.function.name);
+
+  const plugins = picked.filter(n => n.startsWith('plug_'));
+  assert.ok(plugins.length >= 1, 'no plugin tool survived');
+  assert.ok(plugins.length <= 8, `plugins took too much of the budget: ${plugins.length}`);
+});
+
+test('spare capacity goes to plugin tools rather than being wasted', async () => {
+  const { selectToolDefinitions } = await import('../src/agents/tool-router.js');
+  const { toolDefinitions } = await import('../src/tools/index.js');
+  const flood = Array.from({ length: 37 }, (_, i) => ({
+    type: 'function',
+    function: { name: `plug_${i}`, description: 'd', parameters: {} },
+    _pluginTool: true, _risk: 'medium',
+  }));
+  const picked = selectToolDefinitions([...toolDefinitions, ...flood], {
+    mode: 'build', prompt: 'modifica il file', includePluginTools: true, maxTools: 28,
+  });
+  // A cap of 28 with 37 plugin tools waiting should not come back short.
+  assert.equal(picked.length, 28, 'slots were left empty while tools waited');
+});
+
+test('a project with no plugins routes exactly as before', async () => {
+  const { selectToolDefinitions } = await import('../src/agents/tool-router.js');
+  const { toolDefinitions } = await import('../src/tools/index.js');
+  const picked = selectToolDefinitions(toolDefinitions, {
+    mode: 'build', prompt: 'modifica il file e lancia i test',
+    includePluginTools: false, maxTools: 16,
+  }).map(t => t.function.name);
+  for (const core of ['read', 'write', 'edit', 'grep', 'run_tests', 'run_checks']) {
+    assert.ok(picked.includes(core), core);
+  }
+});

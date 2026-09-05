@@ -150,6 +150,26 @@ export function selectToolDefinitions(definitions = [], context = {}) {
 
   if (ordered.length <= maxTools) return ordered;
 
+  // Plugin tools used to sit above every core family here, which was harmless
+  // while a plugin meant two tools and fatal once it meant thirty-seven: six
+  // enabled plugins filled 21 of the 28 slots and left the agent without
+  // `bash`, `run_tests`, `todo_write` or `git_status` — unable to do its own
+  // job while perfectly able to do theirs.
+  //
+  // They keep a reserved share instead. Enough that an enabled plugin is never
+  // silently unusable, bounded so it cannot displace the toolkit the CLI is
+  // built on. Which of them make the cut is arbitrary when there are more than
+  // the share allows — ranking them by relevance would need the router to
+  // understand what a plugin does, and it cannot.
+  // A guaranteed minimum rather than a ceiling: a small share is placed ahead
+  // of the core families so an enabled plugin can never be squeezed out
+  // entirely, and the remainder queues behind them to fill whatever the core
+  // set leaves. Capping the share instead would waste slots — six plugins and
+  // a cap of 28 left seven empty while excluding twenty-eight tools.
+  const pluginFloor = Math.max(1, Math.floor(maxTools / 4));
+  const pluginGuaranteed = pluginToolNames.slice(0, pluginFloor);
+  const pluginRest = pluginToolNames.slice(pluginFloor);
+
   const priority = [
     'repo_map',
     'read',
@@ -158,10 +178,13 @@ export function selectToolDefinitions(definitions = [], context = {}) {
     // Ahead of the contextual families: losing the ability to write to make
     // room for, say, a web search is never the right trade in build mode.
     ...(mode === 'build' ? MUTATION_TOOLS : []),
-    ...pluginToolNames,
+    // Prompt-relevant families outrank a generic plugin tool: they were chosen
+    // because of what was asked, and the plugin share was not.
     ...contextualPriority,
     ...(editIntent ? EDIT_TOOLS : []),
+    ...pluginGuaranteed,
     ...(mode === 'plan' ? BASE_PLAN : BASE_BUILD),
+    ...pluginRest,
   ];
   const result = [];
   const used = new Set();
