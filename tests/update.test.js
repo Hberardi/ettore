@@ -348,12 +348,20 @@ test('bin/cli.js refreshes a cold cache before deciding to auto-update', () => {
   const text = readFileSync(resolve(REPO_ROOT, 'bin/cli.js'), 'utf8');
   // Without this the first run after an install does nothing and the update
   // only happens on the second launch.
-  assert.match(text, /!updateStatus\?\.latest && describeInstall\(\)\.updatable/);
+  assert.match(text, /!updateStatus\?\.latest && install\.updatable/);
   assert.match(text, /await checkForUpdate\(\{ timeoutMs: COLD_CHECK_TIMEOUT_MS \}\)/);
   // A checkout must not pay for a network call whose answer it would refuse.
+  // `describeInstall()` is read once into `install` and both branches share it.
+  assert.match(text, /const install = describeInstall\(\);/);
   assert.ok(
-    text.indexOf('describeInstall().updatable') < text.indexOf('await checkForUpdate({ timeoutMs'),
+    text.indexOf('const install = describeInstall();') < text.indexOf('await checkForUpdate({ timeoutMs'),
     'the checkout guard must be evaluated before the blocking call',
+  );
+  // The checkout's own update — a fast-forward — is decided before the npm
+  // check, and it is the branch that runs when the npm one cannot.
+  assert.ok(
+    text.indexOf('planCheckoutUpdate({') < text.indexOf('await checkForUpdate({ timeoutMs'),
+    'the checkout is offered its update before the registry is consulted',
   );
 });
 

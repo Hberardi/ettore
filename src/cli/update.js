@@ -439,15 +439,85 @@ export function describeCheckout({ root = ROOT } = {}) {
   };
 }
 
-/** `git pull --ff-only` on a checkout that can take one. */
-export function pullCheckout({ root = ROOT } = {}) {
+// A pull at startup reaches the network, and the CLI must not sit on a
+// prompt waiting for it. Longer than the registry check because a pull can
+// have objects to transfer, short enough that a dead remote costs a pause
+// and not a hang. The explicit `ettore update` passes its own, generous
+// value: there the user asked for it and can interrupt.
+export const CHECKOUT_PULL_TIMEOUT_MS = IS_WINDOWS ? 12_000 : 6000;
+
+/**
+ * `git pull --ff-only` on a checkout that can take one.
+ *
+ * `changed` comes from comparing HEAD before and after, never from reading
+ * git's output. git speaks the user's language — on an it_IT machine a
+ * no-op pull says "Già aggiornato", so matching /Already up to date/ called
+ * every pull a change. Harmless in a message, not harmless on the startup
+ * path, where "changed" means "re-execute": every launch would have
+ * relaunched itself once.
+ */
+export function pullCheckout({ root = ROOT, timeoutMs = 0 } = {}) {
+  const head = () => {
+    try {
+      return execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+    } catch { return null; }
+  };
+  const before = head();
   return new Promise((resolvePull) => {
-    execFile('git', ['pull', '--ff-only'], { cwd: root }, (error, stdout, stderr) => {
+    const options = { cwd: root };
+    if (timeoutMs > 0) options.timeout = timeoutMs;
+    execFile('git', ['pull', '--ff-only'], options, (error, stdout, stderr) => {
       const output = `${stdout || ''}${stderr || ''}`.trim();
-      if (error) { resolvePull({ ok: false, output: output || error.message }); return; }
-      resolvePull({ ok: true, output, changed: !/Already up to date/i.test(output) });
+      if (error) {
+        // A killed pull is a timeout, not a broken repository: git was still
+        // fetching. Distinguished so the caller can say which happened.
+        const timedOut = Boolean(error.killed) || error.signal === 'SIGTERM';
+        resolvePull({
+          ok: false,
+          timedOut,
+          output: output || (timedOut ? `git pull exceeded ${timeoutMs}ms` : error.message),
+        });
+        return;
+      }
+      const after = head();
+      resolvePull({
+        ok: true,
+        timedOut: false,
+        output,
+        changed: Boolean(before && after && before !== after),
+      });
     });
   });
+}
+
+/**
+ * Whether to fast-forward a checkout at startup, and why not when not.
+ *
+ * Deliberately a separate decision from planAutoUpdate: that one answers
+ * "should npm install a published release", this one "should git move this
+ * working copy". They are mutually exclusive by construction — an install is
+ * `updatable` exactly when it is not a checkout — which is what keeps the
+ * npm path, the one Windows uses, untouched by any of this.
+ */
+export function planCheckoutUpdate({
+  install = null,
+  checkout = null,
+  enabled = true,
+  isTTY = Boolean(process.stdout?.isTTY),
+  alreadyRan = Boolean(process.env.ETTORE_AUTO_UPDATE_DONE),
+} = {}) {
+  if (!enabled) return { run: false, reason: 'auto-update is disabled' };
+  if (alreadyRan) return { run: false, reason: 'already updated during this launch' };
+  if (!isTTY) return { run: false, reason: 'not an interactive terminal' };
+  const info = install || describeInstall();
+  // The npm path owns every updatable install. Nothing here may fire on one.
+  if (info.updatable) return { run: false, reason: 'not a checkout — npm owns this install' };
+  const repo = checkout || describeCheckout();
+  if (!repo.isCheckout) return { run: false, reason: 'not a checkout' };
+  if (!repo.pullable) return { run: false, reason: repo.reason || 'the checkout cannot be fast-forwarded' };
+  return { run: true, branch: repo.branch, upstream: repo.upstream, reason: null };
 }
 
 export function runUpdate({ target = 'latest', stream = true, force = false } = {}) {

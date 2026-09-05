@@ -16,6 +16,8 @@ import {
   runUpdate,
   describeCheckout,
   pullCheckout,
+  planCheckoutUpdate,
+  CHECKOUT_PULL_TIMEOUT_MS,
 } from '../src/cli/update.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -91,8 +93,50 @@ program
     // lifetime rather than per launch, and only when the answer could
     // actually be acted on — a checkout is asked first, so a dev copy never
     // pays for a call whose result it would refuse anyway.
+    const install = describeInstall();
+
+    // A checkout updates with git; npm would replace the link with a registry
+    // copy. The two paths are mutually exclusive by construction — `updatable`
+    // is false for exactly the installs handled here — so everything below
+    // this block behaves as it did for an npm install, which is the path
+    // Windows takes.
+    //
+    // Until now a checkout simply had no automatic path: the cold check was
+    // skipped because its answer would have been refused, and nothing was put
+    // in its place, so a linked install silently never moved.
+    const checkoutPlan = planCheckoutUpdate({
+      install,
+      enabled: autoUpdateOptIn && options.updateCheck !== false,
+    });
+    if (checkoutPlan.run) {
+      const pulled = await pullCheckout({ timeoutMs: CHECKOUT_PULL_TIMEOUT_MS });
+      if (pulled.ok && pulled.changed) {
+        // Same reasoning as the npm branch: modules are imported lazily for
+        // the whole session, so files that changed under a running process
+        // must not be half-loaded. Re-execute into the build we just pulled.
+        process.stdout.write(`${dim}↻ checkout fast-forwarded — restarting${reset}\n`);
+        const { spawnSync } = await import('node:child_process');
+        const relaunch = spawnSync(process.execPath, process.argv.slice(1), {
+          stdio: 'inherit',
+          env: { ...process.env, ETTORE_AUTO_UPDATE_DONE: '1' },
+        });
+        process.exit(relaunch.status ?? 0);
+      }
+      if (!pulled.ok) {
+        // A timeout is a slow or absent network and says nothing the user can
+        // act on, so it stays quiet outside --debug. Anything else is a state
+        // of the repository — diverged branches, a rejected fast-forward —
+        // that will not fix itself and that they need to hear about.
+        if (!pulled.timedOut || options.debug) {
+          process.stderr.write(`${dim}auto-update: git pull failed — ${pulled.output}${reset}\n`);
+        }
+      }
+    } else if (checkoutPlan.reason && options.debug) {
+      process.stderr.write(`${dim}auto-update: ${checkoutPlan.reason}${reset}\n`);
+    }
+
     let coldCheckRan = false;
-    if (autoUpdateWanted && !updateStatus?.latest && describeInstall().updatable) {
+    if (autoUpdateWanted && !updateStatus?.latest && install.updatable) {
       coldCheckRan = true;
       updateStatus = await checkForUpdate({ timeoutMs: COLD_CHECK_TIMEOUT_MS });
     }
@@ -255,7 +299,9 @@ program
       const checkout = describeCheckout();
       if (checkout.pullable) {
         process.stdout.write(`Updating the checkout at ${install.root} (git pull --ff-only)…\n`);
-        const pulled = await pullCheckout();
+        // Generous: the user asked for this one and is watching it, but a
+        // bound still beats a command that can hang on a dead remote.
+        const pulled = await pullCheckout({ timeoutMs: 120_000 });
         process.stdout.write(`${pulled.output || '(no output)'}\n`);
         if (!pulled.ok) {
           process.stderr.write(`${dim}The pull failed; the checkout is unchanged.${reset}\n`);
