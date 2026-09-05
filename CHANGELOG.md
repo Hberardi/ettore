@@ -28,6 +28,19 @@ string, and paths are refused before git sees them if they leave the workspace.
 It also serves as the example `hello-world` could not be: a plugin worth
 installing, rather than a demonstration of the file layout.
 
+### Added — bundled plugins can actually be installed
+
+A bundled plugin used to reach nobody. `files` in package.json listed `bin`,
+`src` and the README, so `examples/` was never published: an npm install
+carried no plugins at all. And installing one meant copying a directory by
+hand, from a path inside the global npm prefix that a user has no reason to
+know.
+
+`examples/plugins` is now published, `/plugins available` lists what ships
+with ETTORE alongside what is on disk, and `/plugins install <name>` copies
+one into place and enables it in a single step. Installing over an existing
+copy is refused unless forced, since a plugin on disk may have been edited.
+
 ## [1.3.2] — 2026-09-05
 
 ### Changed — updates install themselves again

@@ -237,3 +237,73 @@ test('the slash command renders one line per commit', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ── Reaching a user at all ───────────────────────────────────────────────────
+
+test('the plugin ships in the published package', async () => {
+  // `files` decides what npm puts on a user's disk. A bundled plugin that is
+  // not listed there exists only for people who clone the repository.
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.ok(
+    pkg.files.includes('examples/plugins'),
+    `bundled plugins are not published: files = ${JSON.stringify(pkg.files)}`,
+  );
+});
+
+test('bundled plugins are discoverable by name', async () => {
+  const { listBundledPlugins } = await import('../src/plugins/loader.js');
+  const names = (await listBundledPlugins()).map(p => p.name);
+  assert.ok(names.includes('git-history'), names.join(','));
+  const entry = (await listBundledPlugins()).find(p => p.name === 'git-history');
+  assert.ok(entry.description.length > 20, 'a bundled plugin needs a description to be offered by');
+  assert.equal(entry.version, '1.0.0');
+});
+
+test('installing copies the plugin where the runtime will find it', async () => {
+  const { installBundledPlugin, discoverPlugins } = await import('../src/plugins/loader.js');
+  const dir = await mkdtemp(join(tmpdir(), 'ettore-plugdir-'));
+  try {
+    const installed = await installBundledPlugin('git-history', { pluginsDir: dir });
+    assert.equal(installed.name, 'git-history');
+    const found = await discoverPlugins(dir);
+    assert.deepEqual(found.map(f => f.name), ['git-history']);
+    // The whole plugin, not just its manifest.
+    await readFile(join(dir, 'git-history', 'index.js'), 'utf8');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('installing over an existing copy needs saying so', async () => {
+  const { installBundledPlugin } = await import('../src/plugins/loader.js');
+  const dir = await mkdtemp(join(tmpdir(), 'ettore-plugdir-'));
+  try {
+    await installBundledPlugin('git-history', { pluginsDir: dir });
+    // An installed plugin may have been edited; replacing it silently is worse
+    // than making the user ask.
+    await assert.rejects(
+      () => installBundledPlugin('git-history', { pluginsDir: dir }),
+      /already installed/,
+    );
+    const forced = await installBundledPlugin('git-history', { pluginsDir: dir, force: true });
+    assert.equal(forced.name, 'git-history');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unknown name is refused, and lists what there is', async () => {
+  const { installBundledPlugin } = await import('../src/plugins/loader.js');
+  const dir = await mkdtemp(join(tmpdir(), 'ettore-plugdir-'));
+  try {
+    await assert.rejects(
+      () => installBundledPlugin('nothing-like-this', { pluginsDir: dir }),
+      /no bundled plugin named .* Bundled: .*git-history/s,
+    );
+    // A name that could escape the directory is refused before any filesystem
+    // work happens.
+    await assert.rejects(() => installBundledPlugin('../../etc', { pluginsDir: dir }), /not a valid plugin name/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

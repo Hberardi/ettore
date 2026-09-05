@@ -266,8 +266,9 @@ Two plugins ship with the repository. `hello-world` is the minimal shape of one;
 `git_diff` cannot. See `examples/plugins/git-history/README.md`.
 
 ```bash
-# install a bundled plugin
-cp -r examples/plugins/git-history ~/.config/ettore/plugins/
+# in the TUI
+/plugins available             # installed, plus what ships with ETTORE
+/plugins install git-history   # copies it into place and enables it
 
 # in the TUI
 /plugins list                  # show enabled plugins

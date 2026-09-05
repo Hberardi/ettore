@@ -93,9 +93,13 @@ test('plugins command: available lists on-disk plugins with enabled tags', async
     const runtime = new PluginRuntime({ registry, pluginsDir: dir });
     await runtime.enable('one');
     const out = await builtinCommands.plugins.handler(['available'], buildContext(runtime, registry));
-    assert.match(out, /Available plugins \(2\)/);
+    // The listing now separates what is installed from what merely ships with
+    // ETTORE, since a fresh install has the second and none of the first.
+    assert.match(out, /Installed plugins \(2\)/);
     assert.match(out, /one \[enabled\]/);
     assert.match(out, /two(?! \[enabled\])/);
+    assert.match(out, /Bundled with ETTORE/);
+    assert.match(out, /git-history/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

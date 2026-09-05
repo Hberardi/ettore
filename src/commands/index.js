@@ -1922,7 +1922,7 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
   // up on the next turn.
   plugins: {
     description: 'Manage plugins (list, enable, disable, reload, info)',
-    usage: 'plugins [list|available|enable|disable|reload|info] [name]',
+    usage: 'plugins [list|available|install|enable|disable|reload|info] [name]',
     aliases: ['plugin'],
     handler: async (args, context = {}) => {
       const runtime = context.pluginRuntime;
@@ -1954,15 +1954,52 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         } catch (err) {
           return `Error listing plugins: ${err.message}`;
         }
-        if (candidates.length === 0) {
+        let bundled = [];
+        try {
+          const { listBundledPlugins } = await import('../plugins/loader.js');
+          const installed = new Set(candidates.map(c => c.name));
+          bundled = (await listBundledPlugins()).filter(b => !installed.has(b.name));
+        } catch { /* an install without the examples directory simply has none */ }
+
+        if (candidates.length === 0 && bundled.length === 0) {
           return 'No plugins found on disk.\nDrop a plugin into ~/.config/ettore/plugins/<name>/ with a plugin.json and an index.js to install one.';
         }
-        const lines = [`Available plugins (${candidates.length}):`];
-        for (const c of candidates) {
-          const tag = runtime.has(c.name) ? ' [enabled]' : '';
-          lines.push(`  ${c.name}${tag}`);
+        const lines = [];
+        if (candidates.length) {
+          lines.push(`Installed plugins (${candidates.length}):`);
+          for (const c of candidates) {
+            lines.push(`  ${c.name}${runtime.has(c.name) ? ' [enabled]' : ''}`);
+          }
+        }
+        if (bundled.length) {
+          if (lines.length) lines.push('');
+          lines.push(`Bundled with ETTORE (${bundled.length}) — /plugins install <name>:`);
+          for (const b of bundled) {
+            const summary = b.description ? ` — ${b.description.split('.')[0]}` : '';
+            lines.push(`  ${b.name}${summary}`.slice(0, 200));
+          }
         }
         return lines.join('\n');
+      }
+
+      // ── /plugins install <name> — copy a bundled plugin, then enable it ─
+      if (sub === 'install' || sub === 'add') {
+        if (!name) return 'Usage: /plugins install <name>\nSee /plugins available for what ships with ETTORE.';
+        try {
+          const { installBundledPlugin } = await import('../plugins/loader.js');
+          const force = /(^|\s)--force(\s|$)/.test(String(args || ''));
+          const installed = await installBundledPlugin(name, { pluginsDir: runtime._pluginsDir, force });
+          // Installing without enabling would leave the user one step short of
+          // the thing they asked for.
+          const result = await runtime.enable(name);
+          if (context.rebuildAgent) {
+            try { await context.rebuildAgent(); } catch {}
+          }
+          return `✓ Installed "${name}" v${result.manifest.version} to ${installed.dir}, and enabled it.\n`
+            + `  Run /plugins info ${name} to see what it adds.`;
+        } catch (err) {
+          return `Error installing plugin "${name}": ${err.message}`;
+        }
       }
 
       // ── /plugins enable <name> ────────────────────────────────────────

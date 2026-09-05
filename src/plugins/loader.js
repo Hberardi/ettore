@@ -14,10 +14,11 @@
 // The directory is overridable via ETTORE_PLUGINS_DIR — used by tests to
 // point at a fixture directory and by CI to sandbox plugin discovery.
 
-import { readdir, readFile, stat } from 'fs/promises';
-import { join, resolve, sep } from 'path';
+import { readdir, readFile, mkdir, cp, stat } from 'fs/promises';
+import { existsSync } from 'fs';
+import { join, resolve, sep, dirname } from 'path';
 import { homedir } from 'os';
-import { pathToFileURL } from 'url';
+import { pathToFileURL, fileURLToPath } from 'url';
 import { validateManifest, validatePluginModule, ManifestError } from './manifest.js';
 
 const DEFAULT_PLUGINS_DIR = join(homedir(), '.config', 'ettore', 'plugins');
@@ -36,6 +37,62 @@ export class PluginLoadError extends Error {
     this.plugin = plugin;
     this.cause = cause;
   }
+}
+
+// Plugins shipped inside the package. They are the only ones a fresh install
+// has, and without a way to reach them a bundled plugin is a file nobody can
+// find: `examples/` sits next to `src/` in the installed tree, wherever npm
+// happened to put it, and asking a user to locate that is asking too much.
+function bundledPluginsDir() {
+  return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'examples', 'plugins');
+}
+
+/** Bundled plugins, by name, with the manifest description where readable. */
+export async function listBundledPlugins() {
+  const dir = bundledPluginsDir();
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return []; // not shipped in this install, or running from an odd layout
+  }
+  const out = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !PLUGIN_DIR_NAME_RE.test(entry.name)) continue;
+    const pluginDir = join(dir, entry.name);
+    try {
+      const manifest = JSON.parse(await readFile(join(pluginDir, MANIFEST_FILENAME), 'utf8'));
+      out.push({ name: entry.name, dir: pluginDir, description: manifest.description || '', version: manifest.version });
+    } catch {
+      // A directory without a readable manifest is not offerable as a plugin.
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Copies a bundled plugin into the user's plugin directory.
+ *
+ * Refuses to overwrite: an installed plugin may have been edited, and silently
+ * replacing someone's changes with the shipped copy is worse than making them
+ * say so. `force` is the way to say so.
+ */
+export async function installBundledPlugin(name, { pluginsDir = null, force = false } = {}) {
+  if (!PLUGIN_DIR_NAME_RE.test(String(name || ''))) {
+    throw new PluginLoadError(`"${name}" is not a valid plugin name`);
+  }
+  const bundled = (await listBundledPlugins()).find(p => p.name === name);
+  if (!bundled) {
+    const available = (await listBundledPlugins()).map(p => p.name).join(', ') || 'none';
+    throw new PluginLoadError(`no bundled plugin named "${name}". Bundled: ${available}`);
+  }
+  const target = join(pluginsDir || resolvePluginsDir(), name);
+  if (existsSync(target) && !force) {
+    throw new PluginLoadError(`"${name}" is already installed at ${target}. Pass force to overwrite it.`);
+  }
+  await mkdir(dirname(target), { recursive: true });
+  await cp(bundled.dir, target, { recursive: true, force: true });
+  return { name, dir: target, version: bundled.version };
 }
 
 function resolvePluginsDir() {
