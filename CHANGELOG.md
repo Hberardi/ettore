@@ -8,6 +8,8 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-09-05
+
 ### Fixed — a machine that checked just before a release kept reporting itself current
 
 The version cache held one answer for six hours, but the two answers it can
