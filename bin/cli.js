@@ -39,7 +39,8 @@ program
   .option('--debug', 'Enable debug trace logs')
   .option('--verbose-tokens', 'Print per-turn input/output token counts and cumulative cost to stderr')
   .option('--no-update-check', 'Skip the npm version check at startup')
-  .option('--no-auto-update', 'Do not install a newer version automatically at startup')
+  .option('--auto-update', 'Install a newer version automatically at startup (off by default)')
+  .option('--no-auto-update', 'Never install automatically at startup')
   .argument('[prompt...]', 'Run a one-shot prompt (non-interactive)')
   .action(async (promptArgs, options) => {
     // ETTORE <version>. Print BEFORE the agent starts so the user can
@@ -63,9 +64,16 @@ program
       updateStatus = checkForUpdateSync();
     }
 
+    // Installing software is opt-in. Launching the CLI is not consent to
+    // replace it: the default now reports a newer version and leaves the
+    // decision, which is also the only posture under which a wrong "latest"
+    // costs a wrong banner rather than a wrong install.
+    // `--no-auto-update` still turns it off explicitly, and outranks the
+    // environment so a scripted run can refuse what a shell profile enabled.
+    const autoUpdateOptIn = options.autoUpdate === true
+      || (options.autoUpdate !== false && process.env.ETTORE_AUTO_UPDATE === '1');
     const autoUpdateWanted = options.updateCheck !== false
-      && options.autoUpdate !== false
-      && process.env.ETTORE_AUTO_UPDATE !== '0'
+      && autoUpdateOptIn
       && Boolean(process.stdout.isTTY)
       && !process.env.ETTORE_AUTO_UPDATE_DONE;
 
@@ -89,7 +97,7 @@ program
     // why the update cannot be applied to the session that discovers it.
     const autoPlan = planAutoUpdate({
       status: updateStatus,
-      enabled: options.autoUpdate !== false && process.env.ETTORE_AUTO_UPDATE !== '0',
+      enabled: autoUpdateOptIn,
     });
     if (autoPlan.run) {
       process.stdout.write(`↻ ETTORE ${autoPlan.from} → ${autoPlan.to}: installing…\n`);
@@ -116,13 +124,18 @@ program
         // prefix that needs sudo) leaves the working build in place.
         process.stderr.write(`${dim}auto-update skipped: ${error.message}${reset}\n`);
       }
-    } else if (updateStatus?.outdated) {
-      // Not updating automatically — fall back to telling the user.
+    } else if (updateStatus?.outdated || updateStatus?.deprecated) {
+      // Not updating automatically — fall back to telling the user. A
+      // deprecated release is worth saying out loud even when no newer
+      // version is published, so it is not gated on `outdated` alone.
       const banner = formatBanner(updateStatus);
       if (banner && process.stdout.isTTY) {
         process.stdout.write(`${banner}\n`);
       }
-      if (autoPlan.reason && options.debug) {
+      // Someone who asked for auto-update and did not get it is owed the
+      // reason without having to rerun under --debug; for everyone else this
+      // would just be noise about a feature they never turned on.
+      if (autoPlan.reason && (autoUpdateOptIn || options.debug)) {
         process.stderr.write(`${dim}auto-update: ${autoPlan.reason}${reset}\n`);
       }
     }

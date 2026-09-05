@@ -8,6 +8,70 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Changed — installing an update is opt-in
+
+Launching the CLI used to be enough to have it replace itself: on a terminal
+it made a blocking registry call, ran `npm install -g` before loading
+anything else, and re-executed into the new build. That is a lot of authority
+for the act of typing `ettore`, and it is only safe while the version it
+reads is trustworthy.
+
+It is not always trustworthy. A version cache found in the wild held npm's
+`request` metadata — `latest: "2.88.2"` and that package's deprecation notice
+— which the banner reported as ETTORE's own. Under the old default that
+number was one plausible digit away from triggering an install.
+
+Three changes, each of which alone would have stopped it:
+
+- The default now reports the new version and leaves the decision. `--auto-update` or `ETTORE_AUTO_UPDATE=1` restores the old behaviour; `--no-auto-update` and `ETTORE_AUTO_UPDATE=0` still turn it off, and outrank the environment.
+- A **new major version** is never installed automatically, even with the opt-in. A major bump is a declared breaking change, so it is taken deliberately with `ettore update` — the same rule that refuses a bogus 2.88.2 refuses a genuine 2.0.0.
+- The version cache now records which package it describes, and an entry naming a different package, or naming none, is discarded rather than believed. It costs one registry call, once, and heals itself.
+
+An opt-in that then refuses now says why without needing `--debug`.
+
+### Removed
+
+- `scripts/` — the loose dev scripts (`check-env`, `run-tests`, `verify-modules`, `git-status`, `desktop-live-preview`, `demo-desktop-windows`, `verify-patches`). Nothing in the package referenced them any more; `npm test`, `npm run check` and `npm run lint` cover what they did.
+
+## [1.2.4] — 2026-09-05
+
+### Fixed — the README told people to install the wrong package
+
+`npm install -g ettore` installs an unrelated dependency-injection container
+by another author. The package is `ettore-ai-assistant`, and since the npm
+page renders this README, that line was the first thing a prospective user
+read. The version badge was also frozen at 1.0.0.
+
+The README now documents the update behaviour as well: what the CLI does on
+its own, the three cases where it steps back and only tells you, and what a
+deprecation notice looks like.
+
+### Added — the CLI says when the version you are running is deprecated
+
+`npm deprecate` is the only channel a publisher has towards a copy that is
+already installed, but npm prints the message during an `npm install` and
+nowhere else. Someone who installed once and never reinstalled — exactly the
+person the message is aimed at — never saw it.
+
+Startup now reads the deprecation flag for the running version alongside the
+latest-version check (`npm view <pkg>@<version> deprecated`), caches it under
+the same six-hour TTL, and prints it above the upgrade line:
+
+```
+⚠ ETTORE 1.0.0 is deprecated: <the publisher's message>
+↻ A new version of ETTORE is available: 1.0.0 → 1.2.4. Run `ettore update` to upgrade.
+```
+
+The two calls are issued together, so the cold path still costs one round
+trip. The notice is cached against the version it describes, so the build
+that fixes the problem does not inherit the warning from the one it
+replaced. A deprecated release that is still the newest one published says
+so, instead of pointing at an `ettore update` that would do nothing.
+
+Note the limit: this reaches versions that ship this code, and no earlier
+ones. 1.0.0 and 1.1.x carry no version check at all, so nothing published
+today can make those installs speak up.
+
 ## [1.2.2] — 2026-09-05
 
 ### Fixed — the first launch after an install now updates itself

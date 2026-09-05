@@ -78,6 +78,13 @@ function readCache() {
     if (!existsSync(p)) return null;
     const raw = JSON.parse(readFileSync(p, 'utf8'));
     if (typeof raw !== 'object' || !raw) return null;
+    // An entry that does not name the package it describes, or names a
+    // different one, is not evidence about this package. This is not
+    // hypothetical: a cache in the wild held npm's `request` metadata —
+    // `latest: "2.88.2"` and that package's deprecation notice — which the
+    // banner then reported as ETTORE's own. Discarding costs one registry
+    // call, once, and the entry heals itself.
+    if (raw.name !== readLocalPackage().name) return null;
     return raw;
   } catch {
     return null;
@@ -87,7 +94,8 @@ function readCache() {
 function writeCache(entry) {
   try {
     mkdirSync(getCacheDir(), { recursive: true });
-    writeFileSync(getCachePath(), JSON.stringify({ ...entry, cachedAt: Date.now() }, null, 2));
+    const stamped = { name: readLocalPackage().name, ...entry, cachedAt: Date.now() };
+    writeFileSync(getCachePath(), JSON.stringify(stamped, null, 2));
   } catch {
     // Best-effort: a write failure should not block the user's session.
   }
@@ -151,6 +159,43 @@ export async function fetchLatestVersion({ timeoutMs = 8000 } = {}) {
   }
 }
 
+// Has the version we are RUNNING been deprecated on npm? `npm deprecate` is
+// the only channel a publisher has towards an install that is already on
+// disk, but npm itself only surfaces the message during an install — a user
+// who never reinstalls never sees it. Reading it here is what turns it into
+// something the running CLI can say out loud.
+//
+// Note the version-pinned spec: `npm view <pkg> deprecated` would answer for
+// the LATEST version, which is never the one we need.
+export async function fetchDeprecation(version, { timeoutMs = 8000 } = {}) {
+  const { name } = readLocalPackage();
+  if (!version) return null;
+  try {
+    const { stdout } = await execFileAsync(NPM_BIN, ['view', `${name}@${version}`, 'deprecated', '--json'], {
+      timeout: timeoutMs,
+      maxBuffer: 64 * 1024,
+      windowsHide: true,
+      ...SHELL_OPTS,
+    });
+    const trimmed = String(stdout || '').trim();
+    // Not deprecated: npm exits 0 and prints nothing at all.
+    if (!trimmed) return null;
+    const parsed = JSON.parse(trimmed);
+    // A version that was deprecated and then un-deprecated reports ''.
+    return typeof parsed === 'string' && parsed.trim() ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// The cached notice belongs to the version that was running when it was
+// written. After an update the same cache file is still on disk, so without
+// this guard the new version would keep repeating the old one's warning.
+function cachedDeprecation(cached, current) {
+  if (!cached?.deprecated) return null;
+  return cached.deprecatedFor === current ? cached.deprecated : null;
+}
+
 export async function checkForUpdate({ force = false, timeoutMs } = {}) {
   const { version: current } = readLocalPackage();
   if (!force) {
@@ -160,17 +205,31 @@ export async function checkForUpdate({ force = false, timeoutMs } = {}) {
         current,
         latest: cached.latest || current,
         outdated: isOutdated(current, cached.latest),
+        deprecated: cachedDeprecation(cached, current),
         fromCache: true,
         error: null,
       };
     }
   }
-  const latest = await fetchLatestVersion(timeoutMs ? { timeoutMs } : undefined);
+  const options = timeoutMs ? { timeoutMs } : undefined;
+  // Two calls, but issued together and at most once per CACHE_TTL_MS, so the
+  // cold path still costs one round trip rather than two.
+  const [latest, deprecated] = await Promise.all([
+    fetchLatestVersion(options),
+    fetchDeprecation(current, options),
+  ]);
   if (!latest) {
-    return { current, latest: null, outdated: false, fromCache: false, error: 'npm view failed' };
+    return { current, latest: null, outdated: false, deprecated, fromCache: false, error: 'npm view failed' };
   }
-  writeCache({ latest });
-  return { current, latest, outdated: isOutdated(current, latest), fromCache: false, error: null };
+  writeCache({ latest, deprecated, deprecatedFor: current });
+  return {
+    current,
+    latest,
+    outdated: isOutdated(current, latest),
+    deprecated,
+    fromCache: false,
+    error: null,
+  };
 }
 
 // Synchronous variant used by the CLI banner. Uses cached data only
@@ -183,31 +242,49 @@ export function checkForUpdateSync() {
   const { version: current } = readLocalPackage();
   const cached = readCache();
   if (!cached || !cached.latest) {
-    return { current, latest: null, outdated: false, fromCache: false, error: null };
+    return { current, latest: null, outdated: false, deprecated: null, fromCache: false, error: null };
   }
   if (Date.now() - Number(cached.cachedAt || 0) >= CACHE_TTL_MS) {
-    return { current, latest: null, outdated: false, fromCache: false, error: null };
+    return { current, latest: null, outdated: false, deprecated: null, fromCache: false, error: null };
   }
   return {
     current,
     latest: cached.latest,
     outdated: isOutdated(current, cached.latest),
+    deprecated: cachedDeprecation(cached, current),
     fromCache: true,
     error: null,
   };
 }
 
-// Build a short, single-line banner that the CLI can show under the
-// version line. ANSI colors are used so the outdated notification is
-// visible at a glance; the function returns plain text when stdout is
-// not a TTY.
+// Build the short banner the CLI shows under the version line. ANSI colors
+// make the notice visible at a glance; the function returns plain text when
+// stdout is not a TTY.
+//
+// A deprecated version gets its own line, in red and above the upgrade line:
+// "there is something newer" and "the thing you are running is no longer
+// supported" are different messages, and the second one is the one that
+// should make a user stop and read.
 export function formatBanner(status, { color = true } = {}) {
-  if (!status?.outdated) return null;
+  if (!status?.outdated && !status?.deprecated) return null;
   const useColor = color && process.stdout?.isTTY;
   const YELLOW = useColor ? '\x1b[33m' : '';
+  const RED = useColor ? '\x1b[31m' : '';
   const BOLD = useColor ? '\x1b[1m' : '';
   const RESET = useColor ? '\x1b[0m' : '';
-  return `${YELLOW}↻ A new version of ETTORE is available: ${status.current} → ${status.latest}. Run \`${BOLD}ettore update${RESET}${YELLOW}\` to upgrade.${RESET}`;
+
+  const lines = [];
+  if (status.deprecated) {
+    lines.push(`${RED}⚠ ETTORE ${status.current} is deprecated: ${status.deprecated}${RESET}`);
+  }
+  if (status.outdated) {
+    lines.push(`${YELLOW}↻ A new version of ETTORE is available: ${status.current} → ${status.latest}. Run \`${BOLD}ettore update${RESET}${YELLOW}\` to upgrade.${RESET}`);
+  } else if (status.deprecated) {
+    // Deprecated but already on the newest release: `ettore update` would be
+    // a no-op, so point at the message instead of a command that does nothing.
+    lines.push(`${YELLOW}↻ No newer version is published yet.${RESET}`);
+  }
+  return lines.join('\n');
 }
 
 // Run `npm install -g <pkg>@<version>` (or `@latest`). The output is
@@ -356,14 +433,36 @@ export function runUpdate({ target = 'latest', stream = true, force = false } = 
 // Decide whether the CLI should install a new release before the agent
 // starts. Every condition that makes this unsafe or pointless is a "skip",
 // never a failure: the user asked to run ETTORE, not to install software.
+/** Leading integer of a version, or null when it does not have one. */
+export function majorOf(value) {
+  const { core } = splitVersion(value);
+  return Number.isFinite(core[0]) && String(value || '').trim() ? core[0] : null;
+}
+
+/**
+ * Whether the gap between two versions is one to cross unattended.
+ *
+ * A major bump is a declared breaking change, so installing one because the
+ * user happened to launch the CLI is the wrong default however trustworthy
+ * the number looks — and the number is not always trustworthy: a cache
+ * holding another package's metadata proposed a jump from 1.2.4 to 2.88.2,
+ * which this refuses on the same rule that refuses a genuine 2.0.0.
+ */
+export function autoUpdateCrossesMajor(current, latest) {
+  const from = majorOf(current);
+  const to = majorOf(latest);
+  if (from === null || to === null) return false;
+  return to > from;
+}
+
 export function planAutoUpdate({
   status = null,
-  enabled = true,
+  enabled = false,
   isTTY = Boolean(process.stdout?.isTTY),
   alreadyRan = Boolean(process.env.ETTORE_AUTO_UPDATE_DONE),
   install = null,
 } = {}) {
-  if (!enabled) return { run: false, reason: 'auto-update is disabled' };
+  if (!enabled) return { run: false, reason: 'auto-update is off — run `ettore update`, or pass --auto-update' };
   // The caller re-executes into the new build; without this guard a build
   // that keeps reporting the old version would relaunch itself forever.
   if (alreadyRan) return { run: false, reason: 'already updated during this launch' };
@@ -372,6 +471,14 @@ export function planAutoUpdate({
   if (!status?.outdated || !status.latest) return { run: false, reason: 'no newer version is known yet' };
   const info = install || describeInstall();
   if (!info.updatable) return { run: false, reason: info.reason };
+  if (autoUpdateCrossesMajor(status.current, status.latest)) {
+    return {
+      run: false,
+      from: status.current,
+      to: status.latest,
+      reason: `${status.latest} is a new major version — run \`ettore update\` to take it deliberately`,
+    };
+  }
   return { run: true, from: status.current, to: status.latest, reason: null };
 }
 

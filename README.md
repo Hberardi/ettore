@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.2.4-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
 </p>
@@ -28,11 +28,15 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 
 ```bash
 # Install globally
-npm install -g ettore
+npm install -g ettore-ai-assistant
 
 # Verify installation
 ettore --version
 ```
+
+The package is published as `ettore-ai-assistant`; the command it installs is
+`ettore`. (`npm install -g ettore` fetches an unrelated package by another
+author.)
 
 ### Option 2: From source
 
@@ -44,6 +48,50 @@ cd ettore-cli
 chmod +x install.sh
 ./install.sh
 ```
+
+## Staying up to date
+
+At startup ETTORE asks npm whether a newer release exists — at most once
+every six hours, cached in `~/.config/ettore/version-cache.json` — and tells
+you when there is one:
+
+```
+↻ A new version of ETTORE is available: 1.2.3 → 1.2.4. Run `ettore update` to upgrade.
+```
+
+Upgrading is yours to run. `ettore update` performs it on demand, and
+`--no-update-check` skips the npm call altogether.
+
+### Updating automatically
+
+If you would rather ETTORE install a new release itself, pass `--auto-update`
+or set `ETTORE_AUTO_UPDATE=1`. It then installs and restarts into the new
+build before running your command:
+
+```
+ettore 1.2.3
+↻ ETTORE 1.2.3 → 1.2.4: installing…
+✓ 1.2.4 installed — restarting
+ettore 1.2.4
+```
+
+Even when you have asked for it, the install is skipped — and ETTORE tells
+you about the new version instead — when:
+
+- the new release is a **new major version**. A major bump is a declared breaking change, so it is taken deliberately with `ettore update`, never on a launch.
+- stdout is not a terminal: a pipe, a script, a CI job. Nothing is installed behind your back.
+- you passed `--no-auto-update`, or set `ETTORE_AUTO_UPDATE=0`. Either one overrides the environment, so a scripted run can refuse what a shell profile enabled.
+- you are running a git checkout, where `npm install -g` would replace your link. Use `git pull`.
+
+If the release you are running has been **deprecated** on npm, ETTORE says so
+at startup, quoting the publisher's own message:
+
+```
+⚠ ETTORE 1.2.3 is deprecated: <the message the publisher set>
+```
+
+npm itself only shows that during an install, so a copy that was installed
+once and never reinstalled would otherwise never hear about it.
 
 ## Quick Start
 

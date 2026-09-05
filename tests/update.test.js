@@ -62,7 +62,7 @@ test('formatBanner includes the version bump and the update hint', () => {
 // Node script (portable, no shell quirks) that prints the given JSON
 // version and exits 0. Returns the bin dir so the caller can prepend
 // it to PATH.
-function installFakeNpm(tmp, version = '9.9.9') {
+function installFakeNpm(tmp, version = '9.9.9', { deprecated = null } = {}) {
   const binDir = join(tmp, 'bin');
   mkdirSync(binDir, { recursive: true });
   // On Windows the file extension matters: npm.cmd is matched by
@@ -70,12 +70,25 @@ function installFakeNpm(tmp, version = '9.9.9') {
   // file with a Node shebang works.
   const shimName = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const shim = join(binDir, shimName);
-  // The JSON `npm view <pkg> version --json` produces is a JSON
-  // string literal, e.g. `"1.0.0"`. Mirror that exactly.
-  const body = process.platform === 'win32'
-    ? `@echo off\r\necho "${version}"\r\nexit /b 0\r\n`
-    : `#!/usr/bin/env node\nconsole.log('"${version}"');\nprocess.exit(0);\n`;
-  writeFileSync(shim, body);
+  // `npm view <pkg> version --json` prints a JSON string literal, e.g.
+  // `"1.0.0"`. `npm view <pkg>@<v> deprecated --json` prints the message
+  // the same way — or NOTHING AT ALL when the version is not deprecated.
+  // Both shapes matter here, so the shim branches on the field asked for.
+  const logic = 'const args = process.argv.slice(2);\n'
+    + "if (args.includes('deprecated')) {\n"
+    + `  ${deprecated === null ? '' : `console.log(${JSON.stringify(JSON.stringify(deprecated))});`}\n`
+    + '  process.exit(0);\n'
+    + '}\n'
+    + `console.log('"${version}"');\n`
+    + 'process.exit(0);\n';
+  // Windows cmd cannot express that branching without quoting pain, so the
+  // .cmd is a one-liner handing its arguments to the same Node script.
+  if (process.platform === 'win32') {
+    writeFileSync(join(binDir, 'npm-shim.js'), logic);
+    writeFileSync(shim, '@echo off\r\nnode "%~dp0npm-shim.js" %*\r\n');
+  } else {
+    writeFileSync(shim, `#!/usr/bin/env node\n${logic}`);
+  }
   // Use fs.chmodSync (a syscall) instead of shelling out to chmod —
   // the latter fails when the test runner runs in a stripped-down
   // PATH, and the empty catch hides the real error.
@@ -124,6 +137,9 @@ test('checkForUpdateSync respects the cache and skips npm', () => {
   try {
     mkdirSync(tmp, { recursive: true });
     writeFileSync(join(tmp, 'version-cache.json'), JSON.stringify({
+      // The cache names the package it describes; an entry without it, or
+      // for another package, is discarded rather than believed.
+      name: update.readLocalPackage().name,
       cachedAt: Date.now(),
       latest: '999.0.0',
     }));
@@ -282,7 +298,9 @@ test('globalPackageDir points at the prefix npm installs into', () => {
 
 test('planAutoUpdate only runs when it is safe and useful', () => {
   const status = { current: '1.2.0', latest: '1.3.0', outdated: true };
-  const ok = { status, isTTY: true, alreadyRan: false, install: { updatable: true } };
+  // `enabled` is no longer the default: installing is opt-in, so the fixture
+  // that expects a run has to ask for one.
+  const ok = { status, enabled: true, isTTY: true, alreadyRan: false, install: { updatable: true } };
 
   assert.equal(update.planAutoUpdate(ok).run, true);
   assert.equal(update.planAutoUpdate({ ...ok, enabled: false }).run, false);
@@ -314,7 +332,9 @@ test('checkForUpdate forwards a timeout to the registry call', async () => {
   // the budget has to actually reach `npm view`, or a slow registry stalls
   // the launch it was meant to keep snappy.
   const text = readFileSync(resolve(REPO_ROOT, 'src/cli/update.js'), 'utf8');
-  assert.match(text, /fetchLatestVersion\(timeoutMs \? \{ timeoutMs \} : undefined\)/);
+  assert.match(text, /const options = timeoutMs \? \{ timeoutMs \} : undefined/);
+  assert.match(text, /fetchLatestVersion\(options\)/);
+  assert.match(text, /fetchDeprecation\(current, options\)/);
   assert.equal(typeof update.COLD_CHECK_TIMEOUT_MS, 'number');
   assert.ok(update.COLD_CHECK_TIMEOUT_MS <= 5000, 'startup must never block for long');
 });
@@ -330,4 +350,128 @@ test('bin/cli.js refreshes a cold cache before deciding to auto-update', () => {
     text.indexOf('describeInstall().updatable') < text.indexOf('await checkForUpdate({ timeoutMs'),
     'the checkout guard must be evaluated before the blocking call',
   );
+});
+
+// ---------------------------------------------------------------------------
+// Deprecation notices.
+//
+// `npm deprecate` is the publisher's only way to reach an install that is
+// already on disk, but npm only prints the message during an install. These
+// cover reading it at startup instead, so a user who never reinstalls still
+// hears about it.
+// ---------------------------------------------------------------------------
+
+test('fetchDeprecation returns null when the version is not deprecated', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ettore-version-'));
+  const binDir = installFakeNpm(tmp, '9.9.9'); // no deprecation: npm prints nothing
+  const savedPath = process.env.PATH;
+  try {
+    process.env.PATH = `${binDir}${process.platform === 'win32' ? ';' : ':'}${savedPath || ''}`;
+    assert.equal(await update.fetchDeprecation('1.0.0', { timeoutMs: 5000 }), null);
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fetchDeprecation returns the message npm has on file', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ettore-version-'));
+  const message = 'Old release: run npm i -g ettore-ai-assistant@latest';
+  const binDir = installFakeNpm(tmp, '9.9.9', { deprecated: message });
+  const savedPath = process.env.PATH;
+  try {
+    process.env.PATH = `${binDir}${process.platform === 'win32' ? ';' : ':'}${savedPath || ''}`;
+    assert.equal(await update.fetchDeprecation('1.0.0', { timeoutMs: 5000 }), message);
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('fetchDeprecation ignores an empty message from an un-deprecated version', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ettore-version-'));
+  // `npm deprecate <pkg>@<range> ""` leaves the field present but empty.
+  const binDir = installFakeNpm(tmp, '9.9.9', { deprecated: '' });
+  const savedPath = process.env.PATH;
+  try {
+    process.env.PATH = `${binDir}${process.platform === 'win32' ? ';' : ':'}${savedPath || ''}`;
+    assert.equal(await update.fetchDeprecation('1.0.0', { timeoutMs: 5000 }), null);
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('formatBanner warns about a deprecated version above the upgrade line', () => {
+  const text = update.formatBanner({
+    current: '1.0.0',
+    latest: '1.2.3',
+    outdated: true,
+    deprecated: 'Old release: upgrade',
+  }, { color: false });
+  const lines = text.split('\n');
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].includes('deprecated'), 'the deprecation comes first');
+  assert.ok(lines[0].includes('Old release: upgrade'));
+  assert.ok(lines[0].includes('1.0.0'));
+  assert.ok(lines[1].includes('ettore update'));
+});
+
+test('formatBanner still warns when a deprecated version is the newest one', () => {
+  // Nothing newer to install: pointing at `ettore update` would be a lie.
+  const text = update.formatBanner({
+    current: '1.2.3',
+    latest: '1.2.3',
+    outdated: false,
+    deprecated: 'Unsupported build',
+  }, { color: false });
+  assert.ok(text.includes('Unsupported build'));
+  assert.ok(!text.includes('ettore update'));
+});
+
+test('checkForUpdateSync surfaces a cached deprecation for the running version', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ettore-version-'));
+  const savedConfig = process.env.ETTORE_CONFIG_DIR;
+  try {
+    process.env.ETTORE_CONFIG_DIR = tmp;
+    writeFileSync(join(tmp, 'version-cache.json'), JSON.stringify({
+      name: update.readLocalPackage().name,
+      cachedAt: Date.now(),
+      latest: '999.0.0',
+      deprecated: 'Old release: upgrade',
+      deprecatedFor: update.readLocalPackage().version,
+    }));
+    const status = update.checkForUpdateSync();
+    assert.equal(status.deprecated, 'Old release: upgrade');
+  } finally {
+    if (savedConfig === undefined) delete process.env.ETTORE_CONFIG_DIR;
+    else process.env.ETTORE_CONFIG_DIR = savedConfig;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a deprecation cached for another version is not repeated after an update', () => {
+  // The cache file survives the upgrade that fixes the problem; without the
+  // version guard the new build would keep shouting the old build's warning.
+  const tmp = mkdtempSync(join(tmpdir(), 'ettore-version-'));
+  const savedConfig = process.env.ETTORE_CONFIG_DIR;
+  try {
+    process.env.ETTORE_CONFIG_DIR = tmp;
+    writeFileSync(join(tmp, 'version-cache.json'), JSON.stringify({
+      cachedAt: Date.now(),
+      latest: '999.0.0',
+      deprecated: 'Old release: upgrade',
+      deprecatedFor: '0.0.1-something-else',
+    }));
+    assert.equal(update.checkForUpdateSync().deprecated, null);
+  } finally {
+    if (savedConfig === undefined) delete process.env.ETTORE_CONFIG_DIR;
+    else process.env.ETTORE_CONFIG_DIR = savedConfig;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('bin/cli.js shows the banner for a deprecated version, not only an outdated one', () => {
+  const text = readFileSync(resolve(REPO_ROOT, 'bin/cli.js'), 'utf8');
+  assert.match(text, /updateStatus\?\.outdated \|\| updateStatus\?\.deprecated/);
 });
