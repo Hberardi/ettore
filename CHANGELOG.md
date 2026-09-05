@@ -8,6 +8,8 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.3.7] — 2026-09-06
+
 ### Added — a git checkout now updates itself at startup, like an npm install does
 
 1.3.6 taught `ettore update` to fast-forward a checkout, but only when asked.

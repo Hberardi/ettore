@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.6-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.3.7-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
 </p>
@@ -112,7 +112,27 @@ when:
 - the new release is a **new major version**. A major bump is a declared breaking change, so it is taken deliberately with `ettore update`, never on a launch.
 - stdout is not a terminal: a pipe, a script, a CI job. Nothing is installed behind your back.
 - you passed `--no-auto-update`, or set `ETTORE_AUTO_UPDATE=0`. The flag outranks the environment, so a scripted run can refuse what a shell profile enabled.
-- you are running a git checkout, where `npm install -g` would replace your link. Use `git pull`.
+- you are running a git checkout **with uncommitted work, or on a branch that tracks no remote**. A checkout is never updated through npm — that would replace your link with a registry copy — so it is fast-forwarded with git instead (below).
+
+### A git checkout updates itself too
+
+A development checkout used to have no automatic path at all: npm was refused,
+correctly, and nothing took its place, so a linked install quietly stayed on
+whatever commit it was on. It now takes the update that actually fits it —
+`git pull --ff-only` — before anything else loads, then restarts into it:
+
+```
+ettore 1.3.6
+↻ checkout fast-forwarded — restarting
+ettore 1.3.7
+```
+
+Only when it is safe: a **clean** tree, on a branch that **tracks a remote**,
+and **fast-forward only**, so no local commit can be lost and nothing is ever
+pulled over work in progress. Untracked files don't count — a working
+directory always has some. The pull is bounded (6s at startup, 12s on Windows),
+so an unreachable remote costs a pause, not a hang, and `--no-auto-update` /
+`ETTORE_AUTO_UPDATE=0` turn it off like everything else.
 
 If the release you are running has been **deprecated** on npm, ETTORE says so
 at startup, quoting the publisher's own message:
