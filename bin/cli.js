@@ -14,6 +14,8 @@ import {
   formatBanner,
   planAutoUpdate,
   runUpdate,
+  describeCheckout,
+  pullCheckout,
 } from '../src/cli/update.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -246,10 +248,27 @@ program
     const reset = process.stdout.isTTY ? '\x1b[0m' : '';
     const install = describeInstall();
     if (!install.updatable && !options.force) {
-      // Refuse rather than replace a development checkout with a registry
-      // copy — the command would "succeed" and disconnect the CLI from the
-      // repo it is linked to.
+      // A checkout is still refused an npm install — that would replace the
+      // link with a registry copy — but refusing used to be the whole answer,
+      // which left a development machine with no update path at all. The
+      // update for a checkout is a fast-forward, so do that.
+      const checkout = describeCheckout();
+      if (checkout.pullable) {
+        process.stdout.write(`Updating the checkout at ${install.root} (git pull --ff-only)…\n`);
+        const pulled = await pullCheckout();
+        process.stdout.write(`${pulled.output || '(no output)'}\n`);
+        if (!pulled.ok) {
+          process.stderr.write(`${dim}The pull failed; the checkout is unchanged.${reset}\n`);
+          process.exit(1);
+        }
+        const after = readLocalPackage().version;
+        process.stdout.write(pulled.changed
+          ? `✓ Now on ${after}. Restart ETTORE to run it.\n`
+          : `Already current (${after}).\n`);
+        return;
+      }
       process.stderr.write(`${install.reason}\n`);
+      if (checkout.reason) process.stderr.write(`${dim}Cannot pull either: ${checkout.reason}.${reset}\n`);
       process.stderr.write(`${dim}Pass --force if you really want to install the published build over it.${reset}\n`);
       process.exit(1);
     }

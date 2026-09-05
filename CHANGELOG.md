@@ -8,6 +8,27 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.3.6] — 2026-09-06
+
+### Fixed — `ettore update` now updates a git checkout instead of only refusing
+
+A checkout is refused an npm install for a good reason: it would replace the
+link with a registry copy and disconnect the CLI from the repo it serves. But
+refusing was the whole answer, so a development machine had no update path at
+all — it never moved, and every report said it was fine.
+
+`ettore update` on a checkout now runs `git pull --ff-only`, which is what
+updating a checkout means. When it cannot, it says which of the two reasons
+applies rather than printing a generic refusal:
+
+```
+Cannot pull either: branch "feature-x" tracks no remote, so there is nothing
+to pull from; the working tree has uncommitted changes.
+```
+
+Untracked files do not count against it — a working directory always has some.
+Only tracked modifications hold a fast-forward back.
+
 ## [1.3.5] — 2026-09-06
 
 ### Fixed — a git checkout was told a check had failed that was never run

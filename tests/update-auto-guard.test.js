@@ -282,3 +282,57 @@ test('a git checkout is not told a check failed that never ran', async () => {
   // And it must not be reachable from the plain "wanted" flag any more.
   assert.doesNotMatch(src, /else if \(autoUpdateWanted && !updateStatus\?\.latest\)/);
 });
+
+// ── A checkout has an update path too ───────────────────────────────────────
+
+test('describeCheckout reports whether a fast-forward is possible, and why not', async () => {
+  const { mkdtempSync: mk } = await import('node:fs');
+  const { execFileSync } = await import('node:child_process');
+  const dir = mk(join(tmpdir(), 'ettore-checkout-'));
+  const git = (...args) => execFileSync('git', args, {
+    cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@e.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@e.com', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
+  });
+  try {
+    git('init', '-q', '-b', 'main');
+    writeFileSync(join(dir, 'a.txt'), 'x');
+    git('add', '-A'); git('commit', '-q', '-m', 'first');
+
+    const state = update.describeCheckout({ root: dir });
+    assert.equal(state.isCheckout, true);
+    assert.equal(state.branch, 'main');
+    // No remote: a checkout that cannot pull has to say so rather than fail
+    // with a generic refusal.
+    assert.equal(state.pullable, false);
+    assert.match(state.reason, /tracks no remote/);
+
+    // Untracked files must not count as a reason to hold back — a working
+    // directory always has some.
+    writeFileSync(join(dir, 'scratch.log'), 'noise');
+    assert.equal(update.describeCheckout({ root: dir }).clean, true);
+
+    // A tracked modification does.
+    writeFileSync(join(dir, 'a.txt'), 'changed');
+    assert.equal(update.describeCheckout({ root: dir }).clean, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('describeCheckout says plainly when it is not a checkout at all', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ettore-notgit-'));
+  try {
+    assert.deepEqual(update.describeCheckout({ root: dir }), { isCheckout: false });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the update command pulls on a checkout instead of only refusing', () => {
+  // Refusing used to be the whole answer, which left a development machine
+  // with no update path at all.
+  const src = readFileSync(new URL('../bin/cli.js', import.meta.url), 'utf8');
+  assert.match(src, /if \(checkout\.pullable\)/);
+  assert.match(src, /git pull --ff-only/);
+  assert.match(src, /Cannot pull either/);
+});

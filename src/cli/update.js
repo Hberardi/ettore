@@ -404,6 +404,52 @@ export function describeInstall({ root = ROOT } = {}) {
 // Anything else is refused: on Windows these arguments reach cmd.exe.
 const SAFE_TARGET_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/**
+ * Whether a git checkout can update itself, and how.
+ *
+ * A checkout is refused an npm install for good reason — it would replace the
+ * link with a registry copy — but that left it with no automatic path at all,
+ * so a development machine silently never moved while everything reported
+ * itself fine. `git pull --ff-only` is the update for a checkout, and it is
+ * safe exactly when the tree is clean and the branch tracks something.
+ */
+export function describeCheckout({ root = ROOT } = {}) {
+  const run = (args) => {
+    try {
+      return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch { return null; }
+  };
+  if (!existsSync(join(root, '.git'))) return { isCheckout: false };
+  const branch = run(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const upstream = run(['rev-parse', '--abbrev-ref', '@{upstream}']);
+  // Untracked files do not block a fast-forward, and a working directory
+  // always has some — scratch files, local notes. Only tracked modifications
+  // count as a reason to hold back.
+  const dirty = run(['status', '--porcelain', '--untracked-files=no']);
+  const reasons = [];
+  if (!upstream) reasons.push(`branch "${branch || '?'}" tracks no remote, so there is nothing to pull from`);
+  if (dirty) reasons.push('the working tree has uncommitted changes');
+  return {
+    isCheckout: true,
+    branch,
+    upstream,
+    clean: !dirty,
+    pullable: Boolean(upstream) && !dirty,
+    reason: reasons.join('; ') || null,
+  };
+}
+
+/** `git pull --ff-only` on a checkout that can take one. */
+export function pullCheckout({ root = ROOT } = {}) {
+  return new Promise((resolvePull) => {
+    execFile('git', ['pull', '--ff-only'], { cwd: root }, (error, stdout, stderr) => {
+      const output = `${stdout || ''}${stderr || ''}`.trim();
+      if (error) { resolvePull({ ok: false, output: output || error.message }); return; }
+      resolvePull({ ok: true, output, changed: !/Already up to date/i.test(output) });
+    });
+  });
+}
+
 export function runUpdate({ target = 'latest', stream = true, force = false } = {}) {
   const { name, version: before } = readLocalPackage();
   return new Promise((resolveUpdate, reject) => {
