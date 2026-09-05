@@ -39,7 +39,7 @@ program
   .option('--debug', 'Enable debug trace logs')
   .option('--verbose-tokens', 'Print per-turn input/output token counts and cumulative cost to stderr')
   .option('--no-update-check', 'Skip the npm version check at startup')
-  .option('--auto-update', 'Install a newer version automatically at startup (off by default)')
+  .option('--auto-update', 'Install a newer version automatically at startup (the default)')
   .option('--no-auto-update', 'Never install automatically at startup')
   .argument('[prompt...]', 'Run a one-shot prompt (non-interactive)')
   .action(async (promptArgs, options) => {
@@ -64,14 +64,18 @@ program
       updateStatus = checkForUpdateSync();
     }
 
-    // Installing software is opt-in. Launching the CLI is not consent to
-    // replace it: the default now reports a newer version and leaves the
-    // decision, which is also the only posture under which a wrong "latest"
-    // costs a wrong banner rather than a wrong install.
-    // `--no-auto-update` still turns it off explicitly, and outranks the
-    // environment so a scripted run can refuse what a shell profile enabled.
-    const autoUpdateOptIn = options.autoUpdate === true
-      || (options.autoUpdate !== false && process.env.ETTORE_AUTO_UPDATE === '1');
+    // On by default. 1.3.0 made it opt-in, on the strength of a poisoned
+    // version cache that had claimed the latest release was `2.88.2` — but two
+    // other guards shipped in that same release, and either one alone stops
+    // that: the cache now names the package it describes, and a new major is
+    // never installed unattended. The opt-in was a third net over a hazard
+    // already caught twice, and its cost was the thing the feature exists for:
+    // an install that has to be told to update is one that stays behind.
+    // `--no-auto-update` and ETTORE_AUTO_UPDATE=0 still turn it off, and a
+    // flag outranks the environment so a scripted run can refuse what a shell
+    // profile enabled.
+    const autoUpdateOptIn = options.autoUpdate !== false
+      && process.env.ETTORE_AUTO_UPDATE !== '0';
     const autoUpdateWanted = options.updateCheck !== false
       && autoUpdateOptIn
       && Boolean(process.stdout.isTTY)

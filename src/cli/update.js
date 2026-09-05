@@ -481,12 +481,12 @@ export function autoUpdateCrossesMajor(current, latest) {
 
 export function planAutoUpdate({
   status = null,
-  enabled = false,
+  enabled = true,
   isTTY = Boolean(process.stdout?.isTTY),
   alreadyRan = Boolean(process.env.ETTORE_AUTO_UPDATE_DONE),
   install = null,
 } = {}) {
-  if (!enabled) return { run: false, reason: 'auto-update is off — run `ettore update`, or pass --auto-update' };
+  if (!enabled) return { run: false, reason: 'auto-update is disabled — run `ettore update` to upgrade' };
   // The caller re-executes into the new build; without this guard a build
   // that keeps reporting the old version would relaunch itself forever.
   if (alreadyRan) return { run: false, reason: 'already updated during this launch' };

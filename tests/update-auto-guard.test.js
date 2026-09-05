@@ -26,28 +26,29 @@ function withConfigDir(fn) {
 
 // ── Opt-in ───────────────────────────────────────────────────────────────────
 
-test('auto-update does nothing unless it was asked for', () => {
+test('a routine upgrade installs itself, which is the point of the feature', () => {
+  // An install that has to be told to update is one that stays behind. 1.3.0
+  // made this opt-in and broke the chain; the guards below are what make the
+  // default safe, not the asking.
   const plan = update.planAutoUpdate({
-    status: status('1.2.4', '1.3.0'),
+    status: status('1.2.4', '1.3.2'),
+    isTTY: true,
+    alreadyRan: false,
+    install: updatable,
+  });
+  assert.deepEqual(plan, { run: true, from: '1.2.4', to: '1.3.2', reason: null });
+});
+
+test('turning it off is still honoured, and says what to run instead', () => {
+  const plan = update.planAutoUpdate({
+    status: status('1.2.4', '1.3.2'),
+    enabled: false,
     isTTY: true,
     alreadyRan: false,
     install: updatable,
   });
   assert.equal(plan.run, false);
-  // The reason has to name the way forward, since this is the default path
-  // every user takes.
   assert.match(plan.reason, /ettore update/);
-});
-
-test('an explicit opt-in still installs a routine upgrade', () => {
-  const plan = update.planAutoUpdate({
-    status: status('1.2.4', '1.3.0'),
-    enabled: true,
-    isTTY: true,
-    alreadyRan: false,
-    install: updatable,
-  });
-  assert.deepEqual(plan, { run: true, from: '1.2.4', to: '1.3.0', reason: null });
 });
 
 // ── Major-version guard ──────────────────────────────────────────────────────
@@ -66,16 +67,19 @@ test('a major version is never installed behind the user', () => {
   assert.equal(plan.to, '2.0.0');
 });
 
-test('the guard covers the bogus jump that started this', () => {
-  // A cache holding another package's metadata proposed 1.2.4 → 2.88.2.
+test('the guard covers the bogus jump that started this, on the default path', () => {
+  // A cache holding another package's metadata proposed 1.2.4 → 2.88.2. With
+  // auto-update on by default again, this guard is one of the two things
+  // standing between that entry and an install, so it is tested without an
+  // explicit opt-in.
   const plan = update.planAutoUpdate({
     status: status('1.2.4', '2.88.2'),
-    enabled: true,
     isTTY: true,
     alreadyRan: false,
     install: updatable,
   });
   assert.equal(plan.run, false);
+  assert.match(plan.reason, /major version/);
 });
 
 test('autoUpdateCrossesMajor answers only what it can', () => {

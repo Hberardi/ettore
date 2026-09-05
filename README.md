@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.3.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
 </p>
@@ -93,14 +93,8 @@ is nothing newer" is kept for thirty, because that is the answer a release
 makes wrong the moment it is published. `ettore update` never reads the cache
 at all, so it takes a release as soon as it lands.
 
-Upgrading is yours to run. `ettore update` performs it on demand, and
-`--no-update-check` skips the npm call altogether.
-
-### Updating automatically
-
-If you would rather ETTORE install a new release itself, pass `--auto-update`
-or set `ETTORE_AUTO_UPDATE=1`. It then installs and restarts into the new
-build before running your command:
+ETTORE then installs it and restarts into the new build before running your
+command, so an install stays current without being told to:
 
 ```
 ettore 1.2.3
@@ -109,12 +103,15 @@ ettore 1.2.3
 ettore 1.2.4
 ```
 
-Even when you have asked for it, the install is skipped — and ETTORE tells
-you about the new version instead — when:
+`ettore update` does the same thing on demand, and `--no-update-check` skips
+the npm call altogether.
+
+The install is skipped — and ETTORE tells you about the new version instead —
+when:
 
 - the new release is a **new major version**. A major bump is a declared breaking change, so it is taken deliberately with `ettore update`, never on a launch.
 - stdout is not a terminal: a pipe, a script, a CI job. Nothing is installed behind your back.
-- you passed `--no-auto-update`, or set `ETTORE_AUTO_UPDATE=0`. Either one overrides the environment, so a scripted run can refuse what a shell profile enabled.
+- you passed `--no-auto-update`, or set `ETTORE_AUTO_UPDATE=0`. The flag outranks the environment, so a scripted run can refuse what a shell profile enabled.
 - you are running a git checkout, where `npm install -g` would replace your link. Use `git pull`.
 
 If the release you are running has been **deprecated** on npm, ETTORE says so

@@ -8,6 +8,33 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-09-05
+
+### Changed — updates install themselves again
+
+1.3.0 made automatic installation opt-in. That was the wrong call and this
+reverses it.
+
+The reasoning was a poisoned version cache that had claimed the latest release
+was `2.88.2` — another package's metadata entirely — and under the old default
+that was one plausible digit from being installed. But two other guards shipped
+in the same release, and **either one alone stops it**: the cache now records
+which package it describes, so that entry is discarded unread, and a new major
+version is never installed unattended, so 1.2.4 → 2.88.2 is refused even with
+the feature fully on.
+
+The opt-in was a third net over a hazard already caught twice, and it cost the
+thing the feature exists for. An install that has to be told to update is one
+that stays behind: every machine running 1.3.0 or 1.3.1 stopped following
+releases and needs one manual `ettore update` to rejoin.
+
+Installs on 1.2.x were never affected — they still carry the old default and
+will pick this up on their own, and keep following from here.
+
+`--no-auto-update` and `ETTORE_AUTO_UPDATE=0` still turn it off, and the flag
+outranks the environment. The major-version guard stays: a 2.0.0 will still
+wait for a deliberate `ettore update`.
+
 ### Fixed — the update banner named a command that refuses where it was printed
 
 On a git checkout the banner said "Run `ettore update` to upgrade", and
