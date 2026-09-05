@@ -10,6 +10,16 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [1.3.1] — 2026-09-05
 
+### Fixed — the README described behaviour the code no longer had
+
+npm renders this file as the package page, so a stale claim there is the first
+thing a prospective user reads. Three had gone out of date: the skill cap (two,
+now three), and two of the three stated limitations of the Claude Code
+transport — prompt caching does apply to it (12,300 of ~12,306 prompt tokens
+came back as a cache read on a warm turn) and the output ceiling is now set,
+and overridable. The skills section also now says the thing that decides
+whether a skill fires at all: write `triggers`, in the language you prompt in.
+
 ### Fixed — a machine that checked just before a release kept reporting itself current
 
 The version cache held one answer for six hours, but the two answers it can

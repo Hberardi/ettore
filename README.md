@@ -80,13 +80,18 @@ asking Claude 3 for 8192 is a rejected request rather than a longer answer.
 
 ## Staying up to date
 
-At startup ETTORE asks npm whether a newer release exists — at most once
-every six hours, cached in `~/.config/ettore/version-cache.json` — and tells
-you when there is one:
+At startup ETTORE asks npm whether a newer release exists and tells you when
+there is one:
 
 ```
-↻ A new version of ETTORE is available: 1.2.3 → 1.2.4. Run `ettore update` to upgrade.
+↻ A new version of ETTORE is available: 1.3.0 → 1.3.1. Run `ettore update` to upgrade.
 ```
+
+The answer is cached in `~/.config/ettore/version-cache.json`. A known newer
+version is kept for six hours, since re-asking about it changes nothing; "there
+is nothing newer" is kept for thirty, because that is the answer a release
+makes wrong the moment it is published. `ettore update` never reads the cache
+at all, so it takes a release as soon as it lands.
 
 Upgrading is yours to run. `ettore update` performs it on demand, and
 `--no-update-check` skips the npm call altogether.
@@ -222,8 +227,18 @@ enabled: true
 Check validation, compatibility, and focused regression tests.
 ```
 
-ETTORE activates at most two matching skills per turn and keeps the base
-safety rules and tool permissions higher priority than skill instructions.
+`triggers` are worth writing, and worth writing in the language you type your
+prompts in. They are matched as substrings and weigh more than anything
+inferred from the description, so they are what makes a skill fire reliably; a
+skill with none depends on your prompt happening to reuse the words of its
+description. A skill named in English will not match an Italian prompt on its
+name alone.
+
+ETTORE activates at most three matching skills per turn and keeps the base
+safety rules and tool permissions higher priority than skill instructions. The
+sidebar names the skills a prompt activated, or says `none of N` — a turn that
+ran without the guidance you expected otherwise looks exactly like one that ran
+with it.
 
 ## Mission Control
 
@@ -370,9 +385,12 @@ replace them. On a headless machine, `claude setup-token` or
 `CLAUDE_CODE_OAUTH_TOKEN` work too; point `ETTORE_CLAUDE_BIN` at the binary if
 it is not on `PATH`.
 
-Limitations of this transport, compared with an API key: no prompt caching
-(each turn re-sends the transcript to a fresh headless session), no
-`temperature`/`max_tokens` control, and image attachments are dropped.
+Compared with an API key, this transport drops image attachments and offers no
+`temperature` control. Prompt caching does apply despite each turn being a
+fresh headless session: measured on a warm turn, 12,300 of ~12,306 prompt
+tokens came back as a cache read. The output ceiling is set for you and can be
+overridden with `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, and `effort` is passed through
+to the CLI on models that accept it.
 
 ## Requirements
 
