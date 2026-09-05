@@ -89,7 +89,9 @@ program
     // lifetime rather than per launch, and only when the answer could
     // actually be acted on — a checkout is asked first, so a dev copy never
     // pays for a call whose result it would refuse anyway.
+    let coldCheckRan = false;
     if (autoUpdateWanted && !updateStatus?.latest && describeInstall().updatable) {
+      coldCheckRan = true;
       updateStatus = await checkForUpdate({ timeoutMs: COLD_CHECK_TIMEOUT_MS });
     }
 
@@ -128,12 +130,17 @@ program
         // prefix that needs sudo) leaves the working build in place.
         process.stderr.write(`${dim}auto-update skipped: ${error.message}${reset}\n`);
       }
-    } else if (autoUpdateWanted && !updateStatus?.latest) {
-      // The check was wanted and came back with nothing — a slow npm, no
-      // network, a registry that did not answer. Both branches below need a
-      // version to talk about, so this used to fall through to silence: no
-      // update, no banner, no reason. "I could not tell" is a different thing
-      // from "you are up to date", and only one of them is true here.
+    } else if (coldCheckRan && !updateStatus?.latest) {
+      // A check that ran and came back with nothing — a slow npm, no network,
+      // a registry that did not answer. Both branches below need a version to
+      // talk about, so this used to fall through to silence: no update, no
+      // banner, no reason. "I could not tell" is a different thing from "you
+      // are up to date", and only one of them is true here.
+      //
+      // Gated on the check having actually run. Without that it also fired on
+      // a git checkout, where the check is deliberately skipped — announcing a
+      // failure that never happened and pointing at `ettore update`, which a
+      // checkout refuses in favour of `git pull`.
       process.stderr.write(
         `${dim}update check did not complete (${updateStatus?.error || 'no answer'}); `
         + `run \`ettore update\` to upgrade directly.${reset}\n`,

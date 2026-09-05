@@ -8,6 +8,23 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.3.5] — 2026-09-06
+
+### Fixed — a git checkout was told a check had failed that was never run
+
+1.3.4 taught the CLI to speak when the update check came back empty, so a
+Windows install could stop looking up to date when it was merely unable to
+find out. The condition was too broad: it fired whenever there was no version
+to report, including on a git checkout, where the check is skipped on purpose
+because installing over a linked development copy would replace the link.
+
+So a checkout printed "update check did not complete — run `ettore update`",
+of which both halves were wrong. Nothing had failed, and `ettore update`
+refuses on a checkout in favour of `git pull`.
+
+The message is now gated on the check having actually run. A checkout is
+silent again, as it was, and updates with `git pull`.
+
 ## [1.3.4] — 2026-09-06
 
 ### Fixed — on Windows, the update check could not finish, and said nothing about it

@@ -270,3 +270,15 @@ test('bin/cli.js says so when the check came back with nothing', async () => {
   assert.match(src, /autoUpdateWanted && !updateStatus\?\.latest/);
   assert.match(src, /update check did not complete/);
 });
+
+test('a git checkout is not told a check failed that never ran', async () => {
+  // The cold check is skipped on a checkout on purpose — installing over a
+  // linked development copy would replace the link. Announcing a failure there
+  // is doubly wrong: nothing failed, and `ettore update` refuses on a checkout
+  // in favour of `git pull`.
+  const src = readFileSync(new URL('../bin/cli.js', import.meta.url), 'utf8');
+  assert.match(src, /coldCheckRan = true;/);
+  assert.match(src, /else if \(coldCheckRan && !updateStatus\?\.latest\)/);
+  // And it must not be reachable from the plain "wanted" flag any more.
+  assert.doesNotMatch(src, /else if \(autoUpdateWanted && !updateStatus\?\.latest\)/);
+});
