@@ -12,6 +12,13 @@ const MAX_COMPRESSIONS_PER_SESSION = 8;
 // compress well before the model is at risk of forgetting recent context.
 const DYNAMIC_THRESHOLD_RATIO = 0.3;
 const MIN_DYNAMIC_THRESHOLD = 4000;
+// The ratio above was tuned against 128k-200k windows, where 30% lands around
+// 40-60k. Applied to a million-token model it would let the transcript reach
+// 300k before compressing — and since every turn re-sends the whole thing,
+// "we have room" is not the same as "this is free". A model with a bigger
+// window buys headroom against truncation, not licence to spend. Cap at what
+// a 200k window already produced.
+const MAX_DYNAMIC_THRESHOLD = 60_000;
 const HARD_GUARD_RATIO = 0.92;
 // Hard ceiling on the compression LLM call. Without it, a provider stall
 // hangs the agent loop indefinitely — the main turn has its own
@@ -126,7 +133,10 @@ export class ContextCompressor {
 
   _deriveThreshold(contextWindow) {
     if (!Number.isFinite(contextWindow) || contextWindow <= 0) return DEFAULT_THRESHOLD;
-    return Math.max(MIN_DYNAMIC_THRESHOLD, Math.floor(contextWindow * DYNAMIC_THRESHOLD_RATIO));
+    return Math.max(
+      MIN_DYNAMIC_THRESHOLD,
+      Math.min(MAX_DYNAMIC_THRESHOLD, Math.floor(contextWindow * DYNAMIC_THRESHOLD_RATIO)),
+    );
   }
 
   getHardGuardLimit(contextWindowOverride = null, outputReserve = 8192) {

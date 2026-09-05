@@ -1404,6 +1404,25 @@ export class Agent {
           if (turnTimer) clearTimeout(turnTimer);
         }
 
+        // A transport that resolves the model itself (the Claude Code bridge
+        // turns `opus` into a pinned id) reports the window that id really
+        // has. Adopting it stops the compressor from sizing itself against the
+        // 128k the pricing table falls back to for an unrecognised alias, and
+        // from compressing a long way before it needs to.
+        const reportedWindow = Number(result.usage?.contextWindow) || 0;
+        if (reportedWindow && reportedWindow !== this.contextWindow) {
+          this.contextWindow = reportedWindow;
+          this.compressor.updateContextWindow(reportedWindow);
+          emitter?.emit('contextWindow', {
+            contextWindow: reportedWindow,
+            model: result.usage?.resolvedModel || null,
+          });
+          this._debugLog(emitter, 'turn.context_window_adopted', {
+            contextWindow: reportedWindow,
+            model: result.usage?.resolvedModel || null,
+          });
+        }
+
         // Emit real usage (or estimate) for cost/ctx tracking
         if (result.usage) {
           emitter?.emit('usage', result.usage);

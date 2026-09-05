@@ -838,6 +838,9 @@ export class ClaudeCodeClient {
     let content = '';
     let usage = null;
     let resultError = null;
+    let apiErrorStatus = null;
+    let stopReason = null;
+    let turnModel = null;
     let inThinking = false;
     let stderrTail = '';
     let buffer = '';
@@ -847,6 +850,14 @@ export class ClaudeCodeClient {
     const handleEvent = obj => {
       if (obj.type === 'stream_event') {
         const event = obj.event;
+        // The only authoritative name for the model answering this turn.
+        // `modelUsage` in the result event is keyed by *every* model the CLI
+        // touched, side tasks of its own included, so its first key is
+        // routinely some other model entirely.
+        if (event?.type === 'message_start' && event.message?.model) {
+          turnModel = String(event.message.model);
+          return;
+        }
         if (event?.type !== 'content_block_delta') return;
         const delta = event.delta || {};
         if (delta.type === 'thinking_delta' && delta.thinking) {
@@ -864,14 +875,36 @@ export class ClaudeCodeClient {
 
       if (obj.type === 'result') {
         const u = obj.usage || {};
+        // `modelUsage` carries the window of each model the CLI resolved: the
+        // `opus` alias lands on a pinned id whose context window is nothing
+        // like the 128k the pricing table guesses for an unknown name. Reading
+        // it lets the compressor size itself against the real window instead
+        // of compressing far too early — but only the entry for *this* turn's
+        // model, never simply the first one.
+        const byModel = obj.modelUsage || {};
+        const resolvedName = turnModel && byModel[turnModel]
+          ? turnModel
+          : Object.keys(byModel).length === 1 ? Object.keys(byModel)[0] : turnModel;
+        const resolvedMeta = resolvedName ? byModel[resolvedName] : null;
         usage = {
           inputTokens:  u.input_tokens ?? 0,
           outputTokens: u.output_tokens ?? 0,
           cacheCreate:  u.cache_creation_input_tokens ?? 0,
           cacheRead:    u.cache_read_input_tokens ?? 0,
+          // The subscription is prepaid, so this is not a bill — it is the
+          // API-equivalent spend, which is the only honest way to answer
+          // "how much did that turn cost me" on a plan.
+          costUsd: typeof obj.total_cost_usd === 'number' ? obj.total_cost_usd : null,
+          resolvedModel: resolvedName || null,
+          contextWindow: Number(resolvedMeta?.contextWindow) || null,
         };
+        stopReason = obj.stop_reason || null;
         if (obj.is_error) {
           resultError = String(obj.result || obj.subtype || 'Claude Code returned an error');
+          // Carried onto the thrown error so the shared provider-error
+          // translator can classify it — a 429 here is a Pro/Max usage limit,
+          // and without the status it reaches the user as raw CLI prose.
+          apiErrorStatus = obj.api_error_status ?? null;
         }
       }
     };
@@ -949,7 +982,15 @@ export class ClaudeCodeClient {
     });
 
     if (inThinking) emit('</think>');
-    if (resultError) throw new Error(`Claude Code: ${resultError}`);
+    if (resultError) {
+      const err = new Error(`Claude Code: ${resultError}`);
+      if (apiErrorStatus != null) err.status = Number(apiErrorStatus) || apiErrorStatus;
+      throw err;
+    }
+
+    // Normalized onto the OpenAI spelling, as the other transports do, so the
+    // agent's truncation handling is not blind on this one.
+    const finishReason = stopReason === 'max_tokens' ? 'length' : (stopReason || null);
 
     const { calls, content: visible } = parseClaudeCodeToolCalls(content);
     if (calls.length) {
@@ -962,9 +1003,10 @@ export class ClaudeCodeClient {
         tool_calls: canonical.calls,
         message: canonical.message,
         usage,
+        finishReason,
       };
     }
 
-    return { type: 'text', content: visible, usage };
+    return { type: 'text', content: visible, usage, finishReason };
   }
 }

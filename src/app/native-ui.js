@@ -1135,6 +1135,19 @@ export async function startApp(options = {}) {
   _initModelMeta();
   await rebuildAgent({ announceMemory: true });
 
+  // The Claude Code bridge resolves aliases to a pinned model and reports that
+  // model's real window; the gauge would otherwise stay on the pricing table's
+  // fallback for a name it does not know.
+  emitter.on('contextWindow', ({ contextWindow, model }) => {
+    const cw = Number(contextWindow) || 0;
+    if (!cw || cw === tui.tokenMax) return;
+    tui.tokenMax = cw;
+    tui.needsRender = true;
+    if (options.verboseTokens) {
+      process.stderr.write(`📊 context window: ${cw}${model ? ` (resolved model ${model})` : ''}\n`);
+    }
+  });
+
   emitter.on('tokenCount', (n) => {
     mission.setTokenCount(n);
     syncMission();
@@ -1149,7 +1162,8 @@ export async function startApp(options = {}) {
     tui.needsRender = true;
   });
 
-  emitter.on('usage', ({ inputTokens, outputTokens, cacheCreate, cacheRead }) => {
+  emitter.on('usage', (usageEvent) => {
+    const { inputTokens, outputTokens, cacheCreate, cacheRead } = usageEvent;
     // Anthropic reports cached input in its own two counters; `input_tokens`
     // holds only the uncached remainder. Reading that field alone made a warm
     // turn look like six tokens when the request really carried several
@@ -1171,19 +1185,25 @@ export async function startApp(options = {}) {
     // Calculate cost
     const modelId = connectionManager.activeModel || '';
     const provider = connectionManager.activeProvider || '';
+    // A subscription is prepaid, so nothing here is a bill — but the bridge
+    // reports what the same turn would have cost on the API, and that is the
+    // only number that answers "how much did that turn actually use" on a plan.
+    const reportedCost = Number(usageEvent.costUsd);
     const cost = NON_METERED_PROVIDERS.has(provider)
-      ? 0
+      ? (Number.isFinite(reportedCost) ? reportedCost : 0)
       : calcCost(uncachedIn, outN, modelId, createN, readN);
     if (cost !== null) {
       tui.sessionCost += cost;
-      tui.costKnown    = true;
+      if (!NON_METERED_PROVIDERS.has(provider) || Number.isFinite(reportedCost)) {
+        tui.costKnown = true;
+      }
     }
     // Optional stderr trace for profiling. Same shape as the one-shot path
     // (src/cli/index.js) so output is comparable across the two entry points.
     if (options.verboseTokens) {
-      const costStr = NON_METERED_PROVIDERS.has(provider)
+      const costStr = NON_METERED_PROVIDERS.has(provider) && !Number.isFinite(reportedCost)
         ? 'n/a'
-        : `$${tui.sessionCost.toFixed(4)}`;
+        : `$${tui.sessionCost.toFixed(4)}${NON_METERED_PROVIDERS.has(provider) ? ' equiv' : ''}`;
       const cacheStr = createN || readN ? ` (cache w=${createN} r=${readN})` : '';
       process.stderr.write(
         `📊 turn: in=${promptN}${cacheStr} out=${outN}  ·  session in=${tui.inputTokensTotal} out=${tui.outputTokensTotal} cost=${costStr}\n`,

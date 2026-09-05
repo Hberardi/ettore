@@ -10,6 +10,8 @@ import { getModelPricing, calcCost } from '../src/utils/pricing.js';
 import { attachVerboseTokenLogger } from '../src/cli/index.js';
 import { connectionManager } from '../src/providers/index.js';
 import { selectToolDefinitions } from '../src/agents/tool-router.js';
+import { translateProviderError, parseResetTime } from '../src/agents/error-translator.js';
+import { ContextCompressor } from '../src/agents/compressor.js';
 import { toolDefinitions, setAutoApprove } from '../src/tools/index.js';
 import { Agent } from '../src/agents/index.js';
 import { mkdtemp } from 'node:fs/promises';
@@ -174,4 +176,74 @@ test('an anticipated edit route is a superset of the narrow one', () => {
   );
   for (const name of narrow.map(t => t.function.name)) assert.ok(wide.has(name), `lost ${name}`);
   assert.ok(wide.has('run_checks') && wide.has('run_tests'));
+});
+
+// ── Claude subscription (Pro plan) transport ─────────────────────────────────
+
+test('a subscription usage limit reads as a plan limit, not raw CLI prose', () => {
+  const at = Math.floor((Date.now() + 3 * 3600_000) / 1000);
+  const out = translateProviderError(new Error(`Claude Code: Claude AI usage limit reached|${at}`));
+  assert.match(out, /Claude plan usage limit reached/);
+  assert.match(out, /Resets at /);
+  // It must not be mistaken for a provider-side 429 the user could just retry.
+  assert.doesNotMatch(out, /HTTP 429/);
+});
+
+test('a usage limit with no reset time still explains itself', () => {
+  const out = translateProviderError(new Error('Claude Code: usage limit reached. Upgrade to Max'));
+  assert.match(out, /Claude plan usage limit reached/);
+  assert.doesNotMatch(out, /Resets at/);
+});
+
+test('parseResetTime accepts epoch seconds, ms and ISO, and rejects noise', () => {
+  const now = Date.parse('2026-09-05T12:00:00Z');
+  const soon = Math.floor((now + 3600_000) / 1000);
+  assert.equal(parseResetTime(`limit|${soon}`, now).getTime(), soon * 1000);
+  assert.equal(parseResetTime(`limit|${(now + 3600_000)}`, now).getTime(), now + 3600_000);
+  assert.equal(parseResetTime('resets 2026-09-05T15:00:00Z', now).toISOString(), '2026-09-05T15:00:00.000Z');
+  // A ten-digit number that is not a plausible reset must not become a clock.
+  assert.equal(parseResetTime('error code 1234567890', now), null);
+  assert.equal(parseResetTime('no numbers here', now), null);
+});
+
+test('an API error status from the bridge survives onto the thrown error', () => {
+  // The bridge attaches `api_error_status`; without it a 429 reaches the user
+  // as unclassified CLI text.
+  const err = new Error('Claude Code: something upstream');
+  err.status = 429;
+  assert.match(translateProviderError(err), /Rate limit \/ quota exceeded/);
+});
+
+test('the compression threshold is capped for million-token models', () => {
+  const c = new ContextCompressor(null, {});
+  c.updateContextWindow(200000);
+  const at200k = c.threshold;
+  c.updateContextWindow(1000000);
+  // A 5x bigger window must not mean a 5x bigger transcript to re-send.
+  assert.equal(c.threshold, at200k);
+  assert.ok(c.threshold <= 60000, `threshold ${c.threshold} too high`);
+  // Small windows still scale down.
+  c.updateContextWindow(64000);
+  assert.equal(c.threshold, Math.floor(64000 * 0.3));
+});
+
+test('a subscription turn reports the equivalent spend instead of n/a', () => {
+  const prevProvider = connectionManager.activeProvider;
+  const prevModel = connectionManager.activeModel;
+  connectionManager.activeProvider = 'claude-code';
+  connectionManager.activeModel = 'opus';
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  const chunks = [];
+  process.stderr.write = (chunk) => { chunks.push(String(chunk)); return true; };
+  try {
+    const em = new EventEmitter();
+    const stats = attachVerboseTokenLogger(em);
+    em.emit('usage', { inputTokens: 6, outputTokens: 6, cacheCreate: 0, cacheRead: 12300, costUsd: 0.0069 });
+    assert.equal(Number(stats.costTotal().toFixed(4)), 0.0069);
+    assert.match(chunks.join(''), /cost=\$0\.0069 equiv/);
+  } finally {
+    process.stderr.write = originalWrite;
+    connectionManager.activeProvider = prevProvider;
+    connectionManager.activeModel = prevModel;
+  }
 });

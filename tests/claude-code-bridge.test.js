@@ -259,6 +259,11 @@ const resultEvent = (extra = {}) => ({
   ...extra,
 });
 
+const messageStart = (model) => ({
+  type: 'stream_event',
+  event: { type: 'message_start', message: { model } },
+});
+
 test('ClaudeCodeClient streams text and reports usage', async () => {
   const { spawn, calls } = fakeClaude([textDelta('Ciao'), textDelta(' Ettore'), resultEvent()]);
   const client = new ClaudeCodeClient('sonnet', { spawn, bin: '/usr/bin/claude' });
@@ -274,7 +279,11 @@ test('ClaudeCodeClient streams text and reports usage', async () => {
   assert.equal(result.type, 'text');
   assert.equal(result.content, 'Ciao Ettore');
   assert.deepEqual(tokens, ['Ciao', ' Ettore']);
-  assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 3, cacheCreate: 1, cacheRead: 7 });
+  assert.deepEqual(result.usage, {
+    inputTokens: 10, outputTokens: 3, cacheCreate: 1, cacheRead: 7,
+    // Reported by the CLI when present; null on a result event that omits them.
+    costUsd: null, resolvedModel: null, contextWindow: null,
+  });
   assert.equal(calls[0].bin, '/usr/bin/claude');
   // The transcript goes over stdin — an argv prompt would hit ARGV limits.
   assert.match(calls[0].prompt, /<user>\nhi\n<\/user>/);
@@ -349,4 +358,68 @@ test('ClaudeCodeClient aborts the child process when the turn is cancelled', asy
     err => err.name === 'AbortError',
   );
   assert.deepEqual(calls, ['killed']);
+});
+
+
+test('ClaudeCodeClient reports the resolved model and its real context window', async () => {
+  // `--model opus` resolves to a pinned id whose window is nothing like the
+  // fallback the pricing table guesses for the alias.
+  const { spawn } = fakeClaude([
+    messageStart('claude-opus-4-7'),
+    textDelta('ok'),
+    resultEvent({
+      stop_reason: 'end_turn',
+      total_cost_usd: 0.0042,
+      modelUsage: { 'claude-opus-4-7': { contextWindow: 1000000, maxOutputTokens: 64000 } },
+    }),
+  ]);
+  const client = new ClaudeCodeClient('opus', { spawn });
+  const result = await client.turn([{ role: 'user', content: 'q' }], [], () => {}, null);
+
+  assert.equal(result.usage.resolvedModel, 'claude-opus-4-7');
+  assert.equal(result.usage.contextWindow, 1000000);
+  assert.equal(result.usage.costUsd, 0.0042);
+  assert.equal(result.finishReason, 'end_turn');
+});
+
+test('ClaudeCodeClient ignores side-model usage when picking the turn model', async () => {
+  // The CLI runs models of its own for background work, so `modelUsage` can
+  // list a model that never answered this turn — and list it first.
+  const { spawn } = fakeClaude([
+    messageStart('claude-opus-4-7'),
+    textDelta('ok'),
+    resultEvent({
+      modelUsage: {
+        'claude-haiku-4-5-20251001': { contextWindow: 200000 },
+        'claude-opus-4-7': { contextWindow: 1000000 },
+      },
+    }),
+  ]);
+  const client = new ClaudeCodeClient('opus', { spawn });
+  const result = await client.turn([{ role: 'user', content: 'q' }], [], () => {}, null);
+
+  assert.equal(result.usage.resolvedModel, 'claude-opus-4-7');
+  assert.equal(result.usage.contextWindow, 1000000);
+});
+
+test('ClaudeCodeClient maps a truncated turn onto the shared finish reason', async () => {
+  const { spawn } = fakeClaude([textDelta('half a sen'), resultEvent({ stop_reason: 'max_tokens' })]);
+  const client = new ClaudeCodeClient('opus', { spawn });
+  const result = await client.turn([{ role: 'user', content: 'q' }], [], () => {}, null);
+  assert.equal(result.finishReason, 'length');
+});
+
+test('ClaudeCodeClient carries the API error status onto the thrown error', async () => {
+  const { spawn } = fakeClaude([
+    resultEvent({ is_error: true, result: 'Claude AI usage limit reached', api_error_status: 429 }),
+  ]);
+  const client = new ClaudeCodeClient('opus', { spawn });
+  await assert.rejects(
+    () => client.turn([{ role: 'user', content: 'q' }], [], () => {}, null),
+    (err) => {
+      assert.equal(err.status, 429);
+      assert.match(err.message, /usage limit reached/);
+      return true;
+    },
+  );
 });

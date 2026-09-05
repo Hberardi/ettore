@@ -25,7 +25,7 @@ export function attachVerboseTokenLogger(em) {
   let cachedTotal = 0;
   let costTotal = 0;
   let turn = 0;
-  em.on('usage', ({ inputTokens, outputTokens, cacheCreate, cacheRead }) => {
+  em.on('usage', ({ inputTokens, outputTokens, cacheCreate, cacheRead, costUsd }) => {
     // On a cached Anthropic turn `input_tokens` counts only what the cache did
     // not cover — a warm agent turn reports single digits while several
     // thousand tokens are actually being billed. The two cache counters carry
@@ -41,14 +41,19 @@ export function attachVerboseTokenLogger(em) {
     turn += 1;
     const provider = connectionManager.activeProvider || '';
     const modelId = connectionManager.activeModel || '';
+    // A subscription transport prices the turn itself; that is the only figure
+    // available on a plan, and reporting nothing is what made "does this use a
+    // lot?" unanswerable here.
+    const reportedCost = Number(costUsd);
     const cost = NON_METERED_PROVIDERS.has(provider)
-      ? null
+      ? (Number.isFinite(reportedCost) ? reportedCost : null)
       : calcCost(inN, outN, modelId, createN, readN);
     if (cost !== null) costTotal += cost;
-    const costStr = cost === null ? 'n/a' : `$${cost.toFixed(4)}`;
+    const equiv = NON_METERED_PROVIDERS.has(provider) ? ' equiv' : '';
+    const costStr = cost === null ? 'n/a' : `$${cost.toFixed(4)}${equiv}`;
     const cacheStr = createN || readN ? ` (cache w=${createN} r=${readN})` : '';
     process.stderr.write(
-      `📊 turn ${turn}: in=${promptN}${cacheStr} out=${outN}  ·  session in=${inputTotal} out=${outputTotal} cost=$${costTotal.toFixed(4)} (this turn: ${costStr})\n`,
+      `📊 turn ${turn}: in=${promptN}${cacheStr} out=${outN}  ·  session in=${inputTotal} out=${outputTotal} cost=$${costTotal.toFixed(4)}${equiv} (this turn: ${costStr})\n`,
     );
   });
   return {
