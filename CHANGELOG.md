@@ -8,6 +8,45 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Added — a git checkout now updates itself at startup, like an npm install does
+
+1.3.6 taught `ettore update` to fast-forward a checkout, but only when asked.
+At startup a checkout still did nothing: the registry check was skipped —
+correctly, since its answer would have been refused — and nothing took its
+place, so a linked install silently stayed on whatever commit it was on.
+
+The checkout's own update now runs there instead. A clean tree on a branch
+that tracks a remote is fast-forwarded before anything else loads, and the CLI
+re-executes into the build it just pulled:
+
+```
+ettore 1.3.6
+↻ checkout fast-forwarded — restarting
+ettore 1.3.7
+```
+
+The guards are the ones a development machine needs: nothing is pulled over
+uncommitted work, only fast-forwards are taken so no local commit can be lost,
+a branch tracking nothing is left alone, and `--no-auto-update` /
+`ETTORE_AUTO_UPDATE=0` still turn it off. The pull is bounded — 6s at startup,
+12s on Windows, 120s for the explicit command — so an unreachable remote costs
+a pause rather than a hang.
+
+**The npm path is untouched.** The two are mutually exclusive by construction:
+an install is `updatable` exactly when it is *not* a checkout, so an npm
+install reaches the registry check and `planAutoUpdate` on the same code as
+before. The tests pin that property down, because it is the one whose failure
+would break updating on Windows.
+
+### Fixed — a no-op `git pull` is no longer reported as a change
+
+`changed` was computed as `!/Already up to date/`, which assumes git answers in
+English. It does not: on an `it_IT` machine a pull with nothing to do says
+`Già aggiornato`, so every pull looked like a change. In `ettore update` that
+was a wrong message — "Now on 1.3.6. Restart ETTORE" when nothing had moved.
+On the startup path it would have meant re-executing on every single launch.
+It now compares HEAD before and after, which no locale can change.
+
 ## [1.3.6] — 2026-09-06
 
 ### Fixed — `ettore update` now updates a git checkout instead of only refusing
