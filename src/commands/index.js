@@ -1315,10 +1315,31 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         const skills = agent.skillSystem.getAllSkills();
         if (!skills.length) return 'No skills loaded.';
         const active = new Set(agent.workingMemory?.activeSkills || []);
+        // The TUI renders system messages as a single line per \n-separated
+        // chunk, with each line visually marked by a ◆ bullet. A description
+        // that contains \n would bleed into the next skill, and one that is
+        // a single 1000-character sentence gets wrapped to 20-30 visual rows
+        // that visually swallow the other entries in the list. Collapse
+        // newlines to spaces AND cap the length so each skill occupies at
+        // most one line. The full description is still available via
+        // `/skills show <name>`.
+        const MAX_DESC_LEN = 80;
+        const flatten = (value) => {
+          const flat = String(value ?? '')
+            .replace(/\r/g, '')
+            .replace(/\s*[\n]+\s*/g, ' ')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+          if (!flat) return '';
+          return flat.length > MAX_DESC_LEN
+            ? flat.slice(0, MAX_DESC_LEN - 1) + '…'
+            : flat;
+        };
         return `Skills (${skills.length}):\n` + skills.map(skill => {
           const marker = active.has(skill.name) ? ' *active*' : '';
           const source = skill.source ? ` [${skill.source}]` : '';
-          return `  ${skill.name}${marker}${source} — ${skill.description}`;
+          const description = flatten(skill.description);
+          return `  ${skill.name}${marker}${source} — ${description}`;
         }).join('\n');
       }
 

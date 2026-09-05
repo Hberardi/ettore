@@ -357,3 +357,86 @@ test('doctor: uses injected connection manager state', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('skills list: flattens multi-line descriptions into one line per skill', async () => {
+  const skills = [
+    {
+      name: 'esperto-doganalista',
+      source: 'global',
+      description: 'Linea uno della descrizione\nLinea due con dettagli\nLinea tre',
+      triggers: [],
+      tools: [],
+      enabled: true,
+      instructions: '',
+    },
+    {
+      name: 'caveman',
+      source: 'builtin',
+      description: 'Descrizione su una sola riga',
+      triggers: [],
+      tools: [],
+      enabled: true,
+      instructions: '',
+    },
+  ];
+  const agent = {
+    skillSystem: { getAllSkills: () => skills },
+    workingMemory: { activeSkills: ['caveman'] },
+  };
+
+  const output = await builtinCommands.skills.handler(['list'], { agent });
+  const lines = output.split('\n');
+
+  // The list must be one line per skill, not one line per description line.
+  assert.equal(lines.length, 1 + skills.length, `expected ${1 + skills.length} lines, got ${lines.length}:\n${output}`);
+  assert.match(output, /Skills \(2\):/);
+  assert.match(output, /  esperto-doganalista \[global\] — Linea uno della descrizione Linea due con dettagli Linea tre/);
+  assert.match(output, /  caveman \*active\* \[builtin\] — Descrizione su una sola riga/);
+  assert.doesNotMatch(output, /\nLinea due/);
+  assert.doesNotMatch(output, /\nLinea tre/);
+});
+
+test('skills list: tolerates missing description and trims whitespace', async () => {
+  const skills = [
+    { name: 'no-desc', source: 'project', description: '', triggers: [], tools: [], enabled: true, instructions: '' },
+    { name: 'padded', source: 'project', description: '   prima riga\n\n   terza riga   ', triggers: [], tools: [], enabled: true, instructions: '' },
+  ];
+  const agent = {
+    skillSystem: { getAllSkills: () => skills },
+    workingMemory: { activeSkills: [] },
+  };
+
+  const output = await builtinCommands.skills.handler(['list'], { agent });
+  const lines = output.split('\n');
+
+  assert.equal(lines.length, 1 + skills.length, `expected ${1 + skills.length} lines, got ${lines.length}:\n${output}`);
+  assert.match(output, /  no-desc \[project\] — $/m);
+  assert.match(output, /  padded \[project\] — prima riga terza riga/);
+});
+
+test('skills list: truncates a single very long description so it cannot drown the others', async () => {
+  const longDescription = 'Eseguire un audit completo e sistematico del sistema cromatico dell\'applicazione, finalizzato a identificare problemi di contrasto, leggibilità, accessibilità, coerenza e utilizzo semantico del colore. Analizzare tutti gli elementi visivi e multimediali, distinguerli per categoria, e produrre una diagnosi puntuale con tanto di severità, causa e correzione concreta da applicare. Le correzioni devono preservare l\'identità visiva dell\'app e privilegiare il riutilizzo dei design token esistenti. Non formulare ipotesi non verificabili.';
+  const skills = [
+    { name: 'code', source: 'builtin', description: 'Specializzato in scrittura e analisi codice', triggers: [], tools: [], enabled: true, instructions: '' },
+    { name: 'debug', source: 'builtin', description: 'Analisi e risoluzione bug', triggers: [], tools: [], enabled: true, instructions: '' },
+    { name: 'audit_colori', source: 'global', description: longDescription, triggers: [], tools: [], enabled: true, instructions: '' },
+  ];
+  const agent = {
+    skillSystem: { getAllSkills: () => skills },
+    workingMemory: { activeSkills: [] },
+  };
+
+  const output = await builtinCommands.skills.handler(['list'], { agent });
+  const lines = output.split('\n');
+
+  // Exactly one line per skill — even with a > 400 char single-line description.
+  assert.equal(lines.length, 1 + skills.length, `expected ${1 + skills.length} lines, got ${lines.length}:\n${output}`);
+  assert.match(output, /  code \[builtin\] — Specializzato in scrittura e analisi codice/);
+  assert.match(output, /  debug \[builtin\] — Analisi e risoluzione bug/);
+  // The long description is truncated with an ellipsis instead of bleeding
+  // across many rows and visually swallowing the other entries.
+  const auditLine = lines.find(l => l.includes('audit_colori'));
+  assert.ok(auditLine.length < 120, `audit_colori line should be truncated, got length ${auditLine.length}:\n${auditLine}`);
+  assert.match(auditLine, /…$/, 'truncated description should end with an ellipsis');
+  assert.doesNotMatch(output, /problemi di contrasto, leggibilità/);
+});
