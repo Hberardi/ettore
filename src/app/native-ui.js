@@ -2065,6 +2065,7 @@ if (cmdName === 'connect') {
       if (tui.filePicker) { tui.closeFilePicker(); return; }
       if (tui.subMenuOpen) { tui.closeSubMenu(); tui.closeCommandPalette(); return; }
       if (tui.commandPaletteOpen) { pendingSlashArgs = []; tui.closeCommandPalette(); return; }
+      if (tui.treeFocus) { tui.toggleTreeFocus(false); return; }
       if (tui.exitConfirmMode) { tui.exitConfirmMode = false; tui.needsRender = true; return; }
       if (tui.isRunning) agent?.cancel();
       tui.exitConfirmMode = true;
@@ -2312,6 +2313,55 @@ if (cmdName === 'connect') {
     }
 
     if (tui.filePicker) {
+      return;
+    }
+
+    if (key?.ctrl && key.name === 't') {
+      const on = tui.toggleTreeFocus();
+      if (on === false && !tui.fileTree?.entries?.length) {
+        tui.messages.push({ role: 'system', text: 'No file panel to navigate.', tools: [], id: Date.now() });
+        tui.needsRender = true;
+      }
+      return;
+    }
+
+    // While the panel has focus the arrows drive it rather than the
+    // transcript, and typing is off — this is a navigation mode, not a second
+    // cursor competing with the prompt.
+    if (tui.treeFocus) {
+      const selected = tui.treeSelection();
+      if (key?.name === 'up') { tui.moveTreeCursor(-1); return; }
+      if (key?.name === 'down') { tui.moveTreeCursor(1); return; }
+      if (key?.name === 'pageup') { tui.moveTreeCursor(-Math.max(1, Math.floor(tui.availableHeight / 2))); return; }
+      if (key?.name === 'pagedown') { tui.moveTreeCursor(Math.max(1, Math.floor(tui.availableHeight / 2))); return; }
+      if (key?.name === 'home') { tui.treeCursor = 0; tui.needsRender = true; return; }
+      if (key?.name === 'end') { tui.treeCursor = Math.max(0, (tui.fileTree?.entries?.length || 1) - 1); tui.needsRender = true; return; }
+      if (key?.name === 'right' || key?.name === 'return' || key?.name === 'enter' || str === ' ') {
+        if (selected?.isDir) {
+          await fileTree?.toggle(selected.path);
+          tui.setTreeCursorTo(selected.path);
+        }
+        return;
+      }
+      if (key?.name === 'left') {
+        // On an open directory, close it. On anything else, step out to the
+        // parent — the move a file tree is expected to make.
+        if (selected?.isDir && selected.open) {
+          await fileTree?.collapse(selected.path);
+          tui.setTreeCursorTo(selected.path);
+        } else if (selected) {
+          const parent = selected.path.split(/[\\/]/).slice(0, -1).join('/');
+          if (parent) tui.setTreeCursorTo(parent);
+        }
+        return;
+      }
+      // Anything else leaves navigation so a keystroke meant for the prompt is
+      // not silently swallowed.
+      if (str && !key?.ctrl && !key?.meta && str.codePointAt(0) >= 32) {
+        tui.toggleTreeFocus(false);
+        tui.addChar(str);
+        return;
+      }
       return;
     }
 

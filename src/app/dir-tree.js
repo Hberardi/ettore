@@ -75,7 +75,7 @@ export class DirectoryTree {
     this._watchFn = options.watchFn || watch;
     this._now = options.now || (() => Date.now());
 
-    /** @type {{name:string, depth:number, isDir:boolean, path:string, addedAt:number|null}[]} */
+    /** @type {{name:string, depth:number, isDir:boolean, open:boolean, path:string, addedAt:number|null, hiddenChangeAt:number|null}[]} */
     this.entries = [];
     /** Set when the scan hit `maxEntries` and stopped early. */
     this.truncated = false;
@@ -83,6 +83,16 @@ export class DirectoryTree {
     this.error = null;
     /** The most recent create/delete, for the panel's activity line. */
     this.lastChange = null;
+
+    /**
+     * Directories the user has opened, by path relative to the root. Empty by
+     * default: a tree that arrives fully expanded buries the project root
+     * under whatever happens to sort first, and makes the scan pay for depth
+     * nobody asked to see.
+     */
+    this.expanded = new Set();
+    /** Collapsed directories with a change underneath, so the fold still shows life. */
+    this.hidden = new Map();
 
     this._ignore = new Set(DEFAULT_IGNORE);
     this._known = new Set();
@@ -114,6 +124,49 @@ export class DirectoryTree {
     this._watchers = [];
   }
 
+  /**
+   * Opens or closes a directory and rescans. Collapsing drops the expansion of
+   * everything beneath it too: reopening a directory later should show it as
+   * the user last left it at that level, not restore a deep tree they closed
+   * precisely to get rid of.
+   */
+  async toggle(path) {
+    if (!path) return false;
+    if (this.expanded.has(path)) return this.collapse(path);
+    return this.expand(path);
+  }
+
+  async expand(path) {
+    const entry = this.entries.find(e => e.path === path);
+    if (!entry?.isDir || this.expanded.has(path)) return false;
+    this.expanded.add(path);
+    this.hidden.delete(path);
+    await this.refresh({ silent: true });
+    this.onChange(this);
+    return true;
+  }
+
+  async collapse(path) {
+    if (!this.expanded.has(path)) return false;
+    const prefix = `${path}${sep}`;
+    for (const open of [...this.expanded]) {
+      if (open === path || open.startsWith(prefix)) this.expanded.delete(open);
+    }
+    await this.refresh({ silent: true });
+    this.onChange(this);
+    return true;
+  }
+
+  /** The deepest visible ancestor of a path, used to attribute hidden changes. */
+  _visibleAncestor(relPath) {
+    const parts = String(relPath).split(/[\\/]/);
+    for (let i = parts.length - 1; i >= 1; i--) {
+      const candidate = parts.slice(0, i).join(sep);
+      if (this._known.has(candidate)) return candidate;
+    }
+    return null;
+  }
+
   async _loadGitignore() {
     try {
       const text = await readFile(join(this.root, '.gitignore'), 'utf8');
@@ -134,6 +187,7 @@ export class DirectoryTree {
     try {
       this._watchers.push(this._watchFn(this.root, { recursive: true }, (_event, filename) => {
         if (filename && pathIsIgnored(String(filename), this._ignore)) return;
+        this._noteHiddenChange(filename);
         this._schedule();
       }));
       return;
@@ -163,6 +217,21 @@ export class DirectoryTree {
       }
     }
     if (!this._watchers.length) this.error = 'snapshot only (not watchable)';
+  }
+
+  /**
+   * A write inside a closed directory changes nothing the scan can see, so the
+   * panel would sit still while the project moved. Mark the fold instead.
+   */
+  _noteHiddenChange(filename) {
+    if (!filename) return;
+    const rel = String(filename);
+    if (this._known.has(rel)) return; // visible — the scan will speak for it
+    const ancestor = this._visibleAncestor(rel);
+    if (ancestor && !this.expanded.has(ancestor)) {
+      this.hidden.set(ancestor, this._now());
+      this.lastChange = { kind: 'changed', path: rel, at: this._now() };
+    }
   }
 
   _schedule() {
@@ -226,12 +295,21 @@ export class DirectoryTree {
       if (now - info.at > this.changeNoticeMs) this._recent.delete(path);
     }
     if (this.lastChange && now - this.lastChange.at > this.changeNoticeMs) this.lastChange = null;
+    for (const [path, at] of this.hidden) {
+      if (now - at > this.changeNoticeMs) this.hidden.delete(path);
+    }
 
     const before = this._signature;
-    this.entries = scanned.entries.map(e => ({ ...e, addedAt: this._recent.get(e.path)?.at ?? null }));
+    this.entries = scanned.entries.map(e => ({
+      ...e,
+      addedAt: this._recent.get(e.path)?.at ?? null,
+      hiddenChangeAt: this.hidden.get(e.path) ?? null,
+    }));
     this.truncated = scanned.truncated;
     this._known = seen;
-    this._signature = this.entries.map(e => `${e.path}${e.addedAt ? '+' : ''}`).join('\n');
+    this._signature = this.entries
+      .map(e => `${e.path}${e.open ? '>' : ''}${e.addedAt ? '+' : ''}${e.hiddenChangeAt ? '*' : ''}`)
+      .join('\n');
     return this._signature !== before;
   }
 
@@ -263,8 +341,11 @@ export class DirectoryTree {
         if (entries.length >= this.maxEntries) { truncated = true; return; }
         const rel = relDir ? `${relDir}${sep}${item.name}` : item.name;
         const isDir = item.isDirectory() && !item.isSymbolicLink();
-        entries.push({ name: item.name, depth, isDir, path: rel });
-        if (isDir) await walk(join(dir, item.name), rel, depth + 1);
+        const open = isDir && this.expanded.has(rel);
+        entries.push({ name: item.name, depth, isDir, path: rel, open });
+        // Closed directories are listed but never walked, so the cost of the
+        // scan tracks what is on screen rather than what is on disk.
+        if (open) await walk(join(dir, item.name), rel, depth + 1);
         if (truncated) return;
       }
     };

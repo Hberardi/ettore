@@ -216,6 +216,46 @@ class TUI {
     // panel is switched off.
     this.fileTree = null;
     this.fileTreeRoot = '';
+    // True while the arrow keys drive the file panel instead of the
+    // transcript. Off by default: the transcript is what a typing user
+    // expects the arrows to move.
+    this.treeFocus = false;
+    this.treeCursor = 0;
+  }
+
+  /** Row the tree cursor is on, or null when the panel is not in play. */
+  treeSelection() {
+    const entries = this.fileTree?.entries || [];
+    if (!entries.length) return null;
+    return entries[Math.min(Math.max(0, this.treeCursor), entries.length - 1)] || null;
+  }
+
+  moveTreeCursor(delta) {
+    const entries = this.fileTree?.entries || [];
+    if (!entries.length) return;
+    this.treeCursor = Math.min(Math.max(0, this.treeCursor + delta), entries.length - 1);
+    this.needsRender = true;
+  }
+
+  /**
+   * Puts the cursor on a path if it is still visible, otherwise leaves it
+   * where it is — collapsing a directory removes the rows under it, and the
+   * cursor must not silently land on whatever slid into that index.
+   */
+  setTreeCursorTo(path) {
+    const entries = this.fileTree?.entries || [];
+    const idx = entries.findIndex(e => e.path === path);
+    if (idx >= 0) this.treeCursor = idx;
+    else this.treeCursor = Math.min(this.treeCursor, Math.max(0, entries.length - 1));
+    this.needsRender = true;
+  }
+
+  toggleTreeFocus(on = !this.treeFocus) {
+    if (on && !this.fileTree?.entries?.length) return false;
+    this.treeFocus = on;
+    if (on) this.treeCursor = Math.min(this.treeCursor, Math.max(0, (this.fileTree?.entries?.length || 1) - 1));
+    this.needsRender = true;
+    return this.treeFocus;
   }
 
   updateSize() {
@@ -1279,6 +1319,7 @@ class TUI {
     lines.push(`${C.accent}📎${C.reset} ${C.dim}attach file (ctrl+o)${C.reset}`);
     lines.push(`${C.accent}!${C.reset} ${C.dim}shell cmd${C.reset}`);
     lines.push(`${C.accent}tab${C.reset} ${C.dim}build/plan${C.reset}`);
+    if (this.fileTree) lines.push(`${C.accent}^t${C.reset} ${C.dim}browse files${C.reset}`);
 
     // The tree is last and takes what is left, so it grows with the terminal
     // and never squeezes out a section that has a fixed thing to say.
@@ -1308,7 +1349,11 @@ class TUI {
     const entries = tree.entries || [];
     const lines = [];
     const rootName = (this.fileTreeRoot || '').split(/[\\/]/).filter(Boolean).pop() || '/';
-    lines.push(`${C.bold}${C.accent}▸ FILES${C.reset} ${C.dim}${this._truncate(rootName, Math.max(4, width - 9))}${C.reset}`);
+    // The header doubles as the mode indicator: while the panel has the
+    // keyboard, say so and say how to leave, because arrow keys no longer do
+    // what they did a moment ago.
+    const hint = this.treeFocus ? `${C.bold}${C.warn}[nav]${C.reset}` : `${C.dim}^t${C.reset}`;
+    lines.push(`${C.bold}${C.accent}▸ FILES${C.reset} ${C.dim}${this._truncate(rootName, Math.max(4, width - 14))}${C.reset} ${hint}`);
 
     if (tree.error) lines.push(`${C.dim}${this._truncate(tree.error, width)}${C.reset}`);
     if (!entries.length) {
@@ -1322,12 +1367,20 @@ class TUI {
     let bodyRows = Math.max(1, maxRows - lines.length - 1);
     let start = 0;
     if (entries.length > bodyRows) {
+      // The cursor outranks a fresh file: while the user is driving the panel,
+      // the row they are standing on is the one that has to stay in view.
+      const cursor = this.treeFocus ? Math.min(this.treeCursor, entries.length - 1) : -1;
       const recent = entries.findIndex(e => e.addedAt && now - e.addedAt < noticeMs);
-      if (recent >= bodyRows) {
+      const target = cursor >= 0 ? cursor : recent;
+      if (target >= 0) {
         // One row goes to the "above" marker once the window is scrolled.
-        bodyRows = Math.max(1, bodyRows - 1);
-        start = Math.max(0, Math.min(recent - Math.floor(bodyRows / 2), entries.length - bodyRows));
-        lines.push(`${C.dim}↑ ${start} above${C.reset}`);
+        const scrolled = Math.max(1, bodyRows - 1);
+        const candidate = Math.max(0, Math.min(target - Math.floor(scrolled / 2), entries.length - scrolled));
+        if (candidate > 0) {
+          bodyRows = scrolled;
+          start = candidate;
+          lines.push(`${C.dim}↑ ${start} above${C.reset}`);
+        }
       }
     }
     const window = entries.slice(start, start + bodyRows);
@@ -1347,16 +1400,24 @@ class TUI {
 
       let indent = '';
       for (let d = 0; d < entry.depth; d++) indent += ancestorIsLast[d] ? '  ' : `${C.border}│ ${C.reset}`;
-      const elbow = `${C.border}${isLast ? '└' : '├'}${C.reset} `;
+      const elbow = `${C.border}${isLast ? '└' : '├'}${C.reset}`;
       const fresh = entry.addedAt && now - entry.addedAt < noticeMs;
+      const stirring = entry.hiddenChangeAt && now - entry.hiddenChangeAt < noticeMs;
+      const selected = this.treeFocus && absolute === this.treeCursor;
+      // A directory states whether it is open, so a closed one does not read
+      // as an empty one. Files keep the column blank so names stay aligned.
+      const twisty = entry.isDir ? `${C.dim}${entry.open ? '▾' : '▸'}${C.reset}` : ' ';
       const nameColor = fresh ? C.ok : entry.isDir ? C.accent : C.text;
       const label = entry.isDir ? `${entry.name}/` : entry.name;
-      // Two columns for the elbow and one for the space after it.
-      // Two columns per ancestor level, two for the elbow and its space, and
-      // one more when the freshness mark is shown.
-      const room = Math.max(4, width - entry.depth * 2 - 2 - (fresh ? 1 : 0));
-      const mark = fresh ? `${C.ok}+${C.reset}` : '';
-      lines.push(`${indent}${elbow}${mark}${nameColor}${this._truncate(label, room)}${C.reset}`);
+      // Two columns per ancestor level, one each for elbow and twisty, plus a
+      // column per marker and two for the selection caret.
+      const marks = (fresh ? 1 : 0) + (stirring ? 1 : 0);
+      // The caret sits in a gutter every row reserves, so selecting a row
+      // highlights it instead of nudging it out of line with its siblings.
+      const room = Math.max(4, width - entry.depth * 2 - 3 - marks);
+      const mark = `${fresh ? `${C.ok}+${C.reset}` : ''}${stirring ? `${C.warn}•${C.reset}` : ''}`;
+      const caret = selected ? `${C.accent}❯${C.reset}` : ' ';
+      lines.push(`${caret}${indent}${elbow}${twisty}${mark}${nameColor}${this._truncate(label, room)}${C.reset}`);
     }
 
     const hiddenBelow = entries.length - (start + window.length);
@@ -1375,8 +1436,13 @@ class TUI {
     if (!change) return null;
     const noticeMs = this.fileTree.changeNoticeMs ?? 5000;
     if (Date.now() - change.at > noticeMs) return null;
-    const isAdd = change.kind === 'added';
-    const sign = isAdd ? `${C.ok}+${C.reset}` : `${C.err}−${C.reset}`;
+    // Three kinds, three marks. Folding `changed` in with `removed` would
+    // report a file that was just written as one that was just deleted.
+    const sign = change.kind === 'added'
+      ? `${C.ok}+${C.reset}`
+      : change.kind === 'removed'
+        ? `${C.err}−${C.reset}`
+        : `${C.warn}•${C.reset}`;
     return `${sign} ${C.dim}${this._truncate(change.path, Math.max(4, width - 2))}${C.reset}`;
   }
 

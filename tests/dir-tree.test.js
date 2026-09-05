@@ -28,7 +28,7 @@ async function until(predicate, { timeout = 5000, step = 25 } = {}) {
   return false;
 }
 
-test('the scan lists the project and skips vendor directories', async () => {
+test('the scan lists the top level closed, and skips vendor directories', async () => {
   const root = await fixture();
   const tree = new DirectoryTree(root);
   try {
@@ -36,7 +36,9 @@ test('the scan lists the project and skips vendor directories', async () => {
     const listed = names(tree);
     assert.ok(listed.includes('package.json'));
     assert.ok(listed.includes('src'));
-    assert.ok(listed.includes(join('src', 'index.js')));
+    // Directories start closed, so their contents are not scanned at all.
+    assert.ok(!listed.includes(join('src', 'index.js')), `src was walked while closed: ${listed}`);
+    assert.equal(tree.entries.find(e => e.path === 'src').open, false);
     assert.ok(!listed.some(p => p.includes('node_modules')), `node_modules leaked: ${listed}`);
   } finally {
     tree.stop();
@@ -91,12 +93,17 @@ test('a deleted file disappears from the tree', async () => {
   }
 });
 
-test('a new nested directory and its contents are picked up', async () => {
+test('a new nested directory and its contents are picked up once open', async () => {
   const root = await fixture();
   const tree = new DirectoryTree(root, { debounceMs: 20 });
   try {
     await tree.start();
+    await tree.expand('src');
     await mkdir(join(root, 'src', 'deep'), { recursive: true });
+    // The new directory has to land in the tree before it can be opened —
+    // only what is on screen is ever expandable.
+    assert.ok(await until(() => names(tree).includes(join('src', 'deep'))), 'new directory never appeared');
+    await tree.expand(join('src', 'deep'));
     await writeFile(join(root, 'src', 'deep', 'file.txt'), 'x');
     const seen = await until(() => names(tree).includes(join('src', 'deep', 'file.txt')));
     assert.ok(seen, `nested file never appeared: ${names(tree)}`);
@@ -141,6 +148,11 @@ test('depth cap stops the walk without losing what is above it', async () => {
     await writeFile(join(root, 'a', 'b', 'c', 'd', 'deep.txt'), 'x');
     const tree = new DirectoryTree(root, { maxDepth: 2 });
     await tree.start();
+    // The cap is a backstop behind the expansion state, so open the whole
+    // chain and check the walk still refuses to go past it.
+    await tree.expand('a');
+    await tree.expand(join('a', 'b'));
+    await tree.expand(join('a', 'b', 'c'));
     tree.stop();
     const listed = names(tree);
     assert.ok(listed.includes(join('a', 'b')));
@@ -223,6 +235,96 @@ test('events under an ignored directory never schedule a rescan', async () => {
     assert.equal(scans, 1, 'a real write did not trigger a rescan');
   } finally {
     tree.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test('directories open and close on request, and nested state is dropped', async () => {
+  const root = await fixture();
+  await mkdir(join(root, 'src', 'inner'), { recursive: true });
+  await writeFile(join(root, 'src', 'inner', 'deep.js'), '//');
+  const tree = new DirectoryTree(root);
+  try {
+    await tree.start();
+    assert.ok(!names(tree).includes(join('src', 'index.js')));
+
+    await tree.expand('src');
+    assert.ok(names(tree).includes(join('src', 'index.js')));
+    assert.equal(tree.entries.find(e => e.path === 'src').open, true);
+
+    await tree.expand(join('src', 'inner'));
+    assert.ok(names(tree).includes(join('src', 'inner', 'deep.js')));
+
+    await tree.collapse('src');
+    assert.ok(!names(tree).includes(join('src', 'index.js')));
+    // Reopening shows the level as it was left, not the deep tree that was
+    // closed precisely to get rid of it.
+    await tree.expand('src');
+    assert.ok(names(tree).includes(join('src', 'inner')));
+    assert.ok(!names(tree).includes(join('src', 'inner', 'deep.js')));
+  } finally {
+    tree.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('toggle flips a directory and ignores files', async () => {
+  const root = await fixture();
+  const tree = new DirectoryTree(root);
+  try {
+    await tree.start();
+    assert.equal(await tree.toggle('src'), true);
+    assert.ok(names(tree).includes(join('src', 'index.js')));
+    assert.equal(await tree.toggle('src'), true);
+    assert.ok(!names(tree).includes(join('src', 'index.js')));
+    // A file has nothing to open.
+    assert.equal(await tree.toggle('package.json'), false);
+    assert.equal(await tree.toggle(''), false);
+  } finally {
+    tree.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a write inside a closed directory marks the fold', async () => {
+  const root = await fixture();
+  let fired = null;
+  const tree = new DirectoryTree(root, {
+    debounceMs: 5,
+    watchFn: (_dir, _opts, cb) => { fired = cb; return { close() {} }; },
+  });
+  try {
+    await tree.start();
+    assert.equal(tree.entries.find(e => e.path === 'src').hiddenChangeAt, null);
+
+    fired('rename', join('src', 'brand-new.js'));
+    await tree.refresh();
+
+    const src = tree.entries.find(e => e.path === 'src');
+    assert.ok(src.hiddenChangeAt, 'a change under a closed directory went unmarked');
+    assert.equal(tree.lastChange.kind, 'changed');
+    assert.equal(tree.lastChange.path, join('src', 'brand-new.js'));
+  } finally {
+    tree.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('closing a directory keeps the scan off its contents', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ettore-tree-cost-'));
+  try {
+    await mkdir(join(root, 'big'), { recursive: true });
+    for (let i = 0; i < 50; i++) await writeFile(join(root, 'big', `f${i}.txt`), 'x');
+    const tree = new DirectoryTree(root);
+    await tree.start();
+    assert.equal(tree.entries.length, 1, 'a closed directory was walked anyway');
+    await tree.expand('big');
+    assert.equal(tree.entries.length, 51);
+    await tree.collapse('big');
+    assert.equal(tree.entries.length, 1);
+    tree.stop();
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
