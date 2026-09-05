@@ -41,7 +41,7 @@ export class PluginConflictError extends Error {
 // the OpenAI-compat provider expects in `tools[]`. `key` is the property name the
 // plugin used to declare the tool — used as a fallback when the tool def does not
 // carry an explicit `name` (a plugin author may write either).
-function pluginToolToProviderShape(def, key) {
+function pluginToolToProviderShape(def, key, pluginName = null) {
   return {
     type: 'function',
     function: {
@@ -52,6 +52,9 @@ function pluginToolToProviderShape(def, key) {
     // The provider-shape object is augmented so the agent's tool router
     // can detect "this is a plugin tool" without an extra map lookup.
     _pluginTool: true,
+    // Which plugin it came from, so the CLI can say so when it runs one. A
+    // bare `_pluginTool` flag told the router enough and the user nothing.
+    _pluginName: pluginName,
     _risk: def.risk || 'medium',
   };
 }
@@ -196,7 +199,7 @@ export class PluginRegistry {
     const out = this._builtInTools.slice();
     for (const entry of this._plugins.values()) {
       for (const [toolName, def] of Object.entries(entry.tools)) {
-        out.push(pluginToolToProviderShape(def, toolName));
+        out.push(pluginToolToProviderShape(def, toolName, entry.manifest?.name || null));
       }
     }
     return out;

@@ -214,6 +214,20 @@ class TUI {
     // the renderer makes sidebar drawing pure and avoids coupling the TUI to
     // agent internals.
     this.mission = null;
+
+    // Command palette state — initialized here so the palette is always
+    // renderable, even if a keypress path flips `commandPaletteOpen = true`
+    // directly without going through `openCommandPalette()`. The native-ui
+    // sub-menu backspace/left handlers historically did this; without
+    // defaults, `_renderCommandPalette` would dereference
+    // `commandFiltered.length` on `undefined` and crash the render loop.
+    this.commandPaletteOpen  = false;
+    this.commandList         = [];
+    this.commandFiltered     = [];
+    this.commandFilter       = '';
+    this.commandInput        = '';
+    this.commandIndex        = 0;
+    this.commandScrollOffset = 0;
   }
 
   updateSize() {
@@ -634,6 +648,19 @@ class TUI {
   }
 
   // Returns a short human-readable description of a tool call (truncated to fit)
+  /**
+   * A badge naming the plugin a tool came from, or '' for a built-in.
+   *
+   * Running someone else's code is worth seeing. Without it a plugin tool was
+   * indistinguishable from one the CLI ships, which matters most exactly when
+   * a plugin misbehaves and there is nothing on screen to point at it.
+   */
+  _pluginBadge(tool) {
+    const name = tool?.plugin;
+    if (!name) return '';
+    return ` ${C.dim}⧉${C.reset}${C.accent}${this._truncate(String(name), 18)}${C.reset}`;
+  }
+
   _describeToolCall(name, args, maxLen = 55) {
     if (!args) return '';
     let desc = '';
@@ -822,6 +849,7 @@ class TUI {
       const toolColor = TOOL_COLORS[runningTool.name] || C.accent;
       const desc = this._describeToolCall(runningTool.name, runningTool.args, 40);
       const descStr = desc ? `${C.dim}: ${C.reset}${C.text}${desc}${C.reset}` : '';
+      const badge = this._pluginBadge(runningTool);
       // Elapsed time placed in the actLabel (top row, always visible above
       // the fold) so the user always sees the timer even when the lower
       // "tool attivo" section is clipped by the assistant block height.
@@ -833,7 +861,7 @@ class TUI {
                           : aElapsedMs > 60_000  ? C.warn
                           :                        C.dim;
       const aElapsed = ` ${aElapsedColor}[${aElapsedStr}]${C.reset}`;
-      actLabel = `${toolColor}${pulse}${C.reset} ${toolColor}${C.bold}${runningTool.name}${C.reset}${descStr}${aElapsed}`;
+      actLabel = `${toolColor}${pulse}${C.reset} ${toolColor}${C.bold}${runningTool.name}${C.reset}${badge}${descStr}${aElapsed}`;
     } else if (text || reasoning) {
       const waveBar = WAVE_FRAMES.slice(0, 5).map((_, i) =>
         WAVE_FRAMES[(waveIdx + i) % WAVE_FRAMES.length]
@@ -1251,7 +1279,11 @@ class TUI {
     } else {
       for (const t of recent) {
         const icon = t.status === 'done' ? `${C.ok}✔${C.reset}` : `${C.warn}●${C.reset}`;
-        lines.push(`${icon} ${C.text}${this._truncate(t.name || 'tool', Math.max(8, width - 4))}${C.reset}`);
+        const badge = this._pluginBadge(t);
+        // The badge costs columns, so the name gets less room when there is one
+        // rather than the row overflowing the panel.
+        const room = Math.max(8, width - 4 - (t.plugin ? Math.min(String(t.plugin).length, 18) + 2 : 0));
+        lines.push(`${icon} ${C.text}${this._truncate(t.name || 'tool', room)}${C.reset}${badge}`);
       }
     }
 
@@ -1849,6 +1881,16 @@ class TUI {
   // ─── Command palette rendering (OpenCode-style full-width) ────────────────
   _renderCommandPalette() {
     if (!this.commandPaletteOpen || this.subMenuOpen || this.apiKeyInputMode) return '';
+
+    // Defensive guard: if a keypress handler flipped `commandPaletteOpen` to
+    // true without going through `openCommandPalette()` (e.g. the sub-menu
+    // backspace/left path in native-ui.js), `commandFiltered` may still be
+    // `undefined` or not an array. Treat it as an empty palette so the render
+    // loop survives — the user can still see the overlay, type a filter, or
+    // press Esc to close it.
+    if (!Array.isArray(this.commandFiltered)) {
+      this.commandFiltered = Array.isArray(this.commandList) ? [...this.commandList] : [];
+    }
 
     const maxVisible = Math.max(1, Math.min(this.commandFiltered.length || 1, this.availableHeight - 3));
     const width      = Math.max(52, Math.min(this.cols - 8, 96));

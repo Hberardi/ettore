@@ -297,6 +297,7 @@ export class Agent {
     // `/plugins` command does this via `rebuildAgent` in the TUI).
     this._pluginRegistry = config.pluginRegistry || null;
     this._mergedToolDefinitions = null;
+    this._toolPluginByName = null;
     this._mergedToolHandlers = null;
 
     const workdir = config.workdir || process.cwd();
@@ -842,6 +843,24 @@ export class Agent {
   _effortForMode() {
     if (this.config?.effort) return this.config.effort;
     return this.mode === 'plan' ? 'medium' : null;
+  }
+
+  /**
+   * The plugin a tool came from, or null for a native one.
+   *
+   * Built from the merged definitions, which is the only place the mapping
+   * exists — the handler map is keyed by name alone and cannot tell the two
+   * apart.
+   */
+  _pluginForTool(name) {
+    if (!this._pluginRegistry) return null;
+    if (!this._toolPluginByName) {
+      this._toolPluginByName = new Map();
+      for (const def of this._getAllToolDefinitions()) {
+        if (def?._pluginTool) this._toolPluginByName.set(def.function?.name, def._pluginName || 'plugin');
+      }
+    }
+    return this._toolPluginByName.get(name) || null;
   }
 
   _renderActiveSystemPrompt() {
@@ -1914,7 +1933,7 @@ export class Agent {
           if (typeof askUserArgs !== 'object' || askUserArgs === null || Array.isArray(askUserArgs)) askUserArgs = {};
         } catch { askUserArgs = {}; }
 
-        emitter?.emit('toolStart', { id: askUserCall.id, name: 'ask_user', args: askUserArgs });
+        emitter?.emit('toolStart', { id: askUserCall.id, name: 'ask_user', args: askUserArgs, plugin: this._pluginForTool('ask_user') });
 
         const handler = this._getAllToolHandlers()['ask_user'];
         let askUserOutput;
@@ -1931,12 +1950,12 @@ export class Agent {
         for (const tc of result.tool_calls) {
           const toolName = tc.function?.name || 'unknown';
           if (tc.id === askUserCall.id) {
-            emitter?.emit('toolEnd', { id: tc.id, name: 'ask_user', args: askUserArgs, output: askUserOutput });
+            emitter?.emit('toolEnd', { id: tc.id, name: 'ask_user', args: askUserArgs, output: askUserOutput, plugin: this._pluginForTool('ask_user') });
             this.messages.push({ role: 'tool', tool_call_id: tc.id, content: String(askUserOutput) });
             continue;
           }
           const deferred = 'Deferred: skipped because ask_user requires user input before other tool calls in the same batch can safely run.';
-          emitter?.emit('toolEnd', { id: tc.id, name: toolName, args: {}, output: deferred });
+          emitter?.emit('toolEnd', { id: tc.id, name: toolName, args: {}, output: deferred, plugin: this._pluginForTool(toolName) });
           this.messages.push({ role: 'tool', tool_call_id: tc.id, content: deferred });
         }
         emitTurnState('tool_result');
@@ -1963,7 +1982,7 @@ export class Agent {
         } catch (jsonErr) {
           const safeRaw = String(tc.function.arguments ?? '').slice(0, 200);
           const output = `Skipped: malformed JSON — ${jsonErr.message}`;
-          emitter?.emit('toolEnd', { id: tc.id, name: toolName, args: {}, output });
+          emitter?.emit('toolEnd', { id: tc.id, name: toolName, args: {}, output, plugin: this._pluginForTool(toolName) });
           return { id: tc.id, name: toolName, args: {}, output: `Error: malformed tool call JSON (${jsonErr.message}). Raw: ${safeRaw}`, parseError: true };
         }
         return { id: tc.id, name: toolName, args, parseError: false };
@@ -1973,7 +1992,7 @@ export class Agent {
       const validTools = parsed.filter(p => !p.parseError);
 
       // Fire toolStart for all valid tools immediately
-      validTools.forEach(p => emitter?.emit('toolStart', { id: p.id, name: p.name, args: p.args }));
+      validTools.forEach(p => emitter?.emit('toolStart', { id: p.id, name: p.name, args: p.args, plugin: this._pluginForTool(p.name) }));
 
       const executeParsedTool = async (p) => {
         const handler = this._getAllToolHandlers()[p.name];
@@ -2161,7 +2180,7 @@ export class Agent {
         }
         const r = resultById.get(tc.id);
         if (!r) continue;
-        emitter?.emit('toolEnd', { id: r.id, name: r.name, args: r.args, output: r.output });
+        emitter?.emit('toolEnd', { id: r.id, name: r.name, args: r.args, output: r.output, plugin: this._pluginForTool(r.name) });
         this.messages.push({ role: 'tool', tool_call_id: r.id, content: String(r.contextOutput ?? r.output) });
       }
       const fetchedImages = results.map(r => r.imageAttachment).filter(Boolean).slice(0, 4);

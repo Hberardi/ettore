@@ -490,3 +490,58 @@ test('a project with no plugins routes exactly as before', async () => {
     assert.ok(picked.includes(core), core);
   }
 });
+
+// ── Saying which tools are not the CLI's own ─────────────────────────────────
+
+test('tool events name the plugin a tool came from', async () => {
+  const { Agent } = await import('../src/agents/index.js');
+  const { EventEmitter } = await import('node:events');
+  const { registry, dir } = await bootedRegistry();
+  try {
+    const calls = [
+      { id: 'a', type: 'function', function: { name: 'git_log', arguments: JSON.stringify({ limit: 1 }) } },
+      { id: 'b', type: 'function', function: { name: 'git_status', arguments: '{}' } },
+    ];
+    let turn = 0;
+    const client = {
+      async turn() {
+        turn++;
+        if (turn === 1) return { type: 'tool_calls', tool_calls: calls, message: { role: 'assistant', content: '', tool_calls: calls } };
+        return { type: 'text', content: 'ok' };
+      },
+    };
+    const em = new EventEmitter();
+    const starts = new Map();
+    em.on('toolStart', e => starts.set(e.name, e.plugin));
+
+    const agent = new Agent(client, {
+      provider: 'test', model: 'gpt-4o', modelCapability: 'full',
+      workdir: process.cwd(), contextWindow: 128000, verifyAfterEdit: false,
+      pluginRegistry: registry,
+    }, 'build');
+    await agent.run('history and status', em);
+
+    assert.equal(starts.get('git_log'), 'git-history', 'a plugin tool must name its plugin');
+    // A built-in must not be labelled as coming from anywhere.
+    assert.equal(starts.get('git_status'), null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the panel marks a plugin tool and leaves a built-in alone', async () => {
+  const { TUI } = await import('../src/app/tui-native.js');
+  const { stripAllAnsi } = await import('../src/utils/ansi.js');
+  const t = new TUI();
+  t.cols = 110; t.rows = 32; t.availableHeight = 24;
+  t.streaming = {
+    text: '', reasoning: '', tools: [
+      { id: '1', name: 'read', args: {}, status: 'done', startMs: Date.now() - 10 },
+      { id: '2', name: 'git_log', args: {}, plugin: 'git-history', status: 'done', startMs: Date.now() - 10 },
+    ],
+  };
+  const sidebar = stripAllAnsi(t._renderSidebar(31).join('\n'));
+  assert.match(sidebar, /git_log ⧉git-history/);
+  // The built-in carries no badge — the mark has to mean something.
+  assert.match(sidebar, /✔ read(?! ⧉)/);
+});

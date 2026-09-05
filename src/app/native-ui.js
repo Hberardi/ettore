@@ -655,8 +655,8 @@ export async function startApp(options = {}) {
     syncMission();
   });
 
-  emitter.on('toolStart', ({ id, name, args }) => {
-    mission.toolStart({ id, name, args });
+  emitter.on('toolStart', ({ id, name, args, plugin }) => {
+    mission.toolStart({ id, name, args, plugin });
     syncMission();
     firstToolSeen = true;
     ensureStreaming();
@@ -684,6 +684,9 @@ export async function startApp(options = {}) {
       id,
       name,
       args: args || {},
+      // Which plugin supplied it, or null for a built-in. Carried on the record
+      // so every place that draws a tool can say where it came from.
+      plugin: plugin || null,
       status: 'running',
       startMs: Date.now(),
       diffPreview: buildCodeDiffPreview(name, args || {}),
@@ -2200,14 +2203,20 @@ if (cmdName === 'connect') {
         if (tui.subMenuFilter.length > 0) {
           tui.filterSubMenu(tui.subMenuFilter.slice(0, -1));
         } else {
+          // Re-open the parent command palette. Use the same entry point as
+          // the `/` keypress path so `commandFiltered` and the other palette
+          // state are re-initialized — flipping the flag directly would
+          // leave `commandFiltered` undefined and crash the next render.
           tui.closeSubMenu();
-          tui.commandPaletteOpen = true;
+          tui.openCommandPalette(commandList);
         }
         return;
       }
       if (key?.name === 'left') {
+        // Same rationale as the backspace branch above: route through
+        // `openCommandPalette` to keep palette state consistent.
         tui.closeSubMenu();
-        tui.commandPaletteOpen = true;
+        tui.openCommandPalette(commandList);
         return;
       }
       if (str && !key?.ctrl && !key?.meta && str.codePointAt(0) >= 32) {
