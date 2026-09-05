@@ -8,6 +8,41 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — skills matched the wrong prompts, in both directions at once
+
+Skills are activated automatically on every prompt, and the scoring was a
+count of shared words against the skill's name, description and triggers,
+with a fixed threshold of 2. Measured against a real five-skill set, it was
+wrong both ways.
+
+It woke skills on nothing: `che ore sono` scored 2.3 against a security
+skill, because `che` and `sono` were not in the stop-word list and a long
+description has more chances to contain any given word. Counting words meant
+verbosity bought relevance.
+
+And it stayed asleep when it mattered: `controlla i colori` did not activate
+`audit-color`, a skill named for colours whose description is about colours.
+It earned exactly 1 point — the prompt is Italian and the skill is named in
+English, so `colori` and `color` shared nothing — and the gate was 2.
+
+Four changes:
+
+- Terms are weighted by how few skills use them, so a word common to every skill counts for almost nothing and a distinctive one carries the match. Length stops being an advantage.
+- Words that share a stem count at half weight, which is what lets `colori` reach `audit-color`; a stem match alone is a guess and cannot fire a skill on its own, so "questo non funziona" no longer wakes a web design skill.
+- Each word of the prompt contributes once, at its best match. `funziona` used to collect a weight for `funzionante`, `funzionanti` and `funzionano` separately — one word, scored three times.
+- The stop-word list now covers the language the prompts are actually written in. It held 47 words, of which few were Italian; short prompts are mostly function words, so the shortest prompts were the noisiest.
+
+The cap rose from 2 to 3: with two slots, a generic skill with common triggers
+took one on nearly every prompt.
+
+### Added — the sidebar says which skills a prompt woke
+
+`workingMemory.activeSkills` was written and displayed nowhere. A turn that
+ran without the guidance you thought was active looked exactly like one that
+ran with it, which is how the matching stayed broken without being noticed.
+The panel now shows the active skills, or `none of N` when a prompt matched
+nothing.
+
 ### Changed — a turn gets room to think, sized to the model
 
 `max_tokens` was one number, 8192, standing in for every model at once. On a

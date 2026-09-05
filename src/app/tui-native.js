@@ -184,6 +184,8 @@ class TUI {
     this.turnState = 'idle';
     this.safetyProfile = 'balanced';
     this.effort = null;
+    this.activeSkills = [];
+    this.skillsAvailable = 0;
     this.dynamicToolRouting = true;
     this.routedToolCount = 0;
     this.routedToolNames = [];
@@ -1229,6 +1231,15 @@ class TUI {
     lines.push(`${C.dim}↗ route${C.reset} ${C.text}${routeText}${C.reset}`);
     lines.push(`${C.dim}cost${C.reset} ${this._statusCostText()} ${C.dim}· ctx${C.reset} ${this._statusCtxText()}`);
     lines.push(`${C.dim}msgs${C.reset} ${C.text}${this.messages.filter(m => m.role !== 'todos').length}${C.reset}`);
+    // Which skills the prompt woke, and how many were on offer. Without it a
+    // skill that did not match is indistinguishable from one that did.
+    if (this.skillsAvailable) {
+      const names = (this.activeSkills || []).join(', ');
+      const body = names
+        ? `${C.text}${this._truncate(names, Math.max(6, width - 10))}${C.reset}`
+        : `${C.dim}none of ${this.skillsAvailable}${C.reset}`;
+      lines.push(`${C.dim}✦ skills${C.reset} ${body}`);
+    }
     lines.push(`${C.bold}${C.accent}▸ ACTIVITY${C.reset}`);
 
     const liveTools = this.streaming?.tools || [];

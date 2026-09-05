@@ -1156,6 +1156,12 @@ export async function startApp(options = {}) {
     tui.needsRender = true;
   });
 
+  emitter.on('skillsActivated', ({ skills, available }) => {
+    tui.activeSkills = Array.isArray(skills) ? skills : [];
+    tui.skillsAvailable = Number(available) || 0;
+    tui.needsRender = true;
+  });
+
   emitter.on('toolRoute', ({ count, names, dynamic }) => {
     tui.routedToolCount = Number(count) || 0;
     tui.routedToolNames = Array.isArray(names) ? names : [];

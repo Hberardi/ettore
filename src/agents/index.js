@@ -853,12 +853,19 @@ export class Agent {
     return prompt;
   }
 
-  _activateSkills(prompt) {
+  _activateSkills(prompt, emitter = null) {
     this._skillPromptText = String(prompt || '');
     this._activeSkills = this.skillSystem.matchSkills(this._skillPromptText);
     this._activeSkillPrompt = this.skillSystem.getPromptForSkills(this._activeSkills);
     this.workingMemory.activeSkills = this._activeSkills.map(skill => skill.name);
     this._refreshActiveSystemPrompt();
+    // Skills used to reach the model silently: when one failed to match there
+    // was nothing to notice, so a turn that ran without its guidance looked
+    // exactly like one that ran with it.
+    emitter?.emit('skillsActivated', {
+      skills: this.workingMemory.activeSkills.slice(),
+      available: this.skillSystem.getAllSkills().filter(s => s.enabled).length,
+    });
     return this._activeSkills;
   }
 
@@ -911,7 +918,7 @@ export class Agent {
     // write tool. Refresh the small filesystem catalog so the next prompt can
     // activate it without a restart or manual reload command.
     await this.reloadSkills();
-    this._activateSkills(promptText);
+    this._activateSkills(promptText, emitter);
     // Abort any previous run
     if (this.abortController) {
       this.abortController.abort();
