@@ -63,6 +63,18 @@ program
     // the only mode where the process lives long enough for an npm call
     // to land. Doing it here as well would keep a one-shot run alive for
     // the npm timeout after the answer was already printed.
+    // Anything said about the update before the TUI starts is written to the
+    // primary screen buffer, and native-ui.js switches to the alternate buffer
+    // (\x1b[?1049h) the moment it starts — which wipes it. So every reason the
+    // auto-update gives has been invisible in interactive mode: the user saw a
+    // CLI that silently stayed on the old version. Collect them here as well
+    // and hand them to the TUI, which shows them in the transcript.
+    const startupNotices = [];
+    const notify = (text, stream = 'stderr') => {
+      startupNotices.push(String(text).replace(/\x1b\[[0-9;]*m/g, '').trim());
+      process[stream].write(text);
+    };
+
     let updateStatus = null;
     if (options.updateCheck !== false) {
       updateStatus = checkForUpdateSync();
@@ -128,11 +140,11 @@ program
         // of the repository — diverged branches, a rejected fast-forward —
         // that will not fix itself and that they need to hear about.
         if (!pulled.timedOut || options.debug) {
-          process.stderr.write(`${dim}auto-update: git pull failed — ${pulled.output}${reset}\n`);
+          notify(`${dim}auto-update: git pull failed — ${pulled.output}${reset}\n`);
         }
       }
     } else if (checkoutPlan.reason && options.debug) {
-      process.stderr.write(`${dim}auto-update: ${checkoutPlan.reason}${reset}\n`);
+      notify(`${dim}auto-update: ${checkoutPlan.reason}${reset}\n`);
     }
 
     let coldCheckRan = false;
@@ -167,14 +179,14 @@ program
         // npm succeeded but the copy on PATH is not the one it wrote: this
         // machine has a second install, or a prefix whose bin/ is not on
         // PATH. Say so, with both paths, instead of claiming an update.
-        process.stderr.write(
+        notify(
           `${dim}auto-update: npm installed ${result.installed || 'an unknown version'} in ${result.installedAt || 'the global prefix'}, `
           + `but you are running ${process.argv[1]} (${autoPlan.from}). Continuing on ${autoPlan.from}.${reset}\n`,
         );
       } catch (error) {
         // Never block the session on this: a failed install (no network, a
         // prefix that needs sudo) leaves the working build in place.
-        process.stderr.write(`${dim}auto-update skipped: ${error.message}${reset}\n`);
+        notify(`${dim}auto-update skipped: ${error.message}${reset}\n`);
       }
     } else if (coldCheckRan && !updateStatus?.latest) {
       // A check that ran and came back with nothing — a slow npm, no network,
@@ -187,7 +199,7 @@ program
       // a git checkout, where the check is deliberately skipped — announcing a
       // failure that never happened and pointing at `ettore update`, which a
       // checkout refuses in favour of `git pull`.
-      process.stderr.write(
+      notify(
         `${dim}update check did not complete (${updateStatus?.error || 'no answer'}); `
         + `run \`ettore update\` to upgrade directly.${reset}\n`,
       );
@@ -203,7 +215,7 @@ program
       // reason without having to rerun under --debug; for everyone else this
       // would just be noise about a feature they never turned on.
       if (autoPlan.reason && (autoUpdateOptIn || options.debug)) {
-        process.stderr.write(`${dim}auto-update: ${autoPlan.reason}${reset}\n`);
+        notify(`${dim}auto-update: ${autoPlan.reason}${reset}\n`);
       }
     }
 
@@ -236,6 +248,9 @@ program
       // runs the background refresh, so honouring the flag only here
       // would still hit the registry.
       updateCheck: options.updateCheck !== false,
+      // Replayed inside the TUI, because the alternate screen buffer it opens
+      // discards whatever these already wrote to the terminal.
+      startupNotices,
     };
     await startApp(tuiOptions);
   }

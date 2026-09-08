@@ -215,6 +215,14 @@ export async function startApp(options = {}) {
   process.stdout.write(ANSI.altScreen + ANSI.clear + ANSI.home + ANSI.hide + ANSI.bracketedPasteOn);
 
   const tui = new TUI();
+  // Reasons the startup update produced, printed before the alternate screen
+  // buffer opened and therefore already erased from the user's terminal. They
+  // are the only explanation for a CLI that stayed on the old version, so they
+  // belong in the transcript rather than on a screen nobody sees.
+  for (const notice of options.startupNotices || []) {
+    if (!notice) continue;
+    tui.messages.push({ role: 'system', text: `⚠ ${notice}`, tools: [], id: Date.now() });
+  }
   const mission = new MissionControl();
   tui.mission = mission.snapshot();
   const syncMission = () => {
