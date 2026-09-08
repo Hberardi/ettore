@@ -12,7 +12,7 @@
 // `runUpdate()` shells out to `npm install -g` and surfaces the same
 // output the user would have seen if they had run npm themselves.
 
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -403,6 +403,8 @@ export function describeInstall({ root = ROOT } = {}) {
 // A dist-tag ("latest", "next") or a version ("1.2.0", "1.3.0-beta.1").
 // Anything else is refused: on Windows these arguments reach cmd.exe.
 const SAFE_TARGET_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// Scoped names included, since the deferred install passes this to a shell.
+const SAFE_PACKAGE_RE = /^(?:@[A-Za-z0-9][A-Za-z0-9._-]*\/)?[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**
  * Whether a git checkout can update itself, and how.
@@ -573,6 +575,60 @@ export function runUpdate({ target = 'latest', stream = true, force = false } = 
       }
     });
   });
+}
+
+/**
+ * Install the update after this process is gone.
+ *
+ * `npm install -g` cannot complete on Windows while ETTORE is running. The CLI
+ * is launched through `ettore.cmd`, and cmd.exe keeps a batch file open for as
+ * long as it is executing it — so the shim npm has to rewrite is locked by the
+ * very process asking for the update, and the install dies with EBUSY/EPERM.
+ * There is no ordering that fixes this in-process: the lock is held by our
+ * parent, not by us. POSIX has no such restriction, which is why the same code
+ * has always worked on Linux and never on Windows.
+ *
+ * So the install is handed to a detached PowerShell that waits for this
+ * process to exit and then runs npm. The update lands while the user is doing
+ * something else and the next launch is the new version — automatic, one
+ * session later than on POSIX.
+ *
+ * @returns {{scheduled: boolean, reason?: string}}
+ */
+export function scheduleDetachedUpdate({
+  name = readLocalPackage().name,
+  target = 'latest',
+  pid = process.pid,
+  spawnFn = spawn,
+  platform = process.platform,
+} = {}) {
+  if (platform !== 'win32') return { scheduled: false, reason: 'only Windows needs the deferred install' };
+  const wanted = String(target || 'latest').trim();
+  // Both halves reach a shell, so neither may carry anything but the shape a
+  // package name and a version tag have.
+  if (!SAFE_TARGET_RE.test(wanted)) return { scheduled: false, reason: `invalid target "${wanted}"` };
+  if (!SAFE_PACKAGE_RE.test(String(name || ''))) return { scheduled: false, reason: `invalid package "${name}"` };
+
+  // Wait-Process returns as soon as our pid is gone; the extra pause covers
+  // the cmd.exe that launched us, which exits just after we do and is the one
+  // actually holding ettore.cmd open.
+  const script = [
+    `Wait-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
+    'Start-Sleep -Milliseconds 1500',
+    `npm install -g ${name}@${wanted}`,
+  ].join('; ');
+
+  try {
+    const child = spawnFn(
+      'powershell',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      { detached: true, stdio: 'ignore', windowsHide: true },
+    );
+    child.unref?.();
+    return { scheduled: true };
+  } catch (error) {
+    return { scheduled: false, reason: String(error?.message || error) };
+  }
 }
 
 // Decide whether the CLI should install a new release before the agent

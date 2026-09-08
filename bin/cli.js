@@ -12,6 +12,7 @@ import {
   COLD_CHECK_TIMEOUT_MS,
   describeInstall,
   formatBanner,
+  scheduleDetachedUpdate,
   planAutoUpdate,
   runUpdate,
   describeCheckout,
@@ -163,7 +164,23 @@ program
       status: updateStatus,
       enabled: autoUpdateOptIn,
     });
-    if (autoPlan.run) {
+    if (autoPlan.run && process.platform === 'win32') {
+      // npm cannot rewrite ettore.cmd while cmd.exe is executing it, and
+      // cmd.exe holds it open for as long as this process lives — so an
+      // in-process install can only ever fail here. Hand it to a detached
+      // PowerShell that waits for us to exit, and let the next launch be the
+      // new version. See scheduleDetachedUpdate.
+      const scheduled = scheduleDetachedUpdate({ target: 'latest' });
+      if (scheduled.scheduled) {
+        notify(
+          `${dim}↻ ETTORE ${autoPlan.from} → ${autoPlan.to}: installing in the background; `
+          + `the next launch will be ${autoPlan.to}.${reset}\n`,
+          'stdout',
+        );
+      } else {
+        notify(`${dim}auto-update could not be scheduled: ${scheduled.reason}${reset}\n`);
+      }
+    } else if (autoPlan.run) {
       process.stdout.write(`↻ ETTORE ${autoPlan.from} → ${autoPlan.to}: installing…\n`);
       try {
         const result = await runUpdate({ target: 'latest', stream: true });
