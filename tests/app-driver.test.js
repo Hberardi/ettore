@@ -354,3 +354,32 @@ test('app tools: runtime intents expose the app drivers to the model', () => {
   assert.equal(getToolTimeoutMs('browser_app'), 180_000);
   assert.equal(getToolTimeoutMs('desktop_app'), 180_000);
 });
+
+test('Chrome is found where Windows actually installs it', () => {
+  // A non-admin install goes under the user profile, not Program Files — the
+  // common case on a locked-down work machine, where the old candidate list
+  // found nothing and browser_check reported "no Chrome".
+  const local = 'C:\\Users\\re77\\AppData\\Local';
+  const userChrome = `${local}\\Google\\Chrome\\Application\\chrome.exe`;
+  assert.equal(
+    resolveChromeBinary({ LOCALAPPDATA: local }, (p) => p === userChrome),
+    userChrome,
+  );
+
+  // Edge ships with Windows, so it is the fallback that always exists.
+  const edge = 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe';
+  assert.equal(resolveChromeBinary({}, (p) => p === edge), edge);
+
+  // A machine-wide Chrome still wins over the user-profile copy.
+  const systemChrome = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+  assert.equal(
+    resolveChromeBinary({ LOCALAPPDATA: local }, (p) => p === systemChrome || p === userChrome),
+    systemChrome,
+  );
+});
+
+test('a missing LOCALAPPDATA does not produce undefined candidates', () => {
+  const probed = [];
+  resolveChromeBinary({}, (p) => { probed.push(p); return false; });
+  assert.ok(probed.every(p => typeof p === 'string' && !p.includes('undefined')), probed.join('\n'));
+});

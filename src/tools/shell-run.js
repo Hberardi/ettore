@@ -16,6 +16,7 @@
 // after that.
 
 import { spawn } from 'node:child_process';
+import { detachOptions, killProcessTree, shellInvocation } from '../utils/platform.js';
 
 // After the process exits, its own output may still be sitting in the pipe.
 // A short grace period lets that land before we stop listening; a background
@@ -25,7 +26,10 @@ const FLUSH_GRACE_MS = 150;
 const KILL_GRACE_MS = 2000;
 
 /**
- * Runs `command` through bash and resolves once the command itself is done.
+ * Runs `command` through the platform shell and resolves once the command
+ * itself is done. That shell is bash on POSIX and PowerShell on Windows — see
+ * resolveShell in utils/platform.js, and describeShell, which tells the model
+ * which syntax it is writing for.
  *
  * @returns {Promise<{stdout, stderr, code, signal, timedOut, aborted, truncated}>}
  *   Never rejects for a command that ran: a non-zero exit, a timeout and a
@@ -39,21 +43,24 @@ export function runShellCommand(command, {
   maxBytes = 10 * 1024 * 1024,
   spawnFn = spawn,
   env = process.env,
+  platform = process.platform,
 } = {}) {
   return new Promise((resolve, reject) => {
     let child;
+    const invocation = shellInvocation(command, { env, platform });
     try {
-      child = spawnFn('bash', ['-lc', String(command)], {
+      child = spawnFn(invocation.file, invocation.args, {
         cwd,
         env,
         // stdin closed outright rather than redirected inside the command
         // string: anything that reads it — a prompt, a REPL, `git commit` with
         // no -m — gets EOF instead of waiting on a pipe nobody will write to.
         stdio: ['ignore', 'pipe', 'pipe'],
-        // Its own process group, so a timeout can take down what the command
-        // started as well as the command. Without this a runaway build leaves
-        // its children behind.
-        detached: true,
+        // Its own process group on POSIX, so a timeout can take down what the
+        // command started as well as the command. Without this a runaway build
+        // leaves its children behind. On Windows the same flag would open a
+        // console window per command, so the tree is killed via taskkill.
+        ...detachOptions({ platform }),
       });
     } catch (err) {
       reject(err);
@@ -84,13 +91,10 @@ export function runShellCommand(command, {
       if (into === 'out') stdout += text; else stderr += text;
     };
 
-    // Signals go to the negated pid, which is the whole group. A command that
-    // spawned a build, a server or a test runner takes them with it.
-    const signalGroup = (sig) => {
-      try { process.kill(-child.pid, sig); } catch {
-        try { child.kill(sig); } catch { /* already gone */ }
-      }
-    };
+    // The command and everything it started: the process group on POSIX,
+    // taskkill /T on Windows. A command that spawned a build, a server or a
+    // test runner takes them with it either way.
+    const signalGroup = (sig) => { killProcessTree(child, sig, { platform }); };
 
     function stop(sig) {
       signalGroup(sig);

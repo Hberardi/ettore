@@ -1,9 +1,9 @@
-// Persistent bash session.
+// Persistent shell session.
 //
-// One long-lived `bash` subprocess shared across the whole agent run.
-// `cd`, exported variables, defined functions, and shell options persist
-// between calls — unlike the one-shot `bash` tool that spawns a fresh
-// process each time.
+// One long-lived shell subprocess shared across the whole agent run — bash on
+// POSIX, PowerShell on Windows. `cd`, exported variables, defined functions
+// and shell options persist between calls, unlike the one-shot `bash` tool
+// that spawns a fresh process each time.
 //
 // Commands are framed with a random sentinel so we can detect their end
 // without relying on a real PTY. Calls are serialized through a Promise
@@ -16,6 +16,7 @@
 import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import { resolve } from 'path';
+import { killProcessTree, resolveShell } from '../utils/platform.js';
 
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -26,11 +27,77 @@ function makeSentinel() {
   return `__ETTORE_SESSION_END_${randomBytes(8).toString('hex')}__`;
 }
 
+// Per-shell framing. Both dialects must satisfy the same contract: run the
+// command in the session's own scope (so `cd` sticks), keep the shell alive
+// after an error, and print `<sentinel>EXIT:<code>` on stdout once the command
+// is done and not before.
+export const SHELL_DIALECTS = {
+  bash: {
+    args: ['--noprofile', '--norc'],
+    env: { PS1: '', PS2: '', TERM: 'dumb' },
+    init: '',
+    // Brace group preserves shell builtins like `cd` (a subshell would lose
+    // the cwd change). The sentinel + exit code prints AFTER user output so
+    // we can frame it cleanly.
+    //
+    // `< /dev/null` on the group is what keeps this tool from freezing. The
+    // shell's stdin is the same pipe we write commands into, so a command
+    // that reads stdin — `read`, a REPL, `git commit` with no -m, an npm or
+    // sudo prompt — swallows the sentinel line below and the framing never
+    // arrives: the call then sits there for the full timeout. Worse, a
+    // command that *echoes* stdin (`cat`) hands the sentinel straight back
+    // and we frame a bogus success. Redirecting the group's default stdin
+    // fixes both; a command with its own redirect (heredoc, `< file`, an
+    // explicit pipe) still wins, because that redirect is applied closer in.
+    frame: (command, sentinel) =>
+      `{ ${command}\n} < /dev/null\nprintf '\\n%sEXIT:%d\\n' '${sentinel}' $?\n`,
+  },
+  powershell: {
+    // `-Command -` reads statements from stdin, which is what makes the
+    // session persistent. -NonInteractive is what stops Read-Host and every
+    // other prompt from eating the sentinel: it errors instead of blocking,
+    // which is the closest equivalent to bash's `< /dev/null`.
+    args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'],
+    env: {},
+    // An empty prompt so no `PS C:\>` lands in captured stdout, and Continue
+    // so a failing command does not tear the session down.
+    init: "function prompt { '' }\n$ErrorActionPreference = 'Continue'\n",
+    // No `& { }` wrapper: it would give the command its own scope and a
+    // `Set-Location` would not stick, which is the whole point of a session.
+    //
+    // Exit codes come from two places in PowerShell — $LASTEXITCODE for native
+    // executables, $? for cmdlets — so both are consulted. A cmdlet that fails
+    // leaves $LASTEXITCODE untouched from an earlier command, hence the reset.
+    frame: (command, sentinel) => [
+      '$LASTEXITCODE = 0',
+      command,
+      '$__ettore_ok = $?',
+      '$__ettore_ec = if ($__ettore_ok) { if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE } }'
+        + ' else { if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 } }',
+      `[Console]::Out.Write("\`n" + '${sentinel}' + "EXIT:" + $__ettore_ec + "\`n")`,
+      '',
+    ].join('\n'),
+  },
+};
+
+/** The dialect for this platform's session shell. */
+export function sessionDialect(options = {}) {
+  const shell = resolveShell(options);
+  // cmd.exe has no usable stdin REPL for this protocol; PowerShell is present
+  // on every supported Windows, so that is the Windows session shell.
+  const name = shell.name === 'bash' ? 'bash' : 'powershell';
+  const file = shell.name === 'cmd' ? 'powershell' : shell.file;
+  return { name, file, ...SHELL_DIALECTS[name] };
+}
+
 class BashSession {
-  constructor(workdir = process.cwd()) {
+  constructor(workdir = process.cwd(), options = {}) {
     this.workdir = resolve(workdir);
     this.process = null;
     this.alive = false;
+    this.platform = options.platform || process.platform;
+    this.dialect = options.dialect || sessionDialect({ platform: this.platform, env: options.env || process.env });
+    this._spawn = options.spawnFn || spawn;
     // Promise chain used to serialize concurrent run() calls — the shell
     // can only execute one command at a time, since stdin/stdout are shared.
     this._chain = Promise.resolve();
@@ -38,15 +105,11 @@ class BashSession {
 
   ensureStarted() {
     if (this.alive && this.process) return;
-    const proc = spawn('bash', ['--noprofile', '--norc'], {
+    const proc = this._spawn(this.dialect.file, this.dialect.args, {
       cwd: this.workdir,
-      env: {
-        ...process.env,
-        PS1: '',
-        PS2: '',
-        TERM: 'dumb',
-      },
+      env: { ...process.env, ...this.dialect.env },
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     });
     this.process = proc;
     this.alive = true;
@@ -65,6 +128,11 @@ class BashSession {
     // unhandled 'error' event and takes the CLI down; the pending call is
     // settled by the `exit` handler above.
     proc.stdin.on('error', () => {});
+    // Prompt and error-preference setup, written before any user command so
+    // its output can never land inside a framed result.
+    if (this.dialect.init) {
+      try { proc.stdin.write(this.dialect.init); } catch { /* handled above */ }
+    }
   }
 
   run(command, opts = {}) {
@@ -183,20 +251,8 @@ class BashSession {
         signal.addEventListener?.('abort', onAbort, { once: true });
       }
 
-      // Brace group preserves shell builtins like `cd` (a subshell would lose
-      // the cwd change). The sentinel + exit code prints AFTER user output so
-      // we can frame it cleanly.
-      //
-      // `< /dev/null` on the group is what keeps this tool from freezing. The
-      // shell's stdin is the same pipe we write commands into, so a command
-      // that reads stdin — `read`, a REPL, `git commit` with no -m, an npm or
-      // sudo prompt — swallows the sentinel line below and the framing never
-      // arrives: the call then sits there for the full timeout. Worse, a
-      // command that *echoes* stdin (`cat`) hands the sentinel straight back
-      // and we frame a bogus success. Redirecting the group's default stdin
-      // fixes both; a command with its own redirect (heredoc, `< file`, an
-      // explicit pipe) still wins, because that redirect is applied closer in.
-      const wrapped = `{ ${command}\n} < /dev/null\nprintf '\\n%sEXIT:%d\\n' '${sentinel}' $?\n`;
+      // See SHELL_DIALECTS for why each shell frames the way it does.
+      const wrapped = this.dialect.frame(command, sentinel);
       try {
         this.process.stdin.write(wrapped);
       } catch (err) {
@@ -215,8 +271,13 @@ class BashSession {
     this.alive = false;
     this.process = null;
     if (!proc) return;
-    try { proc.kill('SIGTERM'); } catch {}
-    const forceTimer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 2000);
+    // The session shell may have started a build or a server; killing only the
+    // shell would orphan it. Windows has no process group to signal, so this
+    // goes through taskkill /T.
+    killProcessTree(proc, 'SIGTERM', { platform: this.platform });
+    const forceTimer = setTimeout(() => {
+      killProcessTree(proc, 'SIGKILL', { platform: this.platform });
+    }, 2000);
     forceTimer.unref?.();
   }
 }

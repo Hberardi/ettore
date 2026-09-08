@@ -3,11 +3,17 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getBashSession, killBashSession } from '../src/tools/bash-session.js';
+import { getBashSession, killBashSession, sessionDialect, SHELL_DIALECTS } from '../src/tools/bash-session.js';
 
 after(() => { killBashSession(); });
 
-test('bash_session: cwd persists across calls (cd then pwd)', async () => {
+// The session runs bash on POSIX and PowerShell on Windows, so the cases
+// written in bash syntax are POSIX-only. The Windows job proves the same
+// contract through the PowerShell block at the end of this file.
+const posixOnly = { skip: process.platform === 'win32' ? 'bash syntax' : false };
+const windowsOnly = { skip: process.platform === 'win32' ? false : 'Windows shell' };
+
+test('bash_session: cwd persists across calls (cd then pwd)', posixOnly, async () => {
   killBashSession();
   const dir = await mkdtemp(join(tmpdir(), 'ettore-bashsess-'));
   try {
@@ -23,7 +29,7 @@ test('bash_session: cwd persists across calls (cd then pwd)', async () => {
   }
 });
 
-test('bash_session: exported variables persist', async () => {
+test('bash_session: exported variables persist', posixOnly, async () => {
   killBashSession();
   try {
     const session = getBashSession(process.cwd());
@@ -37,7 +43,7 @@ test('bash_session: exported variables persist', async () => {
   }
 });
 
-test('bash_session: defined shell functions persist', async () => {
+test('bash_session: defined shell functions persist', posixOnly, async () => {
   killBashSession();
   try {
     const session = getBashSession(process.cwd());
@@ -51,7 +57,7 @@ test('bash_session: defined shell functions persist', async () => {
   }
 });
 
-test('bash_session: non-zero exit code is reported, session stays alive', async () => {
+test('bash_session: non-zero exit code is reported, session stays alive', posixOnly, async () => {
   killBashSession();
   try {
     const session = getBashSession(process.cwd());
@@ -66,7 +72,7 @@ test('bash_session: non-zero exit code is reported, session stays alive', async 
   }
 });
 
-test('bash_session: concurrent run() calls are serialized in submission order', async () => {
+test('bash_session: concurrent run() calls are serialized in submission order', posixOnly, async () => {
   killBashSession();
   try {
     const session = getBashSession(process.cwd());
@@ -83,7 +89,7 @@ test('bash_session: concurrent run() calls are serialized in submission order', 
   }
 });
 
-test('bash_session: timeout kills the session and reports it', async () => {
+test('bash_session: timeout kills the session and reports it', posixOnly, async () => {
   killBashSession();
   try {
     const session = getBashSession(process.cwd());
@@ -99,7 +105,7 @@ test('bash_session: timeout kills the session and reports it', async () => {
   }
 });
 
-test('bash_session: stdout and stderr are separated', async () => {
+test('bash_session: stdout and stderr are separated', posixOnly, async () => {
   killBashSession();
   try {
     const session = getBashSession(process.cwd());
@@ -112,7 +118,7 @@ test('bash_session: stdout and stderr are separated', async () => {
   }
 });
 
-test('bash_session: file written in one call is visible to next call', async () => {
+test('bash_session: file written in one call is visible to next call', posixOnly, async () => {
   killBashSession();
   const dir = await mkdtemp(join(tmpdir(), 'ettore-bashsess-fs-'));
   try {
@@ -129,7 +135,7 @@ test('bash_session: file written in one call is visible to next call', async () 
   }
 });
 
-test('bash_session: changing the requested workdir recreates the shared shell', async () => {
+test('bash_session: changing the requested workdir recreates the shared shell', posixOnly, async () => {
   killBashSession();
   const first = await mkdtemp(join(tmpdir(), 'ettore-bashsess-first-'));
   const second = await mkdtemp(join(tmpdir(), 'ettore-bashsess-second-'));
@@ -149,7 +155,7 @@ test('bash_session: changing the requested workdir recreates the shared shell', 
   }
 });
 
-test('bash_session: a command that reads stdin gets EOF instead of hanging', async () => {
+test('bash_session: a command that reads stdin gets EOF instead of hanging', posixOnly, async () => {
   killBashSession();
   try {
     const session = getBashSession(process.cwd());
@@ -166,7 +172,7 @@ test('bash_session: a command that reads stdin gets EOF instead of hanging', asy
   }
 });
 
-test('bash_session: a command that echoes stdin cannot forge the sentinel', async () => {
+test('bash_session: a command that echoes stdin cannot forge the sentinel', posixOnly, async () => {
   killBashSession();
   try {
     const session = getBashSession(process.cwd());
@@ -184,7 +190,7 @@ test('bash_session: a command that echoes stdin cannot forge the sentinel', asyn
   }
 });
 
-test('bash_session: an explicit heredoc still wins over the /dev/null default', async () => {
+test('bash_session: an explicit heredoc still wins over the /dev/null default', posixOnly, async () => {
   killBashSession();
   try {
     const session = getBashSession(process.cwd());
@@ -194,4 +200,101 @@ test('bash_session: an explicit heredoc still wins over the /dev/null default', 
   } finally {
     killBashSession();
   }
+});
+
+// ─── Shell dialects ──────────────────────────────────────────────────────────
+// The session used to be bash-only: `spawn('bash', …)` with no platform
+// branch, so on Windows it never started at all.
+
+test('the session shell is bash on POSIX and PowerShell on Windows', async () => {
+  const posix = sessionDialect({ platform: 'linux', env: {} });
+  assert.equal(posix.name, 'bash');
+  assert.equal(posix.file, 'bash');
+  assert.deepEqual(posix.args, ['--noprofile', '--norc']);
+
+  const win = sessionDialect({ platform: 'win32', env: { PATH: '', PATHEXT: '.EXE', ComSpec: 'cmd.exe' } });
+  assert.equal(win.name, 'powershell', 'cmd.exe has no usable stdin REPL for the sentinel protocol');
+  assert.ok(win.args.includes('-Command') && win.args.includes('-'), 'must read statements from stdin');
+  assert.ok(win.args.includes('-NonInteractive'), 'a prompt would swallow the sentinel');
+});
+
+test('both dialects frame the command with the sentinel after the output', () => {
+  for (const name of ['bash', 'powershell']) {
+    const framed = SHELL_DIALECTS[name].frame('echo hello', 'SENT_123');
+    assert.ok(framed.includes('echo hello'), `${name}: command missing`);
+    assert.ok(framed.includes('SENT_123'), `${name}: sentinel missing`);
+    assert.ok(
+      framed.indexOf('echo hello') < framed.indexOf('SENT_123'),
+      `${name}: the sentinel must print after the command, or it frames an empty result`,
+    );
+    assert.ok(framed.endsWith('\n'), `${name}: the shell needs the trailing newline to execute`);
+  }
+});
+
+test('the PowerShell frame emits a parseable EXIT code and resets it first', () => {
+  const framed = SHELL_DIALECTS.powershell.frame('Get-Date', 'SENT_9');
+  // The reader matches /EXIT:(-?\d+)/ against what follows the sentinel.
+  assert.match(framed, /EXIT/);
+  assert.ok(framed.includes('$LASTEXITCODE = 0'), 'a stale code from an earlier command would be reported');
+  assert.ok(framed.includes('$?'), 'cmdlets do not set $LASTEXITCODE, so $? is needed too');
+});
+
+test('the PowerShell dialect does not put the command in its own scope', () => {
+  // `& { Set-Location X }` would run in a child scope and the cd would not
+  // stick — which is the only reason to have a persistent session at all.
+  const framed = SHELL_DIALECTS.powershell.frame('Set-Location C:\\tmp', 'S');
+  assert.ok(!/&\s*\{/.test(framed), `command must not be wrapped in a script block: ${framed}`);
+});
+
+test('the PowerShell session silences the prompt before any command runs', () => {
+  const init = SHELL_DIALECTS.powershell.init;
+  assert.match(init, /function prompt/, 'a PS C:\\> prompt would land inside captured stdout');
+  assert.match(init, /ErrorActionPreference/, 'a failing command must not tear the session down');
+  assert.equal(SHELL_DIALECTS.bash.init, '', 'bash needs no init — PS1/PS2 are cleared via env');
+});
+
+
+// ─── PowerShell session, on Windows ──────────────────────────────────────────
+// The same contract the bash cases above check, in the dialect Windows gets.
+// These only run in the windows-latest CI job — which is the point: the
+// PowerShell dialect cannot be validated from a Linux machine.
+
+test('PowerShell session: location persists across calls', windowsOnly, async () => {
+  const session = getBashSession(process.cwd());
+  const before = await session.run('(Get-Location).Path');
+  assert.equal(before.exitCode, 0, `first call failed: ${JSON.stringify(before)}`);
+
+  await session.run('Set-Location ..');
+  const after = await session.run('(Get-Location).Path');
+  assert.notEqual(after.stdout.trim(), before.stdout.trim(), 'Set-Location did not persist');
+});
+
+test('PowerShell session: variables persist across calls', windowsOnly, async () => {
+  const session = getBashSession(process.cwd());
+  await session.run('$env:ETTORE_PROBE = "kept"');
+  const out = await session.run('$env:ETTORE_PROBE');
+  assert.match(out.stdout, /kept/, JSON.stringify(out));
+});
+
+test('PowerShell session: a native non-zero exit is reported and the session lives', windowsOnly, async () => {
+  const session = getBashSession(process.cwd());
+  const failed = await session.run('cmd /c exit 3');
+  assert.equal(failed.exitCode, 3, JSON.stringify(failed));
+
+  const after = await session.run('Write-Output alive');
+  assert.equal(after.exitCode, 0);
+  assert.match(after.stdout, /alive/);
+});
+
+test('PowerShell session: stdout and stderr stay separated', windowsOnly, async () => {
+  const session = getBashSession(process.cwd());
+  const out = await session.run('Write-Output out; [Console]::Error.WriteLine("err")');
+  assert.match(out.stdout, /out/);
+  assert.match(out.stderr, /err/);
+});
+
+test('PowerShell session: no prompt text leaks into captured output', windowsOnly, async () => {
+  const session = getBashSession(process.cwd());
+  const out = await session.run('Write-Output solo');
+  assert.equal(out.stdout.trim(), 'solo', `prompt or banner leaked: ${JSON.stringify(out.stdout)}`);
 });

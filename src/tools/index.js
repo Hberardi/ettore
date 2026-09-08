@@ -9,6 +9,28 @@ import { join, extname, dirname } from 'path';
 import { glob as globby } from 'glob';
 import { uiBridge } from './bridge.js';
 import { runShellCommand } from './shell-run.js';
+import { detachOptions, killProcessTree, resolveBinary, resolvePython, shellInvocation } from '../utils/platform.js';
+import { searchFiles } from './grep-fallback.js';
+import { applyEol, detectEol, splitTolerant, toLf } from './line-endings.js';
+import { describeShell } from '../utils/platform.js';
+
+// Appended to the shell tool descriptions so the model writes commands for the
+// shell it actually has. Empty on POSIX, where bash is the assumption already
+// baked into every example. The tool definitions are built once at import, so
+// this is read once per process — changing ETTORE_SHELL needs a restart.
+function shellHint() {
+  const note = describeShell();
+  return note ? ` ${note}` : '';
+}
+
+// A spawn that failed because the executable is not installed, as opposed to a
+// command that ran and exited non-zero. Windows reports a missing binary as
+// ENOENT too, but the message wording differs from POSIX.
+function isMissingBinary(err) {
+  if (!err) return false;
+  if (err.code === 'ENOENT' || err.errno === -2 || err.errno === -4058) return true;
+  return /ENOENT|not found|not recognized|cannot find/i.test(String(err.message || ''));
+}
 import { transcribeVideo, renderTranscript } from './video-transcript.js';
 import { describeVideo } from './video-describe.js';
 import { fetchWebImage } from './web-image.js';
@@ -788,41 +810,57 @@ function trimLogBuffer(lines, max = DEV_SERVER_LOG_MAX) {
   return lines.slice(lines.length - max);
 }
 
+// A runner descriptor with the executable resolved for this platform.
+//
+// On Windows npm/yarn/pnpm are `.cmd` shims that child_process refuses to
+// spawn without a shell (CVE-2024-27980, Node ≥18.20) and `python3` usually
+// does not exist at all — `python` does. Every check and test command used to
+// hardcode the POSIX name, so run_checks/run_tests/dep_inspect all failed
+// there. Args are hardcoded here, never user input, so `shell: true` is safe.
+export function platformRunner(kind, name, args) {
+  const bin = name === 'python3' ? resolvePython() : resolveBinary(name);
+  return { kind, cmd: bin.file, shell: bin.shell, args };
+}
+
 async function detectTestRunner(cwd) {
-  if (await fileExists(join(cwd, 'package.json'))) return { kind: 'npm', cmd: 'npm', args: ['test', '--', '--silent'] };
+  if (await fileExists(join(cwd, 'package.json'))) return platformRunner('npm', 'npm', ['test', '--', '--silent']);
   if (await fileExists(join(cwd, 'pytest.ini')) || await fileExists(join(cwd, 'pyproject.toml')) || await fileExists(join(cwd, 'requirements.txt'))) {
-    return { kind: 'pytest', cmd: 'python3', args: ['-m', 'pytest', '-q'] };
+    return platformRunner('pytest', 'python3', ['-m', 'pytest', '-q']);
   }
-  if (await fileExists(join(cwd, 'go.mod'))) return { kind: 'go', cmd: 'go', args: ['test', './...'] };
-  if (await fileExists(join(cwd, 'Cargo.toml'))) return { kind: 'cargo', cmd: 'cargo', args: ['test', '--quiet'] };
+  if (await fileExists(join(cwd, 'go.mod'))) return platformRunner('go', 'go', ['test', './...']);
+  if (await fileExists(join(cwd, 'Cargo.toml'))) return platformRunner('cargo', 'cargo', ['test', '--quiet']);
   return null;
 }
 
 async function detectCheckCommands(cwd) {
-  const checks = [];
+  const check = (name, bin, args) => ({ name, ...platformRunner(name, bin, args) });
   if (await fileExists(join(cwd, 'package.json'))) {
-    checks.push({ name: 'lint', cmd: 'npm', args: ['run', 'lint'] });
-    checks.push({ name: 'typecheck', cmd: 'npm', args: ['run', 'typecheck'] });
-    checks.push({ name: 'test', cmd: 'npm', args: ['test', '--', '--silent'] });
-    return checks;
+    return [
+      check('lint', 'npm', ['run', 'lint']),
+      check('typecheck', 'npm', ['run', 'typecheck']),
+      check('test', 'npm', ['test', '--', '--silent']),
+    ];
   }
   if (await fileExists(join(cwd, 'pyproject.toml')) || await fileExists(join(cwd, 'pytest.ini')) || await fileExists(join(cwd, 'requirements.txt'))) {
-    checks.push({ name: 'lint', cmd: 'python3', args: ['-m', 'ruff', 'check', '.'] });
-    checks.push({ name: 'typecheck', cmd: 'python3', args: ['-m', 'mypy', '.'] });
-    checks.push({ name: 'test', cmd: 'python3', args: ['-m', 'pytest', '-q'] });
-    return checks;
+    return [
+      check('lint', 'python3', ['-m', 'ruff', 'check', '.']),
+      check('typecheck', 'python3', ['-m', 'mypy', '.']),
+      check('test', 'python3', ['-m', 'pytest', '-q']),
+    ];
   }
   if (await fileExists(join(cwd, 'go.mod'))) {
-    checks.push({ name: 'lint', cmd: 'go', args: ['vet', './...'] });
-    checks.push({ name: 'test', cmd: 'go', args: ['test', './...'] });
-    return checks;
+    return [
+      check('lint', 'go', ['vet', './...']),
+      check('test', 'go', ['test', './...']),
+    ];
   }
   if (await fileExists(join(cwd, 'Cargo.toml'))) {
-    checks.push({ name: 'lint', cmd: 'cargo', args: ['clippy', '--quiet'] });
-    checks.push({ name: 'test', cmd: 'cargo', args: ['test', '--quiet'] });
-    return checks;
+    return [
+      check('lint', 'cargo', ['clippy', '--quiet']),
+      check('test', 'cargo', ['test', '--quiet']),
+    ];
   }
-  return checks;
+  return [];
 }
 
 function buildPatchSummary({ filePath, oldString, newString, beforeCount, afterCount, applied }) {
@@ -927,9 +965,10 @@ export const toolHandlers = {
       const out = [];
 
       const runNpm = async () => {
+        const npmBin = resolveBinary('npm');
         const [outdated, audit] = await Promise.allSettled([
-          execFileAsync('npm', ['outdated', '--json'], { cwd, maxBuffer: 10 * 1024 * 1024, signal: getToolAbortSignal(30000) }),
-          execFileAsync('npm', ['audit', '--json'], { cwd, maxBuffer: 10 * 1024 * 1024, signal: getToolAbortSignal(30000) }),
+          execFileAsync(npmBin.file, ['outdated', '--json'], { cwd, maxBuffer: 10 * 1024 * 1024, signal: getToolAbortSignal(30000), shell: npmBin.shell, windowsHide: true }),
+          execFileAsync(npmBin.file, ['audit', '--json'], { cwd, maxBuffer: 10 * 1024 * 1024, signal: getToolAbortSignal(30000), shell: npmBin.shell, windowsHide: true }),
         ]);
         let outdatedRows = [];
         if (outdated.status === 'fulfilled') {
@@ -951,8 +990,9 @@ export const toolHandlers = {
       const runPython = async () => {
         let freeze = '';
         try {
-          const { stdout } = await execFileAsync('python3', ['-m', 'pip', 'list', '--outdated', '--format=json'], {
-            cwd, maxBuffer: 10 * 1024 * 1024, signal: getToolAbortSignal(30000),
+          const pyBin = resolvePython();
+          const { stdout } = await execFileAsync(pyBin.file, ['-m', 'pip', 'list', '--outdated', '--format=json'], {
+            cwd, maxBuffer: 10 * 1024 * 1024, signal: getToolAbortSignal(30000), shell: pyBin.shell, windowsHide: true,
           });
           freeze = stdout || '[]';
         } catch {}
@@ -965,8 +1005,9 @@ export const toolHandlers = {
       const runCargo = async () => {
         let tree = '';
         try {
-          const { stdout } = await execFileAsync('cargo', ['outdated', '--root-deps-only'], {
-            cwd, maxBuffer: 10 * 1024 * 1024, signal: getToolAbortSignal(30000),
+          const cargoBin = resolveBinary('cargo');
+          const { stdout } = await execFileAsync(cargoBin.file, ['outdated', '--root-deps-only'], {
+            cwd, maxBuffer: 10 * 1024 * 1024, signal: getToolAbortSignal(30000), shell: cargoBin.shell, windowsHide: true,
           });
           tree = stdout || '';
         } catch {}
@@ -977,8 +1018,9 @@ export const toolHandlers = {
       const runGo = async () => {
         let modules = '';
         try {
-          const { stdout } = await execFileAsync('go', ['list', '-m', '-u', 'all'], {
-            cwd, maxBuffer: 10 * 1024 * 1024, signal: getToolAbortSignal(30000),
+          const goBin = resolveBinary('go');
+          const { stdout } = await execFileAsync(goBin.file, ['list', '-m', '-u', 'all'], {
+            cwd, maxBuffer: 10 * 1024 * 1024, signal: getToolAbortSignal(30000), shell: goBin.shell, windowsHide: true,
           });
           modules = stdout || '';
         } catch {}
@@ -1070,12 +1112,10 @@ export const toolHandlers = {
 
       if (act === 'stop') {
         if (!rec) return `Server "${key}" not running.`;
-        try {
-          if (rec.pid) process.kill(-rec.pid, 'SIGTERM');
-          else rec.proc.kill('SIGTERM');
-        } catch {
-          try { rec.proc.kill('SIGTERM'); } catch {}
-        }
+        // A dev server spawns workers and watchers; killing only the shell
+        // leaves them holding the port. POSIX signals the group, Windows
+        // walks the tree with taskkill /T.
+        killProcessTree(rec.proc, 'SIGTERM', {});
         rec.running = false;
         devServers.delete(key);
         return `Stopped server "${key}" (pid ${rec.pid ?? 'n/a'}).`;
@@ -1086,11 +1126,12 @@ export const toolHandlers = {
         if (rec?.running) return `Server "${key}" already running (pid ${rec.pid}). Stop it first or use another id.`;
 
         const cwd = workdir || process.cwd();
-        const child = spawn('bash', ['-lc', String(command)], {
+        const invocation = shellInvocation(String(command));
+        const child = spawn(invocation.file, invocation.args, {
           cwd,
           env: { ...process.env },
-          detached: true,
           stdio: ['ignore', 'pipe', 'pipe'],
+          ...detachOptions(),
         });
         const serverRec = {
           id: key,
@@ -1748,13 +1789,21 @@ export const toolHandlers = {
       try {
         output = await tryRipgrep();
       } catch (rgErr) {
-        const rgMissing = /ENOENT|not found/i.test(String(rgErr?.message || ''));
+        const rgMissing = isMissingBinary(rgErr);
         if (!rgMissing && rgErr?.stdout) output = rgErr.stdout;
         if (!output) {
           try {
             output = await tryGrep();
           } catch (grepErr) {
             if (grepErr?.stdout) output = grepErr.stdout;
+            // Neither backend is installed — Windows has no rg and no grep.
+            // The built-in searcher reproduces -w -F with wholeWord+fixed.
+            else if (isMissingBinary(grepErr)) {
+              output = await searchFiles({
+                pattern: q, path: searchPath, fixed: true, wholeWord: true,
+                maxMatches: safeLimit, signal: getToolAbortSignal(30000),
+              });
+            }
             // grep exits 1 with no output when there are simply no matches —
             // treat that as "no matches", not an error.
             else if (grepErr?.code === 1) output = '';
@@ -1842,6 +1891,9 @@ export const toolHandlers = {
             maxBuffer: 20 * 1024 * 1024,
             timeout,
             signal: getToolAbortSignal(timeout + 5000),
+            // A .cmd shim on Windows only runs through a shell.
+            shell: Boolean(c.shell),
+            windowsHide: true,
           });
           out.push(`[${c.name}] PASS\n${splitCommandOutput({ stdout, stderr, exitCode: 0 })}`);
         } catch (error) {
@@ -1882,16 +1934,19 @@ export const toolHandlers = {
       if (selected === 'auto') {
         runner = await detectTestRunner(cwd);
         if (!runner) return 'Error: no supported test runner detected (package.json, pytest, go.mod, Cargo.toml).';
+      // An explicitly requested suite goes through the same platform
+      // resolution as the auto-detected one, or npm's .cmd shim and the
+      // missing python3 come straight back on Windows.
       } else if (selected === 'npm') {
-        runner = { kind: 'npm', cmd: 'npm', args: ['test', '--', '--silent'] };
+        runner = platformRunner('npm', 'npm', ['test', '--', '--silent']);
       } else if (selected === 'node') {
-        runner = { kind: 'node', cmd: 'node', args: ['--test'] };
+        runner = platformRunner('node', 'node', ['--test']);
       } else if (selected === 'pytest') {
-        runner = { kind: 'pytest', cmd: 'python3', args: ['-m', 'pytest', '-q'] };
+        runner = platformRunner('pytest', 'python3', ['-m', 'pytest', '-q']);
       } else if (selected === 'go') {
-        runner = { kind: 'go', cmd: 'go', args: ['test', './...'] };
+        runner = platformRunner('go', 'go', ['test', './...']);
       } else if (selected === 'cargo') {
-        runner = { kind: 'cargo', cmd: 'cargo', args: ['test', '--quiet'] };
+        runner = platformRunner('cargo', 'cargo', ['test', '--quiet']);
       } else {
         return `Error: unsupported suite "${suite}". Use one of: auto, npm, node, pytest, go, cargo.`;
       }
@@ -1902,6 +1957,8 @@ export const toolHandlers = {
         maxBuffer: 20 * 1024 * 1024,
         timeout: safeTimeout,
         signal: getToolAbortSignal(safeTimeout + 5000),
+        shell: Boolean(runner.shell),
+        windowsHide: true,
       });
       return `Runner: ${runner.kind}\nResult: PASS\n${splitCommandOutput({ stdout, stderr, exitCode: 0 })}`;
     } catch (error) {
@@ -2266,9 +2323,14 @@ export const toolHandlers = {
   async write({ file_path, content }) {
     try {
       const exists = await fileExists(file_path);
+      // Rewriting an existing CRLF file with LF turns a small change into a
+      // whole-file diff on a Windows checkout. Keep whatever the file already
+      // uses; a brand new file gets the content's own endings.
+      let targetEol = null;
       if (exists) {
         let oldContent = '';
         try { oldContent = await readFile(file_path, 'utf-8'); } catch {}
+        targetEol = detectEol(oldContent);
         const ok = await requestEditConfirmation({
           filePath: file_path,
           oldString: oldContent,
@@ -2283,8 +2345,9 @@ export const toolHandlers = {
           return `Cancelled by user: refused to overwrite ${file_path}.`;
         }
       }
-      const lines = content.split('\n').length;
-      await writeFile(file_path, content, 'utf-8');
+      const body = targetEol ? applyEol(content, targetEol) : content;
+      const lines = toLf(body).split('\n').length;
+      await writeFile(file_path, body, 'utf-8');
       uiBridge.emit('fileChanged', { type: 'write', path: file_path, lines });
       return `✓ Written ${lines} lines to ${file_path}`;
     } catch (error) {
@@ -2295,12 +2358,17 @@ export const toolHandlers = {
   async edit({ file_path, old_string, new_string }) {
     try {
       const content = await readFile(file_path, 'utf-8');
-      const parts = content.split(old_string);
-      if (parts.length === 1) {
+      // A CRLF checkout (Git for Windows default) plus a model that writes \n
+      // used to fail every multi-line edit here. Match tolerantly, then put the
+      // file's own line ending back so the diff stays the size of the change.
+      const eol = detectEol(content);
+      const match = splitTolerant(content, old_string);
+      const parts = match.parts;
+      if (match.count === 0) {
         return `Error: old_string not found in ${file_path}`;
       }
-      if (parts.length > 2) {
-        return `Error: old_string matches ${parts.length - 1} locations in ${file_path}. Provide more surrounding context to make it unique.`;
+      if (match.count > 1) {
+        return `Error: old_string matches ${match.count} locations in ${file_path}. Provide more surrounding context to make it unique.`;
       }
       const ok = await requestEditConfirmation({
         filePath: file_path,
@@ -2315,10 +2383,13 @@ export const toolHandlers = {
         }
         return `Cancelled by user: refused to apply edit to ${file_path}.`;
       }
-      const oldLines = old_string.split('\n').length;
-      const newLines = new_string.split('\n').length;
+      const oldLines = toLf(old_string).split('\n').length;
+      const newLines = toLf(new_string).split('\n').length;
       const diff = newLines - oldLines;
-      await writeFile(file_path, parts.join(new_string), 'utf-8');
+      // `parts` came back in LF when the match needed normalising, so the join
+      // is done in LF and the file's convention applied once, at the end.
+      const joined = parts.join(match.mode === 'normalized' ? toLf(new_string) : new_string);
+      await writeFile(file_path, applyEol(joined, eol), 'utf-8');
       uiBridge.emit('fileChanged', { type: 'edit', path: file_path, oldLines, newLines, diff });
       return `✓ Edited ${file_path} (${oldLines} → ${newLines} lines, ${diff > 0 ? '+' : ''}${diff})`;
     } catch (error) {
@@ -2371,13 +2442,21 @@ export const toolHandlers = {
       try {
         output = await tryRipgrep();
       } catch (rgErr) {
-        const rgMissing = /ENOENT|not found/i.test(String(rgErr?.message || ''));
+        const rgMissing = isMissingBinary(rgErr);
         if (!rgMissing && rgErr?.stdout) output = rgErr.stdout;
         if (!output) {
           try {
             output = await tryGrep();
           } catch (grepErr) {
             if (grepErr?.stdout) output = grepErr.stdout;
+            // Neither ripgrep nor grep exists — the normal case on Windows.
+            // Fall back to the built-in searcher rather than failing the tool.
+            else if (isMissingBinary(grepErr)) {
+              output = await searchFiles({
+                pattern, path: searchPath, include,
+                maxMatches: safeLimit, signal: getToolAbortSignal(),
+              });
+            } else if (grepErr?.code === 1) output = '';
             else return `Error: ${grepErr.message}`;
           }
         }
@@ -2989,7 +3068,7 @@ export const toolDefinitions = [
     type: 'function',
     function: {
       name: 'bash',
-      description: 'Execute a shell command in a fresh subprocess and return the output. Stateless — every call starts in the original cwd with the original env. Use `bash_session` instead when later commands need state from earlier ones. stdin is /dev/null: a command that waits for input gets EOF instead of hanging, so pass flags like -y/--yes/-m rather than relying on a prompt.',
+      description: 'Execute a shell command in a fresh subprocess and return the output. Stateless — every call starts in the original cwd with the original env. Use `bash_session` instead when later commands need state from earlier ones. stdin is /dev/null: a command that waits for input gets EOF instead of hanging, so pass flags like -y/--yes/-m rather than relying on a prompt.' + shellHint(),
       parameters: {
         type: 'object',
         properties: {
@@ -3005,7 +3084,7 @@ export const toolDefinitions = [
     type: 'function',
     function: {
       name: 'bash_session',
-      description: 'Execute a shell command in a PERSISTENT bash session. Working directory, exported variables, defined functions, and shell options persist between calls — so `cd subdir` followed by `pwd` returns the new path, and a `VAR=x` followed by `echo $VAR` returns x. Use this when later commands depend on state from earlier ones (cd, source, exports, function defs). The session auto-respawns if it crashes or is killed by a timeout. stdin is /dev/null: a command that waits for input gets EOF instead of hanging, so pass flags like -y/--yes/-m rather than relying on a prompt.',
+      description: 'Execute a shell command in a PERSISTENT bash session. Working directory, exported variables, defined functions, and shell options persist between calls — so `cd subdir` followed by `pwd` returns the new path, and a `VAR=x` followed by `echo $VAR` returns x. Use this when later commands depend on state from earlier ones (cd, source, exports, function defs). The session auto-respawns if it crashes or is killed by a timeout. stdin is /dev/null: a command that waits for input gets EOF instead of hanging, so pass flags like -y/--yes/-m rather than relying on a prompt.' + shellHint(),
       parameters: {
         type: 'object',
         properties: {

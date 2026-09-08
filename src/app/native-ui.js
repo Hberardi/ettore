@@ -20,6 +20,7 @@ import * as loops from '../loops/index.js';
 import { MissionControl } from '../mission/index.js';
 import { autoResumeDecision, DEFAULT_MAX_AUTO_RESUMES } from './auto-resume.js';
 import { checkForUpdate, readLocalPackage } from '../cli/update.js';
+import { baseNameOf } from '../utils/platform.js';
 
 const NON_METERED_PROVIDERS = new Set(['ollama', 'nvidia', 'minimax', 'claude-code']);
 
@@ -195,7 +196,19 @@ const SUBMENU_COMMANDS = {
 
 export async function startApp(options = {}) {
   if (!process.stdin.isTTY) {
-    console.error('ettore requires an interactive terminal (TTY)');
+    // Git Bash / MSYS terminals (mintty) pipe stdin instead of giving Node a
+    // console handle, so this fires on Windows even though the user is sitting
+    // at a perfectly interactive terminal. Saying only "needs a TTY" there
+    // reads as "ettore does not work", when the fix is one command.
+    console.error('ettore requires an interactive terminal (TTY).');
+    if (process.platform === 'win32') {
+      console.error('');
+      console.error('Git Bash and MSYS terminals do not give Node a real console handle.');
+      console.error('Run ettore from Windows Terminal, PowerShell or cmd — or, to stay in');
+      console.error('Git Bash, prefix it with winpty:');
+      console.error('');
+      console.error('    winpty ettore');
+    }
     process.exit(1);
   }
 
@@ -1242,7 +1255,7 @@ export async function startApp(options = {}) {
 uiBridge.on('fileChanged', ({ type, path, lines, oldLines, newLines, diff }) => {
   mission.fileChanged({ type, path });
   syncMission();
-  const fileName = path.split('/').pop();
+  const fileName = baseNameOf(path);
   const icon = type === 'write' ? '📝' : '✏️';
   // `write` reports a single line count; `edit` reports the before/after pair.
   // Reading `lines` for both is what produced "app.py (undefined lines)".

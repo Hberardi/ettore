@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as update from '../src/cli/update.js';
+import { devNull } from 'node:os';
 
 const updatable = { updatable: true, reason: null };
 const status = (current, latest) => ({ current, latest, outdated: true });
@@ -291,7 +292,7 @@ test('describeCheckout reports whether a fast-forward is possible, and why not',
   const dir = mk(join(tmpdir(), 'ettore-checkout-'));
   const git = (...args) => execFileSync('git', args, {
     cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@e.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@e.com', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
+    env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@e.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@e.com', GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_SYSTEM: devNull },
   });
   try {
     git('init', '-q', '-b', 'main');

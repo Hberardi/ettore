@@ -9,7 +9,15 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Windows was never in the matrix, which is why the platform rotted
+    # unnoticed: bash-only spawns, npm's .cmd shim, CRLF edits and `/`-split
+    # paths all passed CI on Linux while being broken for every Windows user.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    name: test (${{ matrix.os }})
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,12 +34,16 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Lint and the layout check are platform-independent, so one run is
+      # enough and Windows does not need a Python on PATH for them.
       - name: Run lint
+        if: matrix.os == 'ubuntu-latest'
         run: npm run lint
 
       - name: Validate TUI layout
+        if: matrix.os == 'ubuntu-latest'
         run: python3 test_display.py
 
       - name: Validate release package
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: matrix.os == 'ubuntu-latest' && startsWith(github.ref, 'refs/tags/v')
         run: npm pack --dry-run --ignore-scripts

@@ -8,6 +8,64 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Added — Windows is a supported platform, not an accident
+
+ETTORE ran on Windows the way any Node program does, and then failed at every
+point where it assumed it was on Linux. The failures were independent, so
+fixing one only moved the wall:
+
+- **The shell.** `bash -lc` was hardcoded in three places — the `bash` tool,
+  the persistent session and `dev_server`. With no `bash.exe` on PATH every
+  command the agent ran died with ENOENT. Commands now go through the platform
+  shell: bash on POSIX, **PowerShell** on Windows. Git Bash is not preferred
+  even when present, because a `bash` on a Windows PATH is often WSL's, and
+  that one cannot see `C:\…` the way the caller means. `ETTORE_SHELL=bash`
+  overrides it.
+- **The model did not know which shell it had**, so it wrote bash pipelines
+  and got parse errors it could not diagnose. The `bash` and `bash_session`
+  tool descriptions now carry a Windows-only note naming the conventions
+  (`Select-String` not grep, `;` not `&&`, `$env:VAR` not `$VAR`).
+- **Killing a command.** A timeout signalled the negated pid, which is a
+  process group on POSIX and an exception on Windows — so a runaway build
+  survived, holding its port. The tree now goes through `taskkill /T` there.
+  `detached` was dropped on Windows too, where it opens a console window on
+  every single command instead of creating a group.
+- **`npm` is `npm.cmd`**, and since Node 18.20 (CVE-2024-27980) a `.cmd`
+  cannot be spawned without a shell. `run_checks`, `run_tests` and
+  `dep_inspect` all failed on that. The fix already existed in `update.js`,
+  written the day someone hit it there, and had never been propagated;
+  it is now a shared resolver. `python3` resolves to `python` where that is
+  the name that exists.
+- **Code search had no backend.** `grep` and `repo_find_symbol` shell out to
+  ripgrep, then to grep. Windows ships neither, so the tool a turn *starts*
+  with returned an error. There is now a built-in searcher underneath both —
+  slower than ripgrep, present everywhere, same `path:line:text` output.
+- **Every multi-line edit failed.** Git for Windows checks files out CRLF;
+  `read` handed the model lines ending in `\r`; the model wrote `old_string`
+  back with `\n`; `edit` matched literally and reported "old_string not
+  found". Always, not sometimes. Matching now tolerates the mismatch and
+  writing restores the file's own convention, so a two-line change stays a
+  two-line diff. `write` no longer flips a CRLF file to LF behind your back.
+- **The TUI printed the wrong paths.** The header did
+  `cwd.split('/').slice(-2)`, which finds no separator in `C:\Users\re77\zp`
+  and printed the whole path into a field sized for two segments.
+- **Git Bash could not start the CLI at all** — mintty pipes stdin, so
+  `isTTY` is false and ETTORE exited saying it needed a terminal, which read
+  as "does not work". It now names the fix: Windows Terminal, or `winpty
+  ettore`.
+- Chrome is found where Windows actually puts it for a non-admin install
+  (`%LOCALAPPDATA%`), with Edge as the fallback that is always present.
+
+**CI now runs on `windows-latest` as well as `ubuntu-latest`.** That is the
+part that matters most: none of the above was caught for the same reason —
+the matrix was Linux-only, so Windows rotted with every green build. The
+platform decisions are unit-tested from either OS; the cases that need a real
+shell are marked POSIX-only, and the PowerShell session has its own tests that
+run in the Windows job.
+
+A `.gitattributes` now pins the repository's own checkout to LF, with CRLF
+kept for `.ps1`/`.cmd`/`.bat`, which need it.
+
 ## [1.3.7] — 2026-09-06
 
 ### Added — a git checkout now updates itself at startup, like an npm install does

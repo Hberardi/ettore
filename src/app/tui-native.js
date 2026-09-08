@@ -2,6 +2,7 @@ import { connectionManager } from '../providers/index.js';
 import { saveConfig } from '../config/index.js';
 import { listInstallSessionApprovals } from '../tools/index.js';
 import { stripAllAnsi, stripOrphans } from '../utils/ansi.js';
+import { shortenPath, baseNameOf, hasPathSeparator } from '../utils/platform.js';
 
 // ─── Themes ────────────────────────────────────────────────────────────────
 export const THEMES = {
@@ -397,7 +398,7 @@ class TUI {
   _renderWorkspaceBanner(maxWidth) {
     const provider = connectionManager.activeProvider || 'no provider';
     const mode = this.mode.toUpperCase();
-    const workdir = process.cwd().split('/').slice(-2).join('/');
+    const workdir = shortenPath(process.cwd());
     const line = ` ${C.accent}${C.bold}▌${C.reset} ${C.bold}${C.text}${mode}${C.reset} ${C.dim}workspace${C.reset} ${C.text}${workdir}${C.reset} ${C.dim}· llm:${C.reset}${provider === 'no provider' ? C.warn : C.accent}${provider}${C.reset} ${C.dim}· / commands · 📎 attach · ! shell${C.reset}`;
     return [this._truncateVisual(line, maxWidth), ''];
   }
@@ -685,8 +686,7 @@ class TUI {
       case 'grep':
         desc = args.pattern ? `"${args.pattern}"` : '';
         if (args.path) {
-          const p = args.path.split('/');
-          desc += ` in ${p.slice(-1).join('/')}`;
+          desc += ` in ${baseNameOf(args.path)}`;
         }
         break;
       case 'list_dir':
@@ -720,9 +720,8 @@ class TUI {
         desc = '';
     }
     // Keep only the last 2 path segments for file paths to save space
-    if (['read','write','edit'].includes(name) && desc.includes('/')) {
-      const parts = desc.split('/');
-      desc = parts.slice(-2).join('/');
+    if (['read','write','edit'].includes(name) && hasPathSeparator(desc)) {
+      desc = shortenPath(desc);
     }
     // Model-supplied args may contain ANSI orphans — sanitize before display.
     desc = stripAllAnsi(desc).replace(/\s+/g, ' ').trim();
@@ -1241,7 +1240,7 @@ class TUI {
 
     const provider = connectionManager.activeProvider || this.provider || 'none';
     const model = connectionManager.activeModel || this.model || 'none';
-    const cwdDisplay = process.cwd().split('/').slice(-2).join('/');
+    const cwdDisplay = shortenPath(process.cwd());
     lines.push(`${C.dim}◉ provider${C.reset} ${C.text}${this._truncate(provider, Math.max(8, width - 11))}${C.reset}`);
     lines.push(`${C.dim}◈ model${C.reset}    ${C.text}${this._truncate(model, Math.max(8, width - 11))}${C.reset}`);
     lines.push(`${C.dim}⌂ cwd${C.reset}      ${C.text}${this._truncate(cwdDisplay, Math.max(8, width - 11))}${C.reset}`);

@@ -33,14 +33,30 @@ const CHROME_CANDIDATES = [
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  // Edge is on every Windows install, so it is the reliable last resort.
+  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
 ];
+
+// Chrome installed without admin rights lands under the user profile, not
+// Program Files — the common case on a locked-down work machine. These are
+// resolved per call because they depend on the environment.
+function userProfileCandidates(env) {
+  const local = env.LOCALAPPDATA;
+  if (!local) return [];
+  return [
+    `${local}\\Google\\Chrome\\Application\\chrome.exe`,
+    `${local}\\Chromium\\Application\\chrome.exe`,
+    `${local}\\Microsoft\\Edge\\Application\\msedge.exe`,
+  ];
+}
 
 // Chrome is the only hard requirement of this module; make the lookup
 // injectable so the resolution order stays testable without a browser.
 export function resolveChromeBinary(env = process.env, exists = existsSync) {
   const override = String(env.ETTORE_CHROME_BIN || env.CHROME_PATH || '').trim();
   if (override) return exists(override) ? override : null;
-  for (const candidate of CHROME_CANDIDATES) {
+  for (const candidate of [...CHROME_CANDIDATES, ...userProfileCandidates(env)]) {
     if (exists(candidate)) return candidate;
   }
   return null;

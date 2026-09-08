@@ -9,6 +9,7 @@ import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tools, commands } from '../examples/plugins/git-history/index.js';
+import { devNull } from 'node:os';
 
 const run = (cwd, ...args) => execFileSync('git', args, {
   cwd,
@@ -17,7 +18,7 @@ const run = (cwd, ...args) => execFileSync('git', args, {
     ...process.env,
     GIT_AUTHOR_NAME: 'Test Author', GIT_AUTHOR_EMAIL: 'test@example.com',
     GIT_COMMITTER_NAME: 'Test Author', GIT_COMMITTER_EMAIL: 'test@example.com',
-    GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_SYSTEM: devNull,
   },
 });
 
