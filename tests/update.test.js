@@ -23,7 +23,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '..');
 
-const update = await import(`${REPO_ROOT}/src/cli/update.js`);
+// An absolute path is not a valid ESM specifier on Windows: `D:\\…` parses
+// as a URL with protocol `d:` and the loader refuses it.
+const moduleUrl = (rel) => pathToFileURL(resolve(REPO_ROOT, rel)).href;
+
+const update = await import(moduleUrl('src/cli/update.js'));
 
 test('readLocalPackage returns the version from package.json', () => {
   const pkg = update.readLocalPackage();
@@ -242,6 +246,7 @@ test('bin/cli.js registers version, update, and the version-check banner', () =>
 // the `readFileSync` already imported at the top of the file. We use
 // it only for the contract test on bin/cli.js.
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 void execFileSync; // silence unused-import lint if the suite is run isolated
 
 test('compareVersions orders prereleases before their release', () => {

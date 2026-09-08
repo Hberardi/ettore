@@ -11,10 +11,15 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripAllAnsi } from '../src/utils/ansi.js';
+import { pathToFileURL } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '..');
+
+// An absolute path is not a valid ESM specifier on Windows: `D:\\…` parses
+// as a URL with protocol `d:` and the loader refuses it.
+const moduleUrl = (rel) => pathToFileURL(resolve(REPO_ROOT, rel)).href;
 
 function renderSidebar(t) {
   t.cols = 100;
@@ -25,14 +30,14 @@ function renderSidebar(t) {
 }
 
 test('TUI class exposes version and updateStatus fields with sensible defaults', async () => {
-  const { TUI } = await import(`${REPO_ROOT}/src/app/tui-native.js`);
+  const { TUI } = await import(moduleUrl('src/app/tui-native.js'));
   const t = new TUI();
   assert.equal(t.version, '', 'version defaults to empty so the sidebar shows "version unknown"');
   assert.equal(t.updateStatus, null, 'updateStatus defaults to null until the CLI populates it');
 });
 
 test('TUI sidebar header includes the version when set', async () => {
-  const { TUI } = await import(`${REPO_ROOT}/src/app/tui-native.js`);
+  const { TUI } = await import(moduleUrl('src/app/tui-native.js'));
   const t = new TUI();
   t.version = '1.1.1';
   t.updateStatus = null;
@@ -42,7 +47,7 @@ test('TUI sidebar header includes the version when set', async () => {
 });
 
 test('TUI sidebar header shows the update hint when outdated', async () => {
-  const { TUI } = await import(`${REPO_ROOT}/src/app/tui-native.js`);
+  const { TUI } = await import(moduleUrl('src/app/tui-native.js'));
   const t = new TUI();
   t.version = '1.1.1';
   t.updateStatus = { current: '1.1.1', latest: '1.2.0', outdated: true, fromCache: false };
@@ -54,7 +59,7 @@ test('TUI sidebar header shows the update hint when outdated', async () => {
 });
 
 test('TUI sidebar header shows "version unknown" when version is empty', async () => {
-  const { TUI } = await import(`${REPO_ROOT}/src/app/tui-native.js`);
+  const { TUI } = await import(moduleUrl('src/app/tui-native.js'));
   const t = new TUI();
   t.version = '';
   t.updateStatus = null;
@@ -63,7 +68,7 @@ test('TUI sidebar header shows "version unknown" when version is empty', async (
 });
 
 test('TUI sidebar does not show the update hint when not outdated', async () => {
-  const { TUI } = await import(`${REPO_ROOT}/src/app/tui-native.js`);
+  const { TUI } = await import(moduleUrl('src/app/tui-native.js'));
   const t = new TUI();
   t.version = '1.1.1';
   t.updateStatus = { current: '1.1.1', latest: '1.1.1', outdated: false, fromCache: true };

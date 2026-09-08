@@ -30,10 +30,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, '..');
+
+// An absolute path is not a valid ESM specifier on Windows: `D:\\…` parses
+// as a URL with protocol `d:` and the loader refuses it.
+const moduleUrl = (rel) => pathToFileURL(resolve(REPO_ROOT, rel)).href;
 
 const SAMPLE_COMMANDS = [
   { name: 'help', aliases: ['h'], description: 'Show help' },
@@ -42,7 +47,7 @@ const SAMPLE_COMMANDS = [
 ];
 
 function newTui() {
-  return import(`${REPO_ROOT}/src/app/tui-native.js`).then(({ TUI }) => new TUI());
+  return import(moduleUrl('src/app/tui-native.js')).then(({ TUI }) => new TUI());
 }
 
 function stubStdout() {

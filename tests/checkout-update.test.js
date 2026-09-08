@@ -14,6 +14,16 @@ import {
   pullCheckout,
 } from '../src/cli/update.js';
 
+// Windows keeps a handle on a directory for a while after the process that
+// used it dies — and these tests deliberately kill git mid-pull, so the rm
+// races it and raises EBUSY. A temp directory that outlives the run is the
+// OS's problem, never the assertion's: retry for a bit, then let it go.
+async function cleanup(dir) {
+  try {
+    await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  } catch { /* the temp dir stays; the test result does not depend on it */ }
+}
+
 const npmInstall = { name: 'ettore-ai-assistant', version: '1.3.6', root: '/usr/lib/node_modules/ettore', isCheckout: false, updatable: true, reason: null };
 const checkoutInstall = { name: 'ettore-ai-assistant', version: '1.3.6', root: '/home/u/ettore', isCheckout: true, updatable: false, reason: 'is a git checkout' };
 const ready = { isCheckout: true, branch: 'main', upstream: 'origin/main', clean: true, pullable: true, reason: null };
@@ -113,7 +123,7 @@ test('a no-op pull reports no change even when git answers in Italian', async ()
     assert.equal(result.changed, false, `output was: ${result.output}`);
     assert.equal(git(clone, 'rev-parse', 'HEAD').trim(), before);
   } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
+    await cleanup(dir);
   }
 });
 
@@ -129,7 +139,7 @@ test('a pull that moves HEAD reports a change', async () => {
     assert.equal(result.changed, true);
     assert.notEqual(git(clone, 'rev-parse', 'HEAD').trim(), before);
   } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
+    await cleanup(dir);
   }
 });
 
@@ -146,7 +156,7 @@ test('a checkout ahead of its remote pulls without moving', async () => {
     assert.equal(result.changed, false);
     assert.equal(git(clone, 'rev-parse', 'HEAD').trim(), before);
   } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
+    await cleanup(dir);
   }
 });
 
@@ -167,7 +177,7 @@ test('a diverged branch is refused rather than merged', async () => {
     // The working copy is exactly where it was.
     assert.equal(git(clone, 'rev-parse', 'HEAD').trim(), before);
   } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
+    await cleanup(dir);
   }
 });
 
@@ -182,7 +192,7 @@ test('a pull that cannot answer is bounded, not hung', async () => {
     assert.equal(result.ok, false);
     assert.ok(elapsed < 12_000, `took ${elapsed}ms — the timeout did not bite`);
   } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
+    await cleanup(dir);
   }
 });
 
