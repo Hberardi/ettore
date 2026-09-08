@@ -1,9 +1,10 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.7-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.4.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
 </p>
 
 ETTORE is an advanced AI CLI assistant that helps with software engineering tasks. It's like having a smart assistant in your terminal.
@@ -16,6 +17,7 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 - 🎨 **Native TUI** - Custom ANSI renderer (no React/Ink) with themes and a sidebar
 - 🖼️ **Vision** - Reads local images; agent can discover, download, and inspect public web images
 - 📄 **Super OCR for PDF** - Extracts native text first, then automatically handles scanned and low-quality PDFs with preprocessing, deskew, denoise, adaptive thresholding, and multi-pass Tesseract OCR
+- 🪟 **Linux, macOS and Windows** - shell commands, code search and file edits work natively on each; see [Platform support](#platform-support)
 - 🔌 **Easy Setup** - `/connect <provider> <key>` or environment variables
 - 💾 **Persistent Config** - API keys saved with `0600` permissions in `~/.config/ettore/`
 - 🧠 **Context Tools** - compression, project memory, working memory, sessions, auto-approve
@@ -48,6 +50,51 @@ cd ettore-cli
 chmod +x install.sh
 ./install.sh
 ```
+
+## Platform support
+
+ETTORE runs on Linux, macOS and Windows. The differences are handled for you,
+but two of them are worth knowing about.
+
+### The shell the agent uses
+
+The `bash` and `bash_session` tools run commands through the platform's shell:
+**bash** on Linux and macOS, **PowerShell** on Windows. The model is told which
+one it has, so it writes `Select-String` rather than `grep` and `;` rather than
+`&&` when it is on Windows.
+
+PowerShell is preferred over Git Bash even when Git Bash is installed: a `bash`
+found on a Windows `PATH` is often WSL's, and that one cannot see `C:\…` the
+way the caller means. To override:
+
+```bash
+# Use Git Bash instead (must be on PATH)
+set ETTORE_SHELL=bash        # cmd
+$env:ETTORE_SHELL = 'bash'   # PowerShell
+```
+
+Accepted values: `bash`, `pwsh`, `powershell`, `cmd`, or a path to a shell.
+
+### Running it from a terminal that works
+
+Git Bash and other MSYS terminals (mintty) do not give Node a real console
+handle, so the TUI cannot start there and says so. Use **Windows Terminal**,
+**PowerShell** or **cmd** — or stay in Git Bash and prefix the command:
+
+```bash
+winpty ettore
+```
+
+### What is not needed
+
+Code search works without `ripgrep` or `grep` installed — there is a built-in
+searcher underneath both, so `grep` and `repo_find_symbol` work on a bare
+Windows box. Line endings are handled on both sides: editing a file checked out
+with CRLF keeps it CRLF, so a two-line change stays a two-line diff.
+
+Desktop automation is platform-aware too: on Windows it drives the GUI through
+PowerShell (nothing to install), on Linux it needs `xdotool` or `ydotool` — see
+[Requirements](#requirements).
 
 ## Tuning how hard the model thinks
 
@@ -480,6 +527,7 @@ to the CLI on models that accept it.
 ## Requirements
 
 - Node.js 18+ (Node 22+ for `browser_app`, which uses the built-in WebSocket client)
+- Linux, macOS or Windows — tested on CI against Node 20 and 22 on Linux and Windows
 - An API key for OpenAI, Anthropic, or another supported provider (Ollama runs locally and `claude-code` reuses your Claude login — both without a key)
 
 Bundled plugins declare their own dependencies as `optionalDependencies`, so
@@ -487,9 +535,12 @@ Bundled plugins declare their own dependencies as `optionalDependencies`, so
 `pg_restore` on `PATH` for the dump and restore tools; everything else in it
 works without them.
 
-Optional, only for driving applications:
+Optional, only for driving applications. On **Windows** none of this needs
+installing: the desktop backend drives the GUI through PowerShell, which ships
+with the OS, and Chrome or Edge is found wherever the installer put it —
+including a non-admin install under `%LOCALAPPDATA%`.
 
-| Capability | Needs | Install (Debian/Ubuntu/Mint) |
+| Capability | Needs (Linux/macOS) | Install (Debian/Ubuntu/Mint) |
 |---|---|---|
 | Web apps + browser console (`browser_app`) | Chrome or Chromium | `sudo apt install chromium` (or set `ETTORE_CHROME_BIN`) |
 | Desktop windows: list/focus (`desktop_app`) | wmctrl or xdotool | `sudo apt install wmctrl` |
