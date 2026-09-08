@@ -22,8 +22,8 @@ const FULL_PATTERNS = [
   /\bmistral[-_]?(large|medium|next|small)\b/,
   /\bmixtral\b/, /\bcodestral\b/,
   // DeepSeek
-  /\bdeepseek[-_]?v[23]\b/,
-  /\bdeepseek[-_]?r[12]\b/,
+  /\bdeepseek[-_]?v\d+\b/,
+  /\bdeepseek[-_]?r\d+\b/,
   /\bdeepseek[-_]?coder[-_]?v2\b/,
   // Llama large
   /\bllama[-_]?3[\._]?[123][-_]?70b\b/,
@@ -41,12 +41,18 @@ const FULL_PATTERNS = [
   // Others
   /\bnemotron[-_]?(70b|340b|super)\b/,
   /\bjamba\b/,
-  /\bkimi[-_]?k[12]\b/, /\bmoonshot\b/,
+  // Version-agnostic on purpose. `kimi[-_]?k[12]` stopped recognising the
+  // family the day K3 shipped, exactly as the MiniMax pattern below once
+  // stopped at M2 — a capability list pinned to today's version numbers is a
+  // list that silently rots. And `\\bmoonshot\\b` never matched `moonshotai`,
+  // the vendor prefix every routed id actually carries, because there is no
+  // word boundary between `t` and `a`.
+  /\bkimi(?:[-_]?k\d+)?\b/, /\bmoonshot/,
   /\bsonar[-_]?(pro|reasoning)\b/,
   /\byi[-_]?(large|34b|lightning)\b/,
   /\bglm[-_]?4(?![-_]?(air|flash))\b/,
   /\bnova[-_]?(pro|premier)\b/,
-  /\bminimax[-_]?m[23](?:\.(?:1|5|7))?(?:[-_]?highspeed)?\b/,
+  /\bminimax[-_]?m\d+(?:\.\d+)?(?:[-_]?highspeed)?\b/,
 ];
 
 // ─── LITE patterns (checked AFTER FULL) ──────────────────────────────────────
