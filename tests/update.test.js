@@ -346,7 +346,16 @@ test('checkForUpdate forwards a timeout to the registry call', async () => {
   assert.match(text, /fetchLatestVersion\(options\)/);
   assert.match(text, /fetchDeprecation\(current, options\)/);
   assert.equal(typeof update.COLD_CHECK_TIMEOUT_MS, 'number');
-  assert.ok(update.COLD_CHECK_TIMEOUT_MS <= 5000, 'startup must never block for long');
+  // The budget is deliberately larger on Windows: `npm view` goes through a
+  // .cmd shim and cmd.exe there, and 2.5s is not enough for it to answer. The
+  // guarantee is that it stays bounded on both, not that it is the same
+  // number — this assertion pinned the POSIX value and had simply never run
+  // on the platform with the other one.
+  const ceiling = process.platform === 'win32' ? 8000 : 5000;
+  assert.ok(
+    update.COLD_CHECK_TIMEOUT_MS <= ceiling,
+    `startup must never block for long: ${update.COLD_CHECK_TIMEOUT_MS}ms > ${ceiling}ms`,
+  );
 });
 
 test('bin/cli.js refreshes a cold cache before deciding to auto-update', () => {
