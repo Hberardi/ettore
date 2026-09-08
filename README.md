@@ -19,7 +19,7 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 - 📄 **Super OCR for PDF** - Extracts native text first, then automatically handles scanned and low-quality PDFs with preprocessing, deskew, denoise, adaptive thresholding, and multi-pass Tesseract OCR
 - 🪟 **Linux, macOS and Windows** - shell commands, code search and file edits work natively on each; see [Platform support](#platform-support)
 - 🔌 **Easy Setup** - `/connect <provider> <key>` or environment variables
-- 💾 **Persistent Config** - API keys saved with `0600` permissions in `~/.config/ettore/`
+- 💾 **Persistent Config** - API keys saved in a per-user config directory, `0600` on Linux/macOS ([details](#configuration))
 - 🧠 **Context Tools** - compression, project memory, working memory, sessions, auto-approve
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn
 - 🧩 **Seven plugins included** - PostgreSQL, Excel, extended git, shell history, palette shortcuts — installed with `/plugins install`, and you can write your own
@@ -46,10 +46,20 @@ author.)
 # Clone or download
 cd ettore-cli
 
-# Make executable
+# Linux / macOS
 chmod +x install.sh
 ./install.sh
 ```
+
+On Windows, install from the checkout with npm instead — `install.sh` needs a
+POSIX shell:
+
+```powershell
+npm install -g .
+```
+
+> Paths written as `~/.config/ettore/…` below are the Linux and macOS form. On
+> Windows the same directory is `C:\Users\<you>\.config\ettore\…`.
 
 ## Platform support
 
@@ -471,13 +481,19 @@ clean up their processes when the CLI exits.
 
 ## Configuration
 
-API keys are saved in `~/.config/ettore/keys.json` with `0600` file
-permissions. Use `/keys` to manage them. Override the config dir for tests
-or CI with `ETTORE_CONFIG_DIR=/path/to/dir`.
+API keys live in a per-user config directory. Use `/keys` to manage them, and
+`ETTORE_CONFIG_DIR` to point somewhere else for tests or CI.
 
-For env-only usage, set the provider key before starting ETTORE:
+| Platform | Location | Protection |
+|---|---|---|
+| Linux, macOS | `~/.config/ettore/keys.json` | directory `0700`, file `0600` |
+| Windows | `C:\Users\<you>\.config\ettore\keys.json` | the ACL your user profile already carries — NTFS has no POSIX mode bits, so the `chmod` is skipped there |
+
+For env-only usage, set the provider key before starting ETTORE. The variable
+names are the same everywhere; only the syntax differs:
 
 ```bash
+# Linux / macOS
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENROUTER_API_KEY=sk-or-...
@@ -485,8 +501,24 @@ export MINIMAX_API_KEY=...
 ettore
 ```
 
+```powershell
+# Windows PowerShell
+$env:OPENAI_API_KEY = 'sk-...'
+ettore
+```
+
+```bat
+:: Windows cmd
+set OPENAI_API_KEY=sk-...
+ettore
+```
+
 Prefer environment variables or `/connect` over `--api-key`; command-line
 arguments can be exposed in shell history and process lists.
+
+Other variables ETTORE reads: `ETTORE_SHELL` (which shell the agent's commands
+run in — see [Platform support](#platform-support)), `ETTORE_CHROME_BIN`,
+`ETTORE_AUTO_UPDATE`.
 
 ### Claude without an API key
 
