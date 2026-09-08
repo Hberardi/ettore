@@ -27,7 +27,12 @@ import * as desktop from '../src/tools/desktop-app.js';
 
 const isWin = process.platform === 'win32';
 
-test('windows desktop backend: open notepad, list windows, screenshot, type, stop', { skip: !isWin }, async () => {
+// Needs a real interactive desktop: a CI runner has no session to open a
+// window in, so this would time out on an environment limit rather than a
+// defect. Set ETTORE_DESKTOP_IT=1 to run it on a machine that has one.
+const canDriveDesktop = isWin && (!process.env.CI || process.env.ETTORE_DESKTOP_IT === '1');
+
+test('windows desktop backend: open notepad, list windows, screenshot, type, stop', { skip: canDriveDesktop ? false : 'needs an interactive Windows desktop' }, async () => {
   const workdir = await mkdtemp(join(tmpdir(), 'ettore-desktop-test-'));
   try {
     // Step 1: open notepad. We deliberately do NOT pass debug_port —

@@ -7,7 +7,12 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as update from '../src/cli/update.js';
-import { devNull } from 'node:os';
+
+// Isolate git from the machine's real config. `/dev/null` is POSIX-only and
+// os.devNull is `\\.\nul` on Windows, which git rejects with
+// "unable to access" — a path that does not exist is empty config anywhere.
+const NO_GIT_CONFIG = join(tmpdir(), 'ettore-absent-gitconfig');
+
 
 const updatable = { updatable: true, reason: null };
 const status = (current, latest) => ({ current, latest, outdated: true });
@@ -292,7 +297,7 @@ test('describeCheckout reports whether a fast-forward is possible, and why not',
   const dir = mk(join(tmpdir(), 'ettore-checkout-'));
   const git = (...args) => execFileSync('git', args, {
     cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@e.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@e.com', GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_SYSTEM: devNull },
+    env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@e.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@e.com', GIT_CONFIG_GLOBAL: NO_GIT_CONFIG, GIT_CONFIG_SYSTEM: NO_GIT_CONFIG },
   });
   try {
     git('init', '-q', '-b', 'main');

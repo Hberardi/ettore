@@ -113,7 +113,7 @@ test('a no-op pull reports no change even when git answers in Italian', async ()
     assert.equal(result.changed, false, `output was: ${result.output}`);
     assert.equal(git(clone, 'rev-parse', 'HEAD').trim(), before);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });
 
@@ -129,7 +129,7 @@ test('a pull that moves HEAD reports a change', async () => {
     assert.equal(result.changed, true);
     assert.notEqual(git(clone, 'rev-parse', 'HEAD').trim(), before);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });
 
@@ -146,7 +146,7 @@ test('a checkout ahead of its remote pulls without moving', async () => {
     assert.equal(result.changed, false);
     assert.equal(git(clone, 'rev-parse', 'HEAD').trim(), before);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });
 
@@ -167,7 +167,7 @@ test('a diverged branch is refused rather than merged', async () => {
     // The working copy is exactly where it was.
     assert.equal(git(clone, 'rev-parse', 'HEAD').trim(), before);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });
 
@@ -182,7 +182,7 @@ test('a pull that cannot answer is bounded, not hung', async () => {
     assert.equal(result.ok, false);
     assert.ok(elapsed < 12_000, `took ${elapsed}ms — the timeout did not bite`);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   }
 });
 

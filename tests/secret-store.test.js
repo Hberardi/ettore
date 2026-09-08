@@ -4,6 +4,10 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync 
 import { tmpdir } from 'os';
 import { join } from 'path';
 
+// NTFS has no POSIX mode bits; Node's stat reports 666 there whatever the
+// ACL says, and the code that chmods is POSIX-only to begin with.
+const posixOnly = { skip: process.platform === 'win32' ? 'POSIX file modes' : false };
+
 // ETTORE_CONFIG_DIR is read at call time (lazy), so the env var can be set
 // before any function is invoked.
 const dir = mkdtempSync(join(tmpdir(), 'ettore-secrets-'));
@@ -76,13 +80,13 @@ test('on-disk file does NOT contain the plaintext secret', () => {
   assert.match(text, /"tag":\s*"[0-9a-f]+"/);
 });
 
-test('store file is owner-only (0600)', () => {
+test('store file is owner-only (0600)', posixOnly, () => {
   const file = _internal.STORE_FILE();
   const mode = statSync(file).mode & 0o777;
   assert.equal(mode, 0o600, `expected 0600, got ${mode.toString(8)}`);
 });
 
-test('config dir is owner-only (0700)', () => {
+test('config dir is owner-only (0700)', posixOnly, () => {
   const d = _internal.CONFIG_DIR();
   const mode = statSync(d).mode & 0o777;
   assert.equal(mode, 0o700, `expected 0700, got ${mode.toString(8)}`);

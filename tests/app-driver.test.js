@@ -18,6 +18,11 @@ import {
   takeNewErrors,
 } from '../src/tools/browser-driver.js';
 
+// The X11 backend's parsers are imported from the Linux module, not from the
+// platform dispatcher: on Windows the dispatcher hands back the deliberate
+// stubs in desktop-app-windows.js (wmctrl and xdotool do not exist there), so
+// importing through it tested the stub and reported the parser as broken.
+// These functions are pure, so they are worth testing on every platform.
 import {
   buildScreenshotArgs,
   descendantPids,
@@ -26,7 +31,7 @@ import {
   parseProcessTable,
   parseWmctrlWindows,
   parseXdotoolGeometry,
-} from '../src/tools/desktop-app.js';
+} from '../src/tools/desktop-app-linux.js';
 
 import { toolDefinitions, toolHandlers, validateToolArgs } from '../src/tools/index.js';
 import { selectToolDefinitions, selectedToolNames } from '../src/agents/tool-router.js';

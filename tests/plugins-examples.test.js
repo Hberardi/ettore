@@ -55,7 +55,9 @@ test('bash-monitor: command_history returns empty state when no file exists', as
   // Point HOME at a temp dir so the plugin reads from there.
   const tmp = mkdtempSync(join(tmpdir(), 'bash-monitor-test-'));
   const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
   process.env.HOME = tmp;
+  process.env.USERPROFILE = tmp;   // homedir() reads this one on Windows
   try {
     const entry = join(REPO_ROOT, 'examples', 'plugins', 'bash-monitor', 'index.js');
     const mod = await import(`${pathToFileURL(entry).href}?bust=${Date.now()}-${Math.random()}-2`);
@@ -67,6 +69,7 @@ test('bash-monitor: command_history returns empty state when no file exists', as
     assert.deepEqual(out.entries, []);
   } finally {
     process.env.HOME = savedHome;
+    process.env.USERPROFILE = savedProfile;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -75,7 +78,9 @@ test('bash-monitor: command_history returns empty state when no file exists', as
 test('bash-monitor: command_history reads the file the plugin writes', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'bash-monitor-test-'));
   const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
   process.env.HOME = tmp;
+  process.env.USERPROFILE = tmp;   // homedir() reads this one on Windows
   try {
     const cfgDir = join(tmp, '.config', 'ettore');
     mkdirSync(cfgDir, { recursive: true });
@@ -101,6 +106,7 @@ test('bash-monitor: command_history reads the file the plugin writes', async () 
     assert.equal(slow.entries[0].command, 'npm install');
   } finally {
     process.env.HOME = savedHome;
+    process.env.USERPROFILE = savedProfile;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -109,7 +115,9 @@ test('bash-monitor: command_history reads the file the plugin writes', async () 
 test('command-palette-shortcuts: /last-bash reads from the same file', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'cps-test-'));
   const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
   process.env.HOME = tmp;
+  process.env.USERPROFILE = tmp;   // homedir() reads this one on Windows
   try {
     const cfgDir = join(tmp, '.config', 'ettore');
     mkdirSync(cfgDir, { recursive: true });
@@ -129,6 +137,7 @@ test('command-palette-shortcuts: /last-bash reads from the same file', async () 
     assert.match(out, /ls -la/);
   } finally {
     process.env.HOME = savedHome;
+    process.env.USERPROFILE = savedProfile;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -186,7 +195,9 @@ test('bash-monitor: sudo command produces a /dev/tty warning', async () => {
 test('bash-monitor: onBeforeTool + onAfterTool round-trip produces a valid entry', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'bash-monitor-rt-'));
   const savedHome = process.env.HOME;
+  const savedProfile = process.env.USERPROFILE;
   process.env.HOME = tmp;
+  process.env.USERPROFILE = tmp;   // homedir() reads this one on Windows
   try {
     const entry = join(REPO_ROOT, 'examples', 'plugins', 'bash-monitor', 'index.js');
     const mod = await import(`${pathToFileURL(entry).href}?bust=${Date.now()}-${Math.random()}-8`);
@@ -208,6 +219,7 @@ test('bash-monitor: onBeforeTool + onAfterTool round-trip produces a valid entry
     }
   } finally {
     process.env.HOME = savedHome;
+    process.env.USERPROFILE = savedProfile;
     rmSync(tmp, { recursive: true, force: true });
   }
 });

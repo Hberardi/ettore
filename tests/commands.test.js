@@ -320,7 +320,9 @@ test('doctor: reports local diagnostics and next steps', async () => {
     assert.match(output, /Node\.js/);
     assert.match(output, new RegExp(`Working directory writable: ${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     assert.match(output, new RegExp(`Project root detected: ${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-    assert.match(output, /Config directory permissions:/);
+    // The permissions line is POSIX-only: on Windows there are no mode bits
+    // to report, so doctor legitimately omits it.
+    if (process.platform !== 'win32') assert.match(output, /Config directory permissions:/);
     assert.match(output, /Environment API keys present for: openai/);
     assert.doesNotMatch(output, /sk-test-secret/);
   } finally {

@@ -8,6 +8,7 @@ import { PluginRegistry, PluginRuntime } from '../src/plugins/index.js';
 import { builtinCommands } from '../src/commands/index.js';
 import { uiBridge } from '../src/tools/bridge.js';
 import { discoverPlugins } from '../src/plugins/loader.js';
+import { fileURLToPath } from 'node:url';
 
 async function makeTmpDir() {
   return await mkdtemp(join(tmpdir(), 'ettore-plugins-cmd-test-'));
@@ -323,7 +324,7 @@ test('plugins available flags an installed copy that has fallen behind', async (
   const { cpSync, appendFileSync } = await import('node:fs');
   const dir = await makeTmpDir();
   try {
-    const src = new URL('../examples/plugins/hello-world', import.meta.url).pathname;
+    const src = fileURLToPath(new URL('../examples/plugins/hello-world', import.meta.url));
     cpSync(src, join(dir, 'hello-world'), { recursive: true });
     appendFileSync(join(dir, 'hello-world', 'index.js'), '\n// diverged\n');
 
@@ -343,7 +344,7 @@ test('an identical installed copy is not reported as behind', async () => {
   const { cpSync } = await import('node:fs');
   const dir = await makeTmpDir();
   try {
-    const src = new URL('../examples/plugins/hello-world', import.meta.url).pathname;
+    const src = fileURLToPath(new URL('../examples/plugins/hello-world', import.meta.url));
     cpSync(src, join(dir, 'hello-world'), { recursive: true });
     const registry = new PluginRegistry();
     const runtime = new PluginRuntime({ registry, pluginsDir: dir });
@@ -361,7 +362,7 @@ test('a marker file or a README does not count as falling behind', async () => {
   const { bundledPluginStates } = await import('../src/plugins/loader.js');
   const dir = await makeTmpDir();
   try {
-    const src = new URL('../examples/plugins/hello-world', import.meta.url).pathname;
+    const src = fileURLToPath(new URL('../examples/plugins/hello-world', import.meta.url));
     cpSync(src, join(dir, 'hello-world'), { recursive: true });
     writeFileSync(join(dir, 'hello-world', '.enabled'), '');
     writeFileSync(join(dir, 'hello-world', 'NOTES.md'), 'local notes');

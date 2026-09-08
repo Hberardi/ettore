@@ -9,7 +9,12 @@ import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { tools, commands } from '../examples/plugins/git-history/index.js';
-import { devNull } from 'node:os';
+
+// Isolate git from the machine's real config. `/dev/null` is POSIX-only and
+// os.devNull is `\\.\nul` on Windows, which git rejects with
+// "unable to access" — a path that does not exist is empty config anywhere.
+const NO_GIT_CONFIG = join(tmpdir(), 'ettore-absent-gitconfig');
+
 
 const run = (cwd, ...args) => execFileSync('git', args, {
   cwd,
@@ -18,7 +23,7 @@ const run = (cwd, ...args) => execFileSync('git', args, {
     ...process.env,
     GIT_AUTHOR_NAME: 'Test Author', GIT_AUTHOR_EMAIL: 'test@example.com',
     GIT_COMMITTER_NAME: 'Test Author', GIT_COMMITTER_EMAIL: 'test@example.com',
-    GIT_CONFIG_GLOBAL: devNull, GIT_CONFIG_SYSTEM: devNull,
+    GIT_CONFIG_GLOBAL: NO_GIT_CONFIG, GIT_CONFIG_SYSTEM: NO_GIT_CONFIG,
   },
 });
 

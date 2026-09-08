@@ -1,6 +1,6 @@
 import { readdir } from 'fs/promises';
 import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { homedir } from 'os';
 import { connectionManager, ConnectionManager } from '../providers/index.js';
 import { PROVIDER_REGISTRY } from '../providers/registry.js';
@@ -38,7 +38,11 @@ export class CommandSystem {
     for (const file of files) {
       if (file.endsWith('.js') || file.endsWith('.mjs')) {
         try {
-          const cmd = await import(join(dir, file));
+          // A bare absolute path is not a valid ESM specifier on Windows —
+          // `D:\\…` is read as a URL whose protocol is `d:`, and the loader
+          // refuses it. The plugin loader already went through this; this
+          // one was missed, so no slash command loaded on Windows.
+          const cmd = await import(pathToFileURL(join(dir, file)).href);
           const name = file.replace(/\.(js|mjs)$/, '');
           this.register(name, cmd.default?.handler || cmd.handler, {
             description: cmd.default?.description || cmd.description || '',

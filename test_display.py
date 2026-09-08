@@ -5,9 +5,15 @@ Spawns the app in a PTY, reconstructs the rendered screen,
 and reports every visual alignment/overflow issue.
 """
 
-import os, pty, select, subprocess, sys, re, time, struct, fcntl, termios, signal, textwrap
+import os, pty, select, subprocess, sys, re, time, struct, fcntl, termios, signal, textwrap, tempfile
 
-TEST_CONFIG_DIR = '/tmp/ettore-display-test-config'
+TEST_CONFIG_DIR = os.path.join(tempfile.gettempdir(), 'ettore-display-test-config')
+
+# The repo root, taken from this file's own location. It used to be one
+# developer's absolute path, which only ever worked on that machine — CI
+# never reached this step to notice, because the test run before it failed
+# first and skipped everything downstream.
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # ─── PTY helpers ──────────────────────────────────────────────────────────────
 
@@ -29,7 +35,7 @@ def spawn(cols, rows, extra_wait=0.0):
         ['node', 'bin/cli.js'],
         stdin=slave, stdout=slave, stderr=slave,
         env=env,
-        cwd='/home/re77/Scrivania/ettore_cli',
+        cwd=REPO_ROOT,
         preexec_fn=os.setsid,
         close_fds=True,
     )
@@ -276,7 +282,7 @@ console.log(rendered);
 """
     result = subprocess.run(
         ['node', '--input-type=module', '-e', script],
-        cwd='/home/re77/Scrivania/ettore_cli',
+        cwd=REPO_ROOT,
         env={**os.environ, 'ETTORE_CONFIG_DIR': TEST_CONFIG_DIR, 'NODE_NO_WARNINGS': '1'},
         text=True,
         stdout=subprocess.PIPE,

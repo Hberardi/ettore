@@ -26,7 +26,12 @@ function pathExtensions(platform, env) {
     // lower case ("npm.cmd"). Windows does not care, but a case-sensitive
     // filesystem does — and so does anything resolving a Windows PATH from
     // elsewhere. Try both rather than depend on the volume's casing rules.
-    for (const variant of [ext, ext.toLowerCase(), ext.toUpperCase()]) {
+    //
+    // Lower case goes first on purpose. Windows would match either way, but it
+    // is the candidate string we return, so trying ".CMD" first handed back
+    // `npm.CMD` for a file actually named `npm.cmd` — runnable, but not the
+    // path that exists.
+    for (const variant of [ext.toLowerCase(), ext, ext.toUpperCase()]) {
       if (!out.includes(variant)) out.push(variant);
     }
   }
