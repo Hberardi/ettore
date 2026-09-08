@@ -208,7 +208,7 @@ test('an API error status from the bridge survives onto the thrown error', () =>
   // as unclassified CLI text.
   const err = new Error('Claude Code: something upstream');
   err.status = 429;
-  assert.match(translateProviderError(err), /Rate limit \/ quota exceeded/);
+  assert.match(translateProviderError(err), /rate limit/i);
 });
 
 test('the compression threshold is capped for million-token models', () => {

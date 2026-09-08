@@ -94,11 +94,28 @@ function backoffWait(attempt, base, capMs) {
   return exp / 2 + Math.random() * (exp / 2); // jitter in [exp/2, exp]
 }
 
+// Where retry notices go, set by the agent for the duration of a run. The
+// client layer has no emitter — only onToken — and threading one through every
+// provider's `turn()` for this would be a lot of signature churn, so this
+// follows the same sink pattern as setAgentTodoSink in the tools layer.
+//
+// Without it a rate-limited turn is silent: four 429 retries can spend two
+// minutes or more waiting, and the user sees a frozen CLI followed by an error
+// telling them to "wait a moment and retry" — which is what just happened.
+let retryNotifier = null;
+export function setRetryNotifier(fn) { retryNotifier = typeof fn === 'function' ? fn : null; }
+
+function notifyRetry(info) {
+  try { retryNotifier?.(info); } catch { /* never let the UI break a retry */ }
+}
+
 export async function retryLLMCall(fn, signal, _legacyMaxRetries) {
   let attempt = 0;
   while (true) {
     try {
-      return await fn();
+      const result = await fn();
+      if (attempt > 0) notifyRetry({ phase: 'recovered', attempt });
+      return result;
     } catch (e) {
       if (e.name === 'AbortError' || signal?.aborted) throw e;
       const status = e.status || e.statusCode;
@@ -127,10 +144,21 @@ export async function retryLLMCall(fn, signal, _legacyMaxRetries) {
       else if (status === 502 || status === 503 || status === 504) { maxRetries = 3; base = 1500; cap = 30_000; }
       else { maxRetries = 2; base = 1000; cap = 10_000; }
 
-      if (attempt >= maxRetries) throw e;
+      if (attempt >= maxRetries) {
+        notifyRetry({ phase: 'exhausted', attempt, status, attempts: attempt + 1 });
+        throw e;
+      }
       const waitMs = serverRetryMs != null
         ? Math.min(serverRetryMs, cap)
         : backoffWait(attempt, base, cap);
+      notifyRetry({
+        phase: 'waiting',
+        attempt: attempt + 1,
+        maxRetries,
+        status,
+        waitMs,
+        fromServer: serverRetryMs != null,
+      });
       await new Promise(r => { setTimeout(r, waitMs); });
       attempt++;
     }

@@ -8,7 +8,8 @@ test('stripAnsi removes CSI escape sequences', () => {
 
 test('translateProviderError handles 429 via status', () => {
   const msg = translateProviderError({ status: 429, message: 'too many requests' });
-  assert.match(msg, /Rate limit/);
+  assert.match(msg, /rate limit/i);
+  assert.match(msg, /429/);
 });
 
 test('translateProviderError handles 401', () => {

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canonicalizeToolTurn,
+  collectToolCallIds,
   repairMessageHistory,
   safeHistoryKeepStart,
   validateMessageHistory,
@@ -95,4 +96,114 @@ test('safeHistoryKeepStart never starts inside tool results', () => {
     { role: 'assistant', content: 'done' },
   ];
   assert.equal(safeHistoryKeepStart(messages, 2), 1);
+});
+
+// ─── Ids that repeat across turns ────────────────────────────────────────────
+// Regression: MiniMax mints tool-call ids from the tool name and its slot, so
+// the first bash call of every turn is `bash:0`. canonicalizeToolTurn only
+// deduplicated within a batch while validateMessageHistory checks ids across
+// the whole history, so the second such turn poisoned the ledger and *every*
+// later turn died with "Internal message ledger invalid".
+
+function toolTurn(id, name, output) {
+  return [
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id, type: 'function', function: { name, arguments: '{}' } }],
+    },
+    { role: 'tool', tool_call_id: id, content: output },
+  ];
+}
+
+test('a history reusing one id across turns is repaired, not rejected', () => {
+  const messages = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'go' },
+    ...toolTurn('bash:0', 'bash', 'first output'),
+    ...toolTurn('bash:0', 'bash', 'second output'),
+  ];
+  assert.equal(validateMessageHistory(messages).valid, false, 'precondition: the duplicate is a real problem');
+
+  const out = repairMessageHistory(messages);
+  assert.equal(out.valid, true, `repair left it invalid: ${JSON.stringify(out.issues)}`);
+  assert.equal(validateMessageHistory(out.messages).valid, true);
+
+  const ids = out.messages.filter(m => m.role === 'assistant' && m.tool_calls)
+    .flatMap(m => m.tool_calls.map(c => c.id));
+  assert.equal(new Set(ids).size, ids.length, `ids still collide: ${ids}`);
+});
+
+test('renaming a call carries its result with it', () => {
+  const out = repairMessageHistory([
+    { role: 'user', content: 'go' },
+    ...toolTurn('bash:0', 'bash', 'FIRST'),
+    ...toolTurn('bash:0', 'bash', 'SECOND'),
+  ]);
+
+  const pairs = [];
+  for (let i = 0; i < out.messages.length; i++) {
+    const m = out.messages[i];
+    if (m.role === 'assistant' && m.tool_calls?.length) {
+      pairs.push({ callId: m.tool_calls[0].id, result: out.messages[i + 1] });
+    }
+  }
+  assert.equal(pairs.length, 2);
+  for (const { callId, result } of pairs) {
+    assert.equal(result.role, 'tool');
+    assert.equal(result.tool_call_id, callId, 'the result must follow its renamed call');
+  }
+  // Each turn keeps its own output — renaming must not shuffle them.
+  assert.equal(pairs[0].result.content, 'FIRST');
+  assert.equal(pairs[1].result.content, 'SECOND');
+});
+
+test('three turns on the same id all end up distinct', () => {
+  const out = repairMessageHistory([
+    { role: 'user', content: 'go' },
+    ...toolTurn('bash:0', 'bash', 'a'),
+    ...toolTurn('bash:0', 'bash', 'b'),
+    ...toolTurn('bash:0', 'bash', 'c'),
+  ]);
+  assert.equal(out.valid, true, JSON.stringify(out.issues));
+  const ids = out.messages.filter(m => m.tool_calls).flatMap(m => m.tool_calls.map(c => c.id));
+  assert.deepEqual([...new Set(ids)].length, 3, `expected 3 distinct ids, got ${ids}`);
+});
+
+test('a clean history is left exactly as it was', () => {
+  const messages = [
+    { role: 'user', content: 'go' },
+    ...toolTurn('call_1', 'bash', 'a'),
+    ...toolTurn('call_2', 'read', 'b'),
+  ];
+  const out = repairMessageHistory(messages);
+  assert.equal(out.repaired, false, `needless repair: ${JSON.stringify(out.issues)}`);
+  const ids = out.messages.filter(m => m.tool_calls).flatMap(m => m.tool_calls.map(c => c.id));
+  assert.deepEqual(ids, ['call_1', 'call_2']);
+});
+
+test('usedIds keeps a fresh turn from colliding with the ledger', () => {
+  const history = [
+    { role: 'user', content: 'go' },
+    ...toolTurn('bash:0', 'bash', 'earlier'),
+  ];
+  const used = collectToolCallIds(history);
+  assert.deepEqual([...used], ['bash:0']);
+
+  const canonical = canonicalizeToolTurn({
+    tool_calls: [{ id: 'bash:0', type: 'function', function: { name: 'bash', arguments: '{}' } }],
+  }, { usedIds: used });
+
+  assert.notEqual(canonical.calls[0].id, 'bash:0', 'a new turn must not reuse an id already in the ledger');
+  assert.equal(canonical.sourceIds[0], 'bash:0', 'the original id is reported so results can be matched');
+});
+
+test('collectToolCallIds ignores anything that is not an assistant tool call', () => {
+  const ids = collectToolCallIds([
+    { role: 'system', content: 'x' },
+    { role: 'tool', tool_call_id: 'not-a-call', content: 'y' },
+    { role: 'assistant', content: 'plain' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 'real', function: { name: 'bash' } }] },
+  ]);
+  assert.deepEqual([...ids], ['real']);
 });

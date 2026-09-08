@@ -17,7 +17,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-    name: test (${{ matrix.os }})
+        # Both ends of the supported range. Pinning a single version is how the
+        # test script stayed broken on 20 while passing for whoever ran it on
+        # 22: `node --test` only expands globs from Node 21 on.
+        node: [20, 22]
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,7 +29,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Install dependencies
@@ -37,13 +41,13 @@ jobs:
       # Lint and the layout check are platform-independent, so one run is
       # enough and Windows does not need a Python on PATH for them.
       - name: Run lint
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
         run: npm run lint
 
       - name: Validate TUI layout
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
         run: python3 test_display.py
 
       - name: Validate release package
-        if: matrix.os == 'ubuntu-latest' && startsWith(github.ref, 'refs/tags/v')
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22 && startsWith(github.ref, 'refs/tags/v')
         run: npm pack --dry-run --ignore-scripts

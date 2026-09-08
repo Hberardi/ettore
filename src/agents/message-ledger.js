@@ -29,11 +29,29 @@ function stableCallId(call, index) {
   return `ettore_call_${index}_${hash}`;
 }
 
-export function canonicalizeToolTurn(result = {}) {
+/**
+ * Canonicalize one assistant tool turn.
+ *
+ * `usedIds` carries ids already spoken for elsewhere in the conversation. It
+ * matters because some providers mint ids from the tool name and its position
+ * — MiniMax emits `bash:0` for the first bash call of *every* turn — so the
+ * same id recurs across turns. Deduplicating only within the batch left those
+ * collisions in the ledger, where validateMessageHistory checks ids globally
+ * and rejected the whole history: not one failed turn, but a conversation that
+ * threw on every subsequent turn until it was cleared.
+ *
+ * `sourceIds` is returned parallel to `calls`, holding the id each call had
+ * before renaming, so a caller can still find the tool result that was filed
+ * under the original.
+ */
+export function canonicalizeToolTurn(result = {}, { usedIds = null } = {}) {
   const rawCalls = Array.isArray(result.tool_calls) ? result.tool_calls : [];
   const seen = new Set();
   const issues = [];
   const calls = [];
+  const sourceIds = [];
+
+  const isTaken = (id) => seen.has(id) || Boolean(usedIds?.has(id));
 
   for (let index = 0; index < rawCalls.length; index++) {
     const raw = rawCalls[index] || {};
@@ -44,13 +62,20 @@ export function canonicalizeToolTurn(result = {}) {
     }
 
     let id = String(raw.id || '').trim() || stableCallId(raw, index);
+    const originalId = id;
     if (!raw.id) issues.push({ code: 'missing_tool_call_id', index, repaired: id });
-    if (seen.has(id)) {
-      const repaired = `${id}_${index}`;
+    if (isTaken(id)) {
+      // Suffix until free: `_${index}` alone still collides when the same
+      // position repeats across turns, which is exactly the MiniMax shape.
+      let repaired = `${id}_${index}`;
+      let bump = 2;
+      while (isTaken(repaired)) repaired = `${id}_${index}_${bump++}`;
       issues.push({ code: 'duplicate_tool_call_id', index, id, repaired });
       id = repaired;
     }
     seen.add(id);
+    usedIds?.add(id);
+    sourceIds.push(originalId);
 
     calls.push({
       id,
@@ -66,6 +91,7 @@ export function canonicalizeToolTurn(result = {}) {
 
   return {
     calls,
+    sourceIds,
     issues,
     message: {
       role: 'assistant',
@@ -73,6 +99,19 @@ export function canonicalizeToolTurn(result = {}) {
       tool_calls: calls,
     },
   };
+}
+
+/** Every tool-call id already present in `messages`. */
+export function collectToolCallIds(messages = []) {
+  const ids = new Set();
+  for (const message of messages) {
+    if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls)) continue;
+    for (const call of message.tool_calls) {
+      const id = String(call?.id || '').trim();
+      if (id) ids.add(id);
+    }
+  }
+  return ids;
 }
 
 export function validateMessageHistory(messages = []) {
@@ -141,6 +180,10 @@ export function validateMessageHistory(messages = []) {
 export function repairMessageHistory(messages = []) {
   const repaired = [];
   const issues = [];
+  // Shared across the whole pass: a duplicate id is only visible when the
+  // messages are considered together, which is the level validateMessageHistory
+  // judges them at.
+  const usedIds = new Set();
 
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index];
@@ -164,7 +207,7 @@ export function repairMessageHistory(messages = []) {
     const canonical = canonicalizeToolTurn({
       tool_calls: message.tool_calls,
       message,
-    });
+    }, { usedIds });
     issues.push(...canonical.issues.map(issue => ({ ...issue, messageIndex: index })));
 
     const toolResults = new Map();
@@ -177,19 +220,29 @@ export function repairMessageHistory(messages = []) {
       cursor++;
     }
 
-    const matchedCalls = canonical.calls.filter(call => toolResults.has(call.id));
+    // The result was filed under the id the call had *before* canonicalization,
+    // so pair on the source id and re-file the result under the new one.
+    // Renaming the call alone would turn its result into an orphan.
+    const matched = [];
+    canonical.calls.forEach((call, callIndex) => {
+      const sourceId = canonical.sourceIds[callIndex] ?? call.id;
+      const result = toolResults.get(sourceId) ?? toolResults.get(call.id);
+      if (result) matched.push({ call, result });
+    });
+    const matchedCalls = matched.map(entry => entry.call);
     if (matchedCalls.length !== canonical.calls.length) {
       issues.push({
         code: 'removed_unmatched_tool_calls',
         index,
-        removed: canonical.calls.filter(call => !toolResults.has(call.id)).map(call => call.id),
+        removed: canonical.calls
+          .filter(call => !matchedCalls.includes(call))
+          .map(call => call.id),
       });
     }
 
-    if (matchedCalls.length) {
+    if (matched.length) {
       repaired.push({ ...canonical.message, tool_calls: matchedCalls });
-      for (const call of matchedCalls) {
-        const result = toolResults.get(call.id);
+      for (const { call, result } of matched) {
         repaired.push({
           role: 'tool',
           tool_call_id: call.id,

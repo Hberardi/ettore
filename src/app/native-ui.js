@@ -1070,6 +1070,32 @@ export async function startApp(options = {}) {
     tui.needsRender = true;
   });
 
+  // Provider backoff. Without this the CLI sits silent through minutes of
+  // retries and then reports a rate limit, as if it had not already waited.
+  emitter.on('providerRetry', ({ attempt, max, status, waitMs, fromServer }) => {
+    const secs = Math.max(1, Math.round(Number(waitMs) / 1000));
+    const label = status === 429 ? 'Rate limit del provider' : `Provider non raggiungibile (HTTP ${status || '?'})`;
+    const source = fromServer ? ' (attesa richiesta dal server)' : '';
+    tui.messages.push({
+      role: 'system',
+      text: `⏳ ${label} — riprovo tra ${secs}s (tentativo ${attempt}/${max})${source}`,
+      tools: [],
+      id: Date.now(),
+    });
+    if (tui.streaming) tui.streaming.lastActivityAt = Date.now();
+    tui.needsRender = true;
+  });
+
+  emitter.on('providerRetryResolved', ({ attempts }) => {
+    tui.messages.push({
+      role: 'system',
+      text: `✓ Provider ha risposto dopo ${attempts} ${attempts === 1 ? 'tentativo' : 'tentativi'}`,
+      tools: [],
+      id: Date.now(),
+    });
+    tui.needsRender = true;
+  });
+
   // Auto-compact notifications. The compressor emits these any time it runs;
   // without these handlers the user sees no feedback that compression happened.
   emitter.on('compressPrivacyNotice', () => {
@@ -1309,7 +1335,12 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
   const startRenderLoop = () => {
     if (renderLoop) return;
     renderLoop = setInterval(() => {
-      if (tui.needsRender || tui.isRunning) {
+      // While a question is on screen the agent is blocked on the answer, so
+      // `isRunning` stays true and this ticked at 60fps with nothing to show
+      // for it — repainting the prompt, and the frame behind it, continuously.
+      // Only an actual state change (a key, a moved selection) redraws now, so
+      // the screen holds still on the question until the user chooses.
+      if (tui.shouldRenderOnTick()) {
         tui.render();
         tui.needsRender = false;
         // While waiting on a tool, every frame is "activity" — the user sees

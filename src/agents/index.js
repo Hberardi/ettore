@@ -12,6 +12,7 @@ import {
   injectEcosystemIntoPrompt,
   appendEcosystemExperience
 } from '../memory/index.js';
+import { setRetryNotifier } from '../llm/client.js';
 import { ContextCompressor, estimateTokens } from './compressor.js';
 import { isLiteModel, applyLitePrompt, isGarbageOutput, buildFallbackMessage } from './lite.js';
 import {
@@ -52,6 +53,7 @@ import {
 import { redactSecrets } from '../utils/secrets.js';
 import {
   canonicalizeToolTurn,
+  collectToolCallIds,
   repairMessageHistory,
   validateMessageHistory,
 } from './message-ledger.js';
@@ -1090,6 +1092,27 @@ export class Agent {
     };
     setAgentTodoSink(todoSink);
 
+    // Surface provider backoff. Four 429 retries can spend minutes waiting; in
+    // silence that reads as a frozen CLI, and the error that follows tells the
+    // user to retry something the CLI already retried for them.
+    setRetryNotifier((info) => {
+      if (info?.phase === 'waiting') {
+        emitter?.emit('providerRetry', {
+          attempt: info.attempt,
+          max: info.maxRetries,
+          status: info.status,
+          waitMs: info.waitMs,
+          fromServer: info.fromServer,
+        });
+        this._debugLog(emitter, 'provider.retry', info);
+      } else if (info?.phase === 'recovered') {
+        emitter?.emit('providerRetryResolved', { attempts: info.attempt });
+      } else if (info?.phase === 'exhausted') {
+        this._retriesSpent = info.attempts;
+        this._debugLog(emitter, 'provider.retry_exhausted', info);
+      }
+    });
+
     // Emit as much of `emitBuffer` as is safe — we hold back only the
     // incomplete control tags that this parser knows how to suppress.
     const flushSafe = () => {
@@ -1849,7 +1872,11 @@ export class Agent {
       }
 
     if (result.type === 'tool_calls') {
-      const canonical = canonicalizeToolTurn(result);
+      // Some providers mint ids from the tool name and its slot — MiniMax
+      // sends `bash:0` for the first bash call of every turn — so a fresh turn
+      // can collide with one already in the ledger. Renaming here is free: the
+      // tool results for this batch have not been created yet.
+      const canonical = canonicalizeToolTurn(result, { usedIds: collectToolCallIds(this.messages) });
       if (!canonical.calls.length) {
         emitter?.emit('error', 'Provider returned a tool-call turn without any valid tool calls.');
         emitTurnState('failed', { reason: 'empty_tool_call_turn' });
@@ -2328,6 +2355,7 @@ export class Agent {
       }
       setToolAbortSignal(null);
       setAgentTodoSink(null);
+      setRetryNotifier(null);
     }
 
     // The final iteration is reserved for a text-only response above. This

@@ -52,8 +52,25 @@ export function translateProviderError(err) {
     return `Claude plan usage limit reached — this is the subscription's own ceiling, not an Ettore limit.${when} `
       + 'Wait for the window to reset, switch to a smaller model with /use, or connect an API-key provider.';
   }
-  if (status === 429 || /429|rate.?limit|quota/i.test(msg)) {
-    return 'Rate limit / quota exceeded (HTTP 429). Wait a moment and retry, or check your provider billing/usage.';
+  // A 429 covers two situations with opposite remedies, and saying "wait and
+  // retry" for both is wrong half the time: an exhausted balance never clears
+  // on its own, while a per-minute rate limit clears in seconds. Providers do
+  // distinguish them — MiniMax returns 1008 for balance, Anthropic and OpenAI
+  // say "credit"/"insufficient_quota" in the body — so name which one it is.
+  const outOfCredit = /insufficient[_ ]?(?:balance|quota|funds)|out of credit|no credit|billing|status_code["\s:]*100[89]\b/i.test(msg);
+  if (outOfCredit) {
+    return 'Provider credit or quota exhausted, not a temporary rate limit — waiting will not clear it. '
+      + 'Top up the account or check the plan\'s usage page, or switch provider with /use.';
+  }
+  if (status === 429 || /429|rate.?limit|too many requests/i.test(msg)) {
+    // The retry wrapper already spent its budget before this surfaced, so
+    // telling the user to "retry" as if nothing had been tried is misleading.
+    return 'Provider rate limit (HTTP 429) — already retried with backoff and it did not clear. '
+      + 'The limit is per-minute on most plans, so a pause of a minute usually works; '
+      + 'if it keeps happening the plan quota is the real ceiling. /use switches model or provider.';
+  }
+  if (/quota/i.test(msg)) {
+    return 'Provider quota exceeded. Check the plan\'s usage page, or switch provider with /use.';
   }
   if (status === 401 || /401|unauthor/i.test(msg)) {
     return 'Authentication failed (HTTP 401). Run /connect to refresh your API key.';

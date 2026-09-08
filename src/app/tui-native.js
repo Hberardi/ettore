@@ -201,6 +201,9 @@ class TUI {
     this.askUser = null;
     this.askUserIdx = 0;
     this.askUserInput = '';
+    // Whether the previous frame was the full-screen question modal, so the
+    // frame that replaces it can clear its background first.
+    this._lastFrameWasModal = false;
     this.exitConfirmMode = false;
     this.currentPlan = [];
     this.sidebarWidth = 32;
@@ -242,7 +245,37 @@ class TUI {
     this._render();
   }
 
+  // True while a modal owns the whole screen and the user's answer is the only
+  // thing that can change it. Used to freeze the frame: nothing underneath is
+  // visible, so nothing underneath is worth painting.
+  isBlockingModal() {
+    return Boolean(this.askUser);
+  }
+
+  // Whether the 60fps loop should repaint on this tick.
+  //
+  // `isRunning` stays true while the agent waits for an answer, so the loop
+  // used to redraw continuously with nothing able to change — which is what
+  // made the question flicker. A modal only moves when the user presses a key,
+  // and that sets needsRender.
+  shouldRenderOnTick() {
+    if (this.needsRender) return true;
+    return this.isRunning && !this.isBlockingModal();
+  }
+
   _render() {
+    // A question covers the entire frame anyway (see _renderAskUser). Composing
+    // the main view underneath it painted header, transcript, sidebar, status
+    // and input into the same buffer, immediately followed by the cover that
+    // hides them — and the render loop repeated that 60 times a second while
+    // the agent waited. The result was the main window visibly flashing behind
+    // the prompt. Draw the modal alone and the screen stays still.
+    if (this.isBlockingModal()) {
+      this._lastFrameWasModal = true;
+      process.stdout.write(this._stripOrphanSgr(ANSI.hide + this._renderAskUser() + ANSI.move(1, this.rows)));
+      return;
+    }
+
     const sidebarWidth = Math.min(this.sidebarWidth, Math.max(24, this.cols - 40));
     const sidebarContentWidth = Math.max(1, sidebarWidth - 1);
     const mainWidth = Math.max(20, this.cols - sidebarWidth - 1);
@@ -258,6 +291,14 @@ class TUI {
     const sideLines = this._renderSidebar(sidebarContentWidth);
     this.animationFrame = (this.animationFrame + 1) % 100;
     let out = ANSI.hide;
+
+    // The modal covers every row; the main frame owns every row but the last.
+    // Without a clear on the way out, its background survives as a dark strip
+    // along the bottom of the restored screen.
+    if (this._lastFrameWasModal) {
+      out += ANSI.clear;
+      this._lastFrameWasModal = false;
+    }
 
     out += ANSI.move(1, 1) + this._padVisual(this._renderHeader(), this.cols);
 

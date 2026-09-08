@@ -8,6 +8,58 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — `npm test` ran zero tests on the Node version CI pins
+
+The script was `node --test "tests/**/*.test.js"`. Glob expansion in
+`node --test` arrived in Node 21, so on Node 20 the pattern was taken
+literally: the runner answered `Could not find 'tests/**/*.test.js'` and exited
+1. CI had therefore never executed the suite on any commit — the red builds
+were not failing tests, they were a suite that never started — and
+`prepublishOnly` would have failed a release the same way. It passed locally
+only because a development machine on Node 22 expands the glob.
+
+`node --test` with no arguments is the one form both versions agree on: Node 20
+treats a bare directory as a tree to search while Node 22 treats it as a module
+path and dies with MODULE_NOT_FOUND, and the no-argument form has searched the
+working directory recursively since Node 18, the floor `engines` declares.
+
+The CI matrix now covers Node 20 and 22 on both platforms. A single pinned
+version is what let this survive: whoever ran the suite was on a Node where the
+glob worked. Verified at 1077 tests passing on both versions.
+
+### Fixed — a question no longer makes the main window flash behind it
+
+`_renderAskUser` already covered the whole frame, but `_render` composed and
+painted the entire main view into the same buffer first, and the render loop
+repeated that at 60fps because `isRunning` stays true while the agent waits for
+an answer. The transcript was written and then covered, sixty times a second.
+The main frame is no longer built at all while a question is up, and the loop
+stops ticking until a keystroke changes something, so the screen holds still.
+The frame that replaces the modal clears its background, which used to survive
+as a dark strip along the bottom row.
+
+### Fixed — a repeated tool-call id no longer poisons the whole conversation
+
+MiniMax mints tool-call ids from the tool name and its slot, so the first
+`bash` call of every turn is `bash:0`. `canonicalizeToolTurn` deduplicated only
+within a batch while `validateMessageHistory` checks ids across the whole
+history, so repair was structurally unable to fix what validation rejected:
+from the second such turn on, *every* turn died with "Internal message ledger
+invalid" until the session was cleared. Repair now carries one set of used ids
+across the pass, and renaming a call re-files its result under the new id
+rather than orphaning it. New turns are canonicalized against the ids already
+in the ledger, where renaming is free.
+
+### Fixed — rate-limit backoff is no longer silent
+
+A 429 is retried four times with exponential backoff, honouring `Retry-After`,
+which can spend minutes. None of it reached the UI, so the CLI looked frozen
+and then reported a rate limit — advising the user to retry what it had just
+spent two minutes retrying. Each wait is now announced with its attempt number,
+and a recovery says so. The message itself no longer conflates an exhausted
+balance, which waiting never clears, with a per-minute rate limit, which it
+does.
+
 ### Added — Windows is a supported platform, not an accident
 
 ETTORE ran on Windows the way any Node program does, and then failed at every
