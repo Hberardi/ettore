@@ -124,7 +124,8 @@ test('an exhausted balance is not reported as something waiting will fix', () =>
 });
 
 test('a plain rate limit says the retries already happened', () => {
-  const out = translateProviderError({ status: 429, message: 'Too Many Requests' });
+  // Only when they did — the count comes from the client, not from a guess.
+  const out = translateProviderError({ status: 429, message: 'Too Many Requests' }, { retriesSpent: 4 });
   assert.match(out, /already retried/i, out);
   assert.match(out, /per-minute/i, out);
   assert.match(out, /\/use/, 'the user needs the escape hatch named');
@@ -137,4 +138,67 @@ test('the Claude plan ceiling still takes priority over the generic 429', () => 
 
 test('other statuses are untouched', () => {
   assert.match(translateProviderError({ status: 401, message: 'unauthorized' }), /Authentication failed/);
+});
+
+// ─── Not everything containing "429" is a rate limit ─────────────────────────
+// Reported from a real session: a turn failed with the rate-limit message and
+// the user said "that is not true, there is some problem". They were right —
+// /429/ matched the digits anywhere in the provider's text, and the message
+// then replaced the only evidence there was with a confident description of
+// something that had not happened.
+
+test('a bare number in prose is not read as a status code', () => {
+  for (const msg of [
+    'model minimax-429b is not available',
+    'context length 429000 exceeds the limit',
+    'request id 8f429c21 failed',
+    'unexpected token at offset 429',
+    'read ECONNRESET after 4294 bytes',
+  ]) {
+    const out = translateProviderError({ message: msg });
+    assert.ok(!/rate limit/i.test(out), `misread as a rate limit: ${msg}\n  → ${out}`);
+  }
+});
+
+test('a real status is still recognised, however it is written', () => {
+  for (const err of [
+    { status: 429, message: 'nope' },
+    { message: 'HTTP 429 returned by upstream' },
+    { message: 'status_code: 429' },
+    { message: '429 Too Many Requests' },
+    { message: 'Rate limit exceeded for this key' },
+  ]) {
+    assert.match(translateProviderError(err), /rate limit/i, JSON.stringify(err));
+  }
+});
+
+test('the message only claims to have retried when it actually did', () => {
+  const err = { status: 429, message: 'slow down' };
+
+  const noRetries = translateProviderError(err);
+  assert.ok(!/already retried/i.test(noRetries), `claimed a retry that never happened: ${noRetries}`);
+
+  const withRetries = translateProviderError(err, { retriesSpent: 4 });
+  assert.match(withRetries, /already retried 4 time/i);
+});
+
+test('an inferred classification keeps the provider text, so a wrong guess is visible', () => {
+  // No status code: the classification came from the words alone, and if that
+  // reading is wrong the user still needs what the provider actually said.
+  const out = translateProviderError({ message: 'Rate limit exceeded: org quota 5/min' });
+  assert.match(out, /provider said: Rate limit exceeded: org quota 5\/min/);
+
+  // With a real status there is nothing to second-guess, so no echo.
+  assert.ok(!/provider said/.test(translateProviderError({ status: 429, message: 'x' })));
+});
+
+test('the other statuses are just as strict about bare digits', () => {
+  assert.ok(!/Authentication failed/.test(translateProviderError({ message: 'token 401abc rejected by policy' })));
+  assert.ok(!/gateway/i.test(translateProviderError({ message: 'chunk 502 of 900 written' })));
+  assert.match(translateProviderError({ message: 'HTTP 401 Unauthorized' }), /Authentication failed/);
+  assert.match(translateProviderError({ message: '502 Bad Gateway' }), /gateway error/i);
+});
+
+test('an unclassifiable error is returned as the provider wrote it', () => {
+  assert.equal(translateProviderError({ message: 'something entirely new' }), 'something entirely new');
 });

@@ -1040,6 +1040,7 @@ export class Agent {
     let toolBudgetFinalizeUsed = false;
     // Tool calls the model printed as text instead of emitting natively. Capped
     // so a model that only ever leaks XML cannot spin the loop forever.
+    this._retriesSpent = 0;
     let textToolCallRecoveries = 0;
     let textToolCallNudgeUsed = false;
     // Progress fingerprint from the last auto-continue, so a retry that
@@ -2345,7 +2346,9 @@ export class Agent {
         const retried = await this._retryAfterInvalidToolArgs(e, emitter);
         if (retried) return;
       }
-      emitter?.emit('error', translateProviderError(e));
+      // The retry count is what the client actually spent, so the message can
+      // only claim to have retried when it did.
+      emitter?.emit('error', translateProviderError(e, { retriesSpent: this._retriesSpent || 0 }));
       emitTurnState('failed', { reason: 'exception' });
       this._debugLog(emitter, 'turn.failed', { kind: 'exception', error: String(e?.message || e) });
       return;

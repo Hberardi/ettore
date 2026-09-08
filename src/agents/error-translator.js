@@ -38,9 +38,49 @@ export function parseResetTime(text, now = Date.now()) {
   return null;
 }
 
-export function translateProviderError(err) {
+// Whether `msg` presents `code` as an HTTP status, rather than merely
+// containing those digits.
+//
+// Matching a bare /429/ against the message text is a false-positive machine:
+// token counts, byte offsets, request ids, model names and timestamps all
+// contain three-digit runs, and any of them used to be reported to the user as
+// a rate limit — with a confident explanation of a thing that had not
+// happened. A provider that means a status writes it as one.
+export function mentionsHttpStatus(msg, code) {
+  const text = String(msg || '');
+  const labelled = new RegExp(
+    `(?:^|[^\\d])(?:HTTP[/ ]?|status(?:[ _]?code)?\\s*[:="']*\\s*|code\\s*[:="']*\\s*|error\\s+)${code}(?!\\d)`,
+    'i',
+  );
+  const phrases = {
+    429: 'too many requests|rate[ _-]?limit',
+    401: 'unauthorized|unauthenticated',
+    502: 'bad gateway',
+    503: 'service unavailable',
+    504: 'gateway timeout',
+  }[code];
+  const withPhrase = phrases
+    ? new RegExp(`(?:^|[^\\d])${code}(?!\\d)[\\s:,-]*(?:${phrases})`, 'i')
+    : null;
+  return labelled.test(text) || Boolean(withPhrase?.test(text));
+}
+
+/**
+ * @param {object} err            the provider error
+ * @param {object} [context]
+ * @param {number} [context.retriesSpent] how many retries the client actually
+ *   made before giving up. The message may only claim to have retried when
+ *   this says it did — it is a statement about what the CLI did, and it was
+ *   being made unconditionally.
+ */
+export function translateProviderError(err, context = {}) {
   const status = err?.status ?? err?.statusCode;
   let msg = stripAnsi(err?.message || String(err));
+  const retried = Number(context.retriesSpent) > 0;
+  // When the classification comes from the text rather than a real status
+  // code, the provider's own words go in the message too: a wrong guess is
+  // then visible instead of replacing the only evidence the user had.
+  const original = status ? '' : ` (provider said: ${msg.slice(0, 300)})`;
 
   // A Claude subscription reports its own ceiling in prose rather than as a
   // status line, and on a Pro plan it is the failure a long agent run hits
@@ -62,17 +102,18 @@ export function translateProviderError(err) {
     return 'Provider credit or quota exhausted, not a temporary rate limit — waiting will not clear it. '
       + 'Top up the account or check the plan\'s usage page, or switch provider with /use.';
   }
-  if (status === 429 || /429|rate.?limit|too many requests/i.test(msg)) {
-    // The retry wrapper already spent its budget before this surfaced, so
-    // telling the user to "retry" as if nothing had been tried is misleading.
-    return 'Provider rate limit (HTTP 429) — already retried with backoff and it did not clear. '
+  if (status === 429 || mentionsHttpStatus(msg, 429) || /rate[ _-]?limit|too many requests/i.test(msg)) {
+    const already = retried
+      ? `already retried ${context.retriesSpent} time${context.retriesSpent === 1 ? '' : 's'} with backoff and it did not clear. `
+      : '';
+    return `Provider rate limit (HTTP 429). ${already}`
       + 'The limit is per-minute on most plans, so a pause of a minute usually works; '
-      + 'if it keeps happening the plan quota is the real ceiling. /use switches model or provider.';
+      + `if it keeps happening the plan quota is the real ceiling. /use switches model or provider.${original}`;
   }
   if (/quota/i.test(msg)) {
-    return 'Provider quota exceeded. Check the plan\'s usage page, or switch provider with /use.';
+    return `Provider quota exceeded. Check the plan's usage page, or switch provider with /use.${original}`;
   }
-  if (status === 401 || /401|unauthor/i.test(msg)) {
+  if (status === 401 || mentionsHttpStatus(msg, 401) || /unauthor/i.test(msg)) {
     return 'Authentication failed (HTTP 401). Run /connect to refresh your API key.';
   }
   if (status === 400 && /tool call and result not match|2013/i.test(msg)) {
@@ -81,13 +122,13 @@ export function translateProviderError(err) {
   if (status === 400 && /tool/i.test(msg)) {
     return `Provider rejected the tool schema: ${msg}`;
   }
-  if (status === 502 || /502|bad gateway|upstream request failed/i.test(msg)) {
+  if (status === 502 || mentionsHttpStatus(msg, 502) || /bad gateway|upstream request failed/i.test(msg)) {
     return `Provider gateway error (502) — the upstream model server failed. Retry in a moment. (${msg})`;
   }
-  if (status === 503 || /503|service unavailable/i.test(msg)) {
+  if (status === 503 || mentionsHttpStatus(msg, 503) || /service unavailable/i.test(msg)) {
     return `Provider unavailable (503) — service is temporarily down. Retry in a moment. (${msg})`;
   }
-  if (status === 504 || /504|gateway timeout/i.test(msg)) {
+  if (status === 504 || mentionsHttpStatus(msg, 504) || /gateway timeout/i.test(msg)) {
     return `Provider gateway timeout (504) — upstream model took too long. Try a shorter prompt. (${msg})`;
   }
   if (/ECONNREFUSED/i.test(msg)) {
