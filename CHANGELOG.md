@@ -8,6 +8,33 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — errors that were not rate limits stopped being reported as one
+
+Reported from a real session: a turn failed with the 429 message and the user
+said it was not true. It was not.
+
+`/429/` was matched against the provider's message text, so any error whose
+words happened to contain those digits — a token count, a byte offset, a
+request id, a model name like `minimax-429b` — was classified as a rate limit.
+401, 502, 503 and 504 were matched the same way. A number in prose is not a
+status code; it now has to be presented as one (`HTTP 429`,
+`status_code: 429`, `429 Too Many Requests`), which is how a provider that
+means it writes it.
+
+Worse than the misclassification was what the message did with it. It asserted
+"already retried with backoff and it did not clear" unconditionally — a claim
+about what the CLI had just done, made without knowing whether it had done it —
+and it replaced the provider's own words entirely. A wrong guess therefore left
+the user with a confident explanation of something that never happened and no
+trace of the real error.
+
+The retry clause now appears only when the client reports retries it actually
+spent, with the real count. And a classification inferred from text rather than
+from a status code carries the provider's message with it, so a wrong reading
+is visible instead of authoritative.
+
+## [1.4.3] — 2026-09-08
+
 ### Fixed — the Windows job goes green, having never actually run before
 
 The CI matrix added Windows, but the suite died on the test script before
