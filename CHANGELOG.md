@@ -8,6 +8,33 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — the Windows job goes green, having never actually run before
+
+The CI matrix added Windows, but the suite died on the test script before
+reaching a single test, so "Windows is supported" had no evidence behind it.
+With the script fixed, the first real run reported 46 failures. Two were
+product defects; the rest were tests that assumed POSIX.
+
+Product: slash commands did not load on Windows at all — `import()` was given
+a bare absolute path, which the ESM loader reads as a URL with protocol `d:`
+and refuses. And `findOnPath` returned `npm.CMD` for a file named `npm.cmd`,
+because PATHEXT is upper case and was tried first: runnable, since Windows is
+case-insensitive, but not the path that exists.
+
+Tests: X11 parsers imported through the platform dispatcher exercised the
+Windows no-op stubs; `new URL(...).pathname` produced `/D:/…` and resolved into
+`D:\D:\…`; redirecting `HOME` does not redirect `homedir()` on Windows, which
+reads `USERPROFILE`; POSIX mode bits cannot hold on NTFS; a recursive rm after
+killing git hits EBUSY; and the cold-check timeout is deliberately larger on
+Windows than the flat ceiling one assertion had pinned.
+
+`test_display.py` had one developer's absolute path hardcoded as its working
+directory since the initial commit, which no CI run had ever reached.
+
+All four jobs — Linux and Windows, Node 20 and 22 — now pass.
+
+## [1.4.2] — 2026-09-08
+
 ### Fixed — `npm test` ran zero tests on the Node version CI pins
 
 The script was `node --test "tests/**/*.test.js"`. Glob expansion in
