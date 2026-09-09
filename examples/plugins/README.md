@@ -47,6 +47,35 @@ Every plugin needs two files in its directory:
 
 The plugin's directory name MUST equal the `name` field in the manifest.
 
+### Optional dependencies
+
+A plugin that needs an npm module must load it through the resolver the
+runtime provides, never through its own `createRequire(import.meta.url)`:
+
+```js
+let peerRequire = createRequire(import.meta.url);   // fallback, for direct imports
+
+export const hooks = {
+  onLoad: (api) => {
+    if (api && typeof api.requirePeer === 'function') peerRequire = api.requirePeer;
+  },
+};
+```
+
+Tool handlers can also reach it as `ctx.requirePeer` without capturing it.
+
+The reason is not style. A plugin runs from
+`~/.config/ettore/plugins/<name>/` once installed, and resolution from that
+location walks up through the user's home directory — it never reaches
+ETTORE's `node_modules`, where the optional dependency actually is. The
+resolver looks in the plugin's own directory first (so a plugin that ships its
+own copy keeps it) and in ETTORE's second.
+
+A module that is absent throws with `code: 'PEER_NOT_INSTALLED'`, so a plugin
+can keep its own advice for that case; a module that is present and throws
+while loading propagates unchanged, because "run npm install" is useless
+advice for something already installed.
+
 ### Permissions
 
 Declare the permissions your plugin needs in `plugin.json`. The user is

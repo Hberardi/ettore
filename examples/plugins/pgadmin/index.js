@@ -45,14 +45,20 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 // — the plugin claimed a missing dependency whether or not it was there, and
 // every tool that touches Postgres failed the same way. `createRequire` gives
 // a real one, and keeps the load synchronous so callers stay unchanged.
-const requirePeer = createRequire(import.meta.url);
+// Optional dependencies live in ETTORE's node_modules. Once this plugin is
+// installed to ~/.config/ettore/plugins/, resolving from its own directory
+// walks up through the home directory and finds nothing — so the runtime
+// injects a resolver that looks in both places, captured in onLoad below.
+// The local one remains as the fallback for when this module is imported
+// directly, which is how the tests load it.
+let peerRequire = createRequire(import.meta.url);
 
 function loadPg() {
-  try { return requirePeer('pg'); }
+  try { return peerRequire('pg'); }
   catch (err) {
     // A module that is present but fails to load is not a missing one, and
     // saying "run npm install" would send the reader nowhere.
-    if (err?.code !== 'MODULE_NOT_FOUND') throw err;
+    if (err?.code !== 'MODULE_NOT_FOUND' && err?.code !== 'PEER_NOT_INSTALLED') throw err;
     throw new Error('optional dependency "pg" is not installed. Run `npm install` (or `npm install pg`) to enable the pgadmin plugin.');
   }
 }
@@ -1102,8 +1108,10 @@ export const tools = {
 
 export const hooks = {
   onLoad: async (api) => {
+    // Prefer the runtime's resolver: it can see ETTORE's own node_modules.
+    if (api && typeof api.requirePeer === 'function') peerRequire = api.requirePeer;
     let pgOk = false, dumpOk = false, restoreOk = false;
-    try { requirePeer.resolve('pg'); pgOk = true; } catch { /* not installed */ }
+    try { peerRequire.resolve('pg'); pgOk = true; } catch { /* not installed */ }
     try { if (await findTool('pg_dump')) dumpOk = true; } catch {}
     try { if (await findTool('pg_restore')) restoreOk = true; } catch {}
     if (!pgOk) {

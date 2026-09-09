@@ -26,6 +26,7 @@
 // or any other private agent state.
 
 import { RESERVED_TOOL_NAMES } from './manifest.js';
+import { makeRequirePeer } from './peer-require.js';
 
 export class PluginConflictError extends Error {
   constructor(message, { plugin = null, conflicts = [] } = {}) {
@@ -260,6 +261,15 @@ export class PluginRegistry {
   }
 }
 
+// One resolver per plugin: building it walks no filesystem, but a tool called
+// in a loop should not rebuild it on every invocation either.
+const peerRequireCache = new Map();
+function requirePeerFor(entry) {
+  const key = entry.manifest.name;
+  if (!peerRequireCache.has(key)) peerRequireCache.set(key, makeRequirePeer(entry.manifest.root));
+  return peerRequireCache.get(key);
+}
+
 // Wrap a plugin tool handler so it sees only a controlled context.
 // The plugin cannot reach the agent's internals — only the context
 // object this wrapper produces. `toolName` is the property name the
@@ -276,6 +286,9 @@ function wrapPluginHandler(entry, def, contextFactory, toolName) {
         tool: def.name || toolName,
         // The signal is exposed so plugins can honour cancellation.
         signal: agentContext?.signal || null,
+        // Same resolver the onLoad api carries, for handlers that load an
+        // optional dependency lazily rather than at enable time.
+        requirePeer: requirePeerFor(entry),
         // Optional context factory for richer plugins. The factory may
         // return additional fields (workspace path, agent mode, etc.) but
         // it MUST be provided by trusted agent code, never by user input.

@@ -29,7 +29,13 @@ function missingFile(path) {
 // dependency — the plugin said xlsx was not installed whether or not it was,
 // and no tool here could ever open a workbook. `createRequire` gives a real
 // one, synchronous, so the callers stay as they are.
-const requirePeer = createRequire(import.meta.url);
+// Optional dependencies live in ETTORE's node_modules. Once this plugin is
+// installed to ~/.config/ettore/plugins/, resolving from its own directory
+// walks up through the home directory and finds nothing — so the runtime
+// injects a resolver that looks in both places, captured in onLoad below.
+// The local one remains as the fallback for when this module is imported
+// directly, which is how the tests load it.
+let peerRequire = createRequire(import.meta.url);
 
 /**
  * A formula cell SheetJS will actually write.
@@ -61,11 +67,11 @@ function formulaCell(expr) {
  * what it is given, and reads it back.
  */
 function loadExcel() {
-  try { return requirePeer('exceljs'); }
+  try { return peerRequire('exceljs'); }
   catch (err) {
     // Present but failing to load is a different problem from absent, and
     // "run npm install" would send the reader nowhere.
-    if (err?.code !== 'MODULE_NOT_FOUND') throw err;
+    if (err?.code !== 'MODULE_NOT_FOUND' && err?.code !== 'PEER_NOT_INSTALLED') throw err;
     throw new Error('optional dependency "exceljs" is not installed. Run `npm install` (or `npm install exceljs`) to enable the excel-full plugin.');
   }
 }
@@ -88,9 +94,9 @@ function sheetNames(wb) {
   return wb.worksheets.map(ws => ws.name);
 }
 function loadPureimage() {
-  try { return requirePeer('pureimage'); }
+  try { return peerRequire('pureimage'); }
   catch (err) {
-    if (err?.code !== 'MODULE_NOT_FOUND') throw err;
+    if (err?.code !== 'MODULE_NOT_FOUND' && err?.code !== 'PEER_NOT_INSTALLED') throw err;
     throw new Error('optional dependency "pureimage" is not installed. Run `npm install pureimage` to enable chart generation. Other tools work without it.');
   }
 }
@@ -964,11 +970,13 @@ export const tools = {
 
 export const hooks = {
   onLoad: async (api) => {
+    // Prefer the runtime's resolver: it can see ETTORE's own node_modules.
+    if (api && typeof api.requirePeer === 'function') peerRequire = api.requirePeer;
     const missing = [];
     // `resolve` rather than a load: this only reports what is available, and
     // importing a large workbook library to answer that would be wasteful.
-    try { requirePeer.resolve('exceljs'); } catch { missing.push('exceljs'); }
-    try { requirePeer.resolve('pureimage'); } catch { missing.push('pureimage'); }
+    try { peerRequire.resolve('exceljs'); } catch { missing.push('exceljs'); }
+    try { peerRequire.resolve('pureimage'); } catch { missing.push('pureimage'); }
     if (missing.length === 2) {
       api.log('warn', 'excel-full loaded but no dependency is installed. Run `npm install` to enable all features.');
     } else if (missing.length) {

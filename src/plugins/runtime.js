@@ -42,6 +42,7 @@ import {
   PluginLoadError,
 } from './loader.js';
 import { ManifestError } from './manifest.js';
+import { makeRequirePeer } from './peer-require.js';
 import { PluginConflictError } from './registry.js';
 
 export class PluginRuntime {
@@ -185,6 +186,12 @@ export class PluginRuntime {
     const manifest = loadedPlugin.manifest;
     return {
       manifest,
+      // Load an optional dependency. A plugin MUST use this rather than its
+      // own `createRequire(import.meta.url)`: once installed, a plugin sits
+      // outside ETTORE's module tree and can no longer see the dependencies
+      // ETTORE declares on its behalf. This looks in the plugin's own
+      // directory first, then in ETTORE's.
+      requirePeer: makeRequirePeer(manifest.root),
       // The plugin's declared permissions. Use this to gate logic in
       // the plugin: `if (api.permissions.includes('fs:write')) { ... }`.
       permissions: manifest.permissions.slice(),

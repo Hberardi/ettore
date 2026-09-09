@@ -37,7 +37,13 @@ import { join, dirname, resolve as resolvePath, basename, isAbsolute } from 'nod
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync, createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 
-const requirePeer = createRequire(import.meta.url);
+// Optional dependencies live in ETTORE's node_modules. Once this plugin is
+// installed to ~/.config/ettore/plugins/, resolving from its own directory
+// walks up through the home directory and finds nothing — so the runtime
+// injects a resolver that looks in both places, captured in onLoad below.
+// The local one remains as the fallback for when this module is imported
+// directly, which is how the tests load it.
+let peerRequire = createRequire(import.meta.url);
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;   // 10 MB — EDI files are small
@@ -689,9 +695,9 @@ function parseListing(text) {
 // ─────────────────────────────────────────────────────────────────────────
 
 function loadSsh2() {
-  try { return requirePeer('ssh2'); }
+  try { return peerRequire('ssh2'); }
   catch (err) {
-    if (err?.code !== 'MODULE_NOT_FOUND') throw err;
+    if (err?.code !== 'MODULE_NOT_FOUND' && err?.code !== 'PEER_NOT_INSTALLED') throw err;
     throw new Error(
       'SFTP needs the optional dependency "ssh2", which is not installed. Run `npm install ssh2` in the ETTORE install directory, or use ftp:// or ftps:// instead.',
     );
@@ -2445,6 +2451,8 @@ function formatInspection(res) {
 
 export const hooks = {
   onLoad: (api) => {
+    // Prefer the runtime's resolver: it can see ETTORE's own node_modules.
+    if (api && typeof api.requirePeer === 'function') peerRequire = api.requirePeer;
     // Say once, at enable time, where the credentials live — a plugin that
     // stores secrets should never be quiet about it.
     api.log('info', `edi-ftp ready — profiles in ${PROFILES_FILE()}, layouts in ${LAYOUTS_DIR()}`);

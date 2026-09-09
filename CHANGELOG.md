@@ -8,6 +8,33 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — an installed plugin could not see the dependencies ETTORE installs for it
+
+Reported from a real session: `excel-full` and `pgadmin` both announced that
+their dependency was not installed, while `exceljs` and `pg` sat in
+`node_modules` exactly as they should.
+
+The plugins were loading them with `createRequire(import.meta.url)`, which
+resolves from the file doing the asking. That is the checkout while the plugin
+lives in `examples/plugins/` — which is the only place the tests ever ran it —
+and the user's config directory once it is installed, from where resolution
+walks up through the home directory and reaches nothing. The dependency is
+declared in ETTORE's own package.json, so no plugin could ever find it after
+installation. Every bundled plugin with an optional dependency had been
+degraded since the day it was installed, reporting the wrong cause.
+
+The runtime now hands each plugin a resolver — `api.requirePeer` in `onLoad`,
+`ctx.requirePeer` in a tool handler — that looks in the plugin's own directory
+first and in ETTORE's package root second. A module that is absent throws with
+`code: 'PEER_NOT_INSTALLED'` so a plugin can keep its own tailored advice, and
+one that is present but throws while loading propagates unchanged: telling
+someone to install what they have installed is how this stayed hidden.
+
+No test could have caught it, which is the part worth keeping in mind: the
+suite exercises plugins where they are developed, never where they are
+installed. The new tests resolve from a directory outside the checkout, and
+assert that the naive approach fails there.
+
 ### Added — /resume, /sessions and /new, which /help had been promising all along
 
 `/help` listed `new`, `sessions` and `resume` under "Session and project".
