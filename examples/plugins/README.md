@@ -57,6 +57,8 @@ Known permissions:
 - `fs:read` — read files inside the workspace
 - `fs:write` — write files inside the workspace
 - `network:http` / `network:https` — outbound HTTP
+- `network:ftp` — connect to an FTP / FTPS server
+- `network:ssh` — connect over SSH (SFTP)
 - `shell:exec` — run a shell command
 - `memory:read` / `memory:write` — read/write project memory
 - `agent:tools` — call other tools from within a tool handler

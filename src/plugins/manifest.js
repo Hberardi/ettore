@@ -67,6 +67,12 @@ const KNOWN_PERMISSIONS = new Set([
   'fs:write',
   'network:http',
   'network:https',
+  // FTP and SSH are their own transports, not HTTP with a different port.
+  // A plugin that dials an FTP server would otherwise have to declare
+  // 'network:https' and the permission list shown at enable time would
+  // describe something the plugin never does.
+  'network:ftp',
+  'network:ssh',
   'shell:exec',
   'memory:read',
   'memory:write',

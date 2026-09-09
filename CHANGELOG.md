@@ -8,6 +8,57 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Added — a plugin that reads EDI files off an FTP space
+
+`edi-ftp` covers the whole path from a remote directory to structured records:
+list the server, fetch or peek a file, work out the shape of an undocumented
+tracciato, and parse it with a layout that can be saved and reused. Eleven
+tools for the agent, plus `/edi` for doing the same thing by hand.
+
+Three transports. FTP and FTPS are implemented on `node:net` and `node:tls`
+rather than pulled from npm, because the parts of FTP that actually bite are
+the parts a dependency hides: the passive-mode data connection goes back to
+the host that was dialled and never to the address in the `227` reply (a
+server behind NAT hands out an unroutable one, a hostile server hands out
+somebody else's), and on FTPS the data channel reuses the control channel's
+TLS session, which vsftpd and FileZilla Server require before they will send a
+byte. SFTP goes through `ssh2` when it is installed and says so plainly when
+it is not.
+
+Layouts are JSON, so one can be written straight from a paper spec. The field
+that matters most is `base`: a tracciato spec counts columns from 1 and code
+counts from 0, and reading a 1-based spec as 0-based shifts every field on the
+line by one character while raising no error at all. It defaults to 1, and the
+test suite pins both readings of the same `start` so the difference is on the
+record.
+
+What a short line means is a setting rather than a decision taken here.
+Senders strip trailing spaces, so the last fields of a record routinely arrive
+truncated or missing; `onShortField` on the layout, `onShort` on a field, or a
+per-call override chooses between padding silently, padding and reporting, and
+rejecting. The default treats text and numbers differently, because a
+truncated name is still a name while a truncated number is a *different*
+number — `123456` cut to `1234` with two implied decimals reads as 12,34
+instead of 1234,56, which is plausible, wrong, and invisible.
+
+For a file nobody documented, `edi_inspect` reports what it can prove — line
+lengths, consistent delimiters, record-type markers, and the always-blank
+columns where field boundaries usually sit — and ends with a layout marked
+draft. It is evidence, not a spec: a column that happens to be empty across
+the sample will merge two fields, and nothing here can say what a field means.
+
+Passwords are read from an environment variable by preference; a stored one is
+encrypted at rest, which stops a config dump from being a credential dump and
+claims nothing more than that. Transfers are capped, sockets time out, and
+downloads stay inside the workspace — a remote filename is server-controlled
+input, and `../../.ssh/authorized_keys` is a name a server can return. The
+plugin never writes to the server.
+
+`network:ftp` and `network:ssh` join the known permissions. FTP and SSH are
+their own transports, and a plugin forced to declare `network:https` to open
+an FTP connection would describe, on the screen where the user grants it,
+something it never does.
+
 ### Fixed — errors that were not rate limits stopped being reported as one
 
 Reported from a real session: a turn failed with the 429 message and the user
