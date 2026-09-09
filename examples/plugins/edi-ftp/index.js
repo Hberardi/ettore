@@ -340,7 +340,10 @@ class FtpClient {
     const userRes = await this._cmd(`USER ${user}`);
     if (userRes.code === 331 || userRes.code === 332) {
       const passRes = await this._cmd(`PASS ${password}`, { redactArg: true });
-      expectCode(passRes, [230, 202], 'PASS');
+      // Not the literal command word: the redaction below blanks whatever
+      // follows "PASS", so "PASS failed: 530 …" would lose the word that says
+      // what went wrong and read as though the password had been printed.
+      expectCode(passRes, [230, 202], 'password');
     } else {
       expectCode(userRes, [230, 202], 'USER');
     }

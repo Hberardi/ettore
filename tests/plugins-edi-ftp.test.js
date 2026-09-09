@@ -221,13 +221,31 @@ test('edi-ftp: a wrong password fails at login, a missing file fails at RETR', a
   const srv = await startFakeFtp();
   try {
     const bad = new _internal.FtpClient(_internal.buildSpec({ url: `ftp://edi@127.0.0.1:${srv.port}/`, password: 'sbagliata' }));
-    await assert.rejects(() => bad.connect(null), /PASS failed: 530/);
+    await assert.rejects(() => bad.connect(null), /password failed: 530 login incorrect/);
     await bad.close();
 
     const ok = new _internal.FtpClient(_internal.buildSpec({ url: `ftp://edi@127.0.0.1:${srv.port}/out`, password: 'segreto' }));
     await ok.connect(null);
     await assert.rejects(() => ok.download('/out/MANCANTE.EDI'), /550/);
     await ok.close();
+  } finally {
+    srv.close();
+  }
+});
+
+test('edi-ftp: a failed login reaches the caller readable, with the password gone', async () => {
+  const mod = await loadPlugin();
+  const srv = await startFakeFtp();
+  try {
+    // Through the tool, not the client: this is the path that runs redact(),
+    // and a redaction that eats the wrong word leaves the user with
+    // "PASS ******** 530" and no idea what failed.
+    const out = await mod.tools.edi_list.handler(
+      { url: `ftp://edi@127.0.0.1:${srv.port}/out`, password: 'sbagliata' },
+      { workspace: process.cwd(), signal: null },
+    ).catch((err) => err.message);
+    assert.match(out, /password failed: 530 login incorrect/);
+    assert.ok(!out.includes('sbagliata'), 'the password must not appear in the error');
   } finally {
     srv.close();
   }
