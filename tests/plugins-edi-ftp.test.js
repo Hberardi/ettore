@@ -366,7 +366,7 @@ test('edi-ftp: dates that do not match the declared format come back null, never
 
 test('edi-ftp: normalizeLayout rejects layouts that would silently misread data', async () => {
   const { _internal } = await loadPlugin();
-  assert.throws(() => _internal.normalizeLayout({ type: 'boh', records: {} }), /must be "fixed" or "delimited"/);
+  assert.throws(() => _internal.normalizeLayout({ type: 'boh', records: {} }), /layout.type must be one of: fixed, delimited, segment/);
   assert.throws(() => _internal.normalizeLayout({ type: 'fixed', fields: [{ start: 1, length: 2 }] }), /needs a "name"/);
   assert.throws(() => _internal.normalizeLayout({ type: 'fixed', fields: [{ name: 'a', start: 1 }] }), /needs a "length"/);
   assert.throws(() => _internal.normalizeLayout({ type: 'fixed', fields: [{ name: 'a', start: 1, length: 2, type: 'money' }] }), /use one of/);
@@ -448,10 +448,302 @@ test('edi-ftp: edi_parse reads a local file and can write the full result out', 
   }
 });
 
-test('edi-ftp: edi_parse without a layout explains what to pass instead of throwing', async () => {
+test('edi-ftp: edi_parse with no layout infers one and still returns records', async () => {
   const mod = await loadPlugin();
-  const out = await mod.tools.edi_parse.handler({ file: 'x.edi' }, { workspace: tmpdir(), signal: null });
-  assert.match(out, /pass "layout".*or "layoutInline"/s);
+  const dir = mkdtempSync(join(tmpdir(), 'edi-ftp-'));
+  try {
+    writeFileSync(join(dir, 'ignoto.edi'), '01ACME0001 20240131 MILANO\n01BETA0002 20240201 ROMA  \n', 'latin1');
+    const res = await mod.tools.edi_parse.handler({ file: 'ignoto.edi' }, { workspace: dir, signal: null });
+    assert.equal(res.layout, 'inferred (no layout supplied)');
+    assert.equal(res.records.length, 2);
+    // Placeholder names, real values — including a date it worked out itself.
+    assert.equal(res.records[0].campo_1, '01ACME0001');
+    assert.equal(res.records[0].campo_2, '2024-01-31');
+    assert.match(res.warning, /boundaries are a guess/);
+    assert.ok(res.inferredLayout, 'the inferred layout comes back so it can be corrected and saved');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('edi-ftp: a file whose structure cannot be inferred says so instead of inventing one', async () => {
+  const mod = await loadPlugin();
+  const dir = mkdtempSync(join(tmpdir(), 'edi-ftp-'));
+  try {
+    writeFileSync(join(dir, 'caos.edi'), 'riga corta\nuna riga molto piu lunga di quella prima\nx\n', 'latin1');
+    const res = await mod.tools.edi_parse.handler({ file: 'caos.edi' }, { workspace: dir, signal: null });
+    assert.equal(res.parsed, false);
+    assert.match(res.reason, /could not be inferred/);
+    assert.equal(res.inspection.looksLike, 'unclear');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── record discrimination beyond a fixed marker ───────────────────────────
+
+test('edi-ftp: a record type can be matched by regular expression', async () => {
+  const { _internal } = await loadPlugin();
+  const layout = {
+    type: 'fixed',
+    recordType: { pattern: '^(TESTA|RIGA)', group: 1 },
+    records: {
+      TESTA: { name: 'testata', fields: [{ name: 'codice', start: 6, length: 8 }] },
+      RIGA: { name: 'riga', fields: [{ name: 'articolo', start: 6, length: 8 }] },
+    },
+  };
+  const res = _internal.parseWithLayout('TESTAACME0001\nRIGA ART00001\n', layout);
+  assert.equal(res.stats.errors, 0);
+  assert.equal(res.records[0].codice, 'ACME0001');
+  assert.equal(res.records[1].articolo, 'ART00001');
+});
+
+test('edi-ftp: a record type can be matched by line length alone', async () => {
+  const { _internal } = await loadPlugin();
+  const layout = {
+    type: 'fixed',
+    // The tracciato that marks nothing: the only thing telling a header from
+    // a detail row is how long the row is.
+    recordType: { byLength: { 10: 'testata', 16: 'riga' } },
+    records: {
+      testata: { name: 'testata', fields: [{ name: 'codice', start: 1, length: 10 }] },
+      riga: { name: 'riga', fields: [{ name: 'descrizione', start: 1, length: 16 }] },
+    },
+  };
+  const res = _internal.parseWithLayout('ACME000001\nARTICOLO DA VEND\n', layout);
+  assert.deepEqual(res.stats.byType, { testata: 1, riga: 1 });
+  assert.equal(res.records[1].descrizione, 'ARTICOLO DA VEND');
+});
+
+// ── hierarchy ─────────────────────────────────────────────────────────────
+
+test('edi-ftp: child records are nested under the parent they follow', async () => {
+  const { _internal } = await loadPlugin();
+  const layout = {
+    type: 'fixed',
+    nest: true,
+    recordType: { start: 1, length: 2 },
+    records: {
+      '01': { name: 'testata', fields: [{ name: 'bolla', start: 3, length: 6 }] },
+      '02': { name: 'riga', parent: '01', childKey: 'righe', fields: [{ name: 'articolo', start: 3, length: 6 }] },
+    },
+  };
+  const text = '01BOL001\n02ART001\n02ART002\n01BOL002\n02ART003\n';
+  const res = _internal.parseWithLayout(text, layout);
+  assert.equal(res.records.length, 2, 'two bolle at the root');
+  assert.equal(res.stats.matched, 5, 'all five records are still counted');
+  assert.equal(res.records[0].righe.length, 2);
+  assert.equal(res.records[1].righe[0].articolo, 'ART003');
+});
+
+test('edi-ftp: a child with no parent yet stays at the root instead of vanishing', async () => {
+  const { _internal } = await loadPlugin();
+  const layout = {
+    type: 'fixed',
+    nest: true,
+    recordType: { start: 1, length: 2 },
+    records: {
+      '01': { name: 'testata', fields: [{ name: 'bolla', start: 3, length: 6 }] },
+      '02': { name: 'riga', parent: '01', fields: [{ name: 'articolo', start: 3, length: 6 }] },
+    },
+  };
+  const res = _internal.parseWithLayout('02ART000\n01BOL001\n02ART001\n', layout);
+  assert.equal(res.records.length, 2);
+  assert.equal(res.records[0].articolo, 'ART000', 'the orphan is kept, not dropped');
+});
+
+test('edi-ftp: a parent that does not exist is caught when the layout is read', async () => {
+  const { _internal } = await loadPlugin();
+  assert.throws(
+    () => _internal.normalizeLayout({
+      type: 'fixed',
+      records: { '02': { name: 'riga', parent: '01', fields: [{ name: 'a', start: 1, length: 2 }] } },
+    }),
+    /declares parent "01", which is not a record type/,
+  );
+});
+
+// ── repeating slots, signs, decoding, validation ──────────────────────────
+
+test('edi-ftp: a repeating slot becomes an array', async () => {
+  const { _internal } = await loadPlugin();
+  const layout = {
+    type: 'fixed',
+    fields: [{ name: 'quantita', start: 3, length: 4, type: 'int', occurs: 3 }],
+  };
+  const res = _internal.parseWithLayout('AB001000200030\n', layout);
+  assert.deepEqual(res.records[0].quantita, [10, 20, 30]);
+});
+
+test('edi-ftp: COBOL overpunch signs are read, not silently dropped', async () => {
+  const { _internal } = await loadPlugin();
+  const layout = {
+    type: 'fixed',
+    fields: [{ name: 'importo', start: 1, length: 6, type: 'decimal', decimals: 2, signed: 'overpunch' }],
+  };
+  const res = _internal.parseWithLayout('00012{\n00012}\n', layout);
+  // "{" is +0 and "}" is -0 on the last digit: same digits, opposite sign.
+  assert.equal(res.records[0].importo, 1.2);
+  assert.equal(res.records[1].importo, -1.2);
+});
+
+test('edi-ftp: a trailing sign is read when the field declares one', async () => {
+  const { _internal } = await loadPlugin();
+  const layout = {
+    type: 'fixed',
+    fields: [{ name: 'saldo', start: 1, length: 7, type: 'decimal', decimals: 2, signed: 'trailing' }],
+  };
+  const res = _internal.parseWithLayout('012345-\n', layout);
+  assert.equal(res.records[0].saldo, -123.45);
+});
+
+test('edi-ftp: a decode map turns codes into meanings, and can flag unknown ones', async () => {
+  const { _internal } = await loadPlugin();
+  const layout = {
+    type: 'fixed',
+    fields: [{
+      name: 'regime',
+      start: 1,
+      length: 2,
+      decode: { '01': 'Esportazione definitiva', '02': 'Temporanea' },
+      decodeUnknown: 'error',
+    }],
+  };
+  const res = _internal.parseWithLayout('01\n99\n', layout);
+  assert.equal(res.records[0].regime, 'Esportazione definitiva');
+  assert.equal(res.stats.errors, 1);
+  assert.match(res.errors[0].error, /"99" is not one of the codes/);
+});
+
+test('edi-ftp: required and pattern turn a silent wrong value into a reported one', async () => {
+  const { _internal } = await loadPlugin();
+  const layout = {
+    type: 'fixed',
+    fields: [
+      { name: 'codice', start: 1, length: 4, required: true, pattern: '^[A-Z]{4}$' },
+      { name: 'note', start: 5, length: 4 },
+    ],
+  };
+  const res = _internal.parseWithLayout('ABCDxxxx\nab12yyyy\n    zzzz\n', layout);
+  assert.equal(res.records[0].codice, 'ABCD');
+  assert.equal(res.stats.errors, 2, 'one pattern failure and one missing required field');
+  assert.match(res.errors[0].error, /does not match/);
+  assert.match(res.errors[1].error, /required but empty/);
+});
+
+// ── EDIFACT / X12 ─────────────────────────────────────────────────────────
+
+const EDIFACT = [
+  "UNA:+.? '",
+  "UNB+UNOA:2+MITTENTE+DESTINATARIO+240131:0912+000001'",
+  "NAD+BY+ACME?+FIGLI:160:16'",
+  "MOA+9:1234.56:EUR'",
+].join('\n');
+
+test('edi-ftp: EDIFACT punctuation is read from the UNA header', async () => {
+  const { _internal } = await loadPlugin();
+  const seps = _internal.detectSeparators(EDIFACT);
+  assert.equal(seps.source, 'UNA');
+  assert.equal(seps.component, ':');
+  assert.equal(seps.element, '+');
+  assert.equal(seps.release, '?');
+  assert.equal(seps.segment, "'");
+});
+
+test('edi-ftp: segments split on the terminator and honour the release character', async () => {
+  const { _internal } = await loadPlugin();
+  const segs = _internal.parseSegments(EDIFACT, _internal.detectSeparators(EDIFACT));
+  assert.deepEqual(segs.map((s) => s.tag), ['UNB', 'NAD', 'MOA']);
+  // "?+" is an escaped plus: it must not split the element. The escape is
+  // still in the raw element here — it comes off when a field reads the
+  // value, because the components have yet to be split.
+  assert.equal(segs[1].elements[2], 'ACME?+FIGLI:160:16');
+  assert.equal(_internal.releaseUnescape(segs[1].elements[2], '?'), 'ACME+FIGLI:160:16');
+});
+
+test('edi-ftp: an EDIFACT interchange parses by segment tag, down to components', async () => {
+  const { _internal } = await loadPlugin();
+  const layout = {
+    name: 'edifact-test',
+    type: 'segment',
+    records: {
+      NAD: {
+        name: 'anagrafica',
+        fields: [
+          { name: 'ruolo', element: 1 },
+          { name: 'ragioneSociale', element: 2, component: 0 },
+          { name: 'agenzia', element: 2, component: 2 },
+        ],
+      },
+      MOA: {
+        name: 'importo',
+        fields: [
+          { name: 'qualificatore', element: 1, component: 0 },
+          { name: 'valore', element: 1, component: 1, type: 'decimal' },
+          { name: 'valuta', element: 1, component: 2 },
+        ],
+      },
+      '*': { name: 'altro', fields: [] },
+    },
+  };
+  const res = _internal.parseWithLayout(EDIFACT, layout);
+  assert.equal(res.stats.matched, 3);
+  const nad = res.records.find((r) => r._type === 'NAD');
+  assert.equal(nad.ruolo, 'BY');
+  assert.equal(nad.ragioneSociale, 'ACME+FIGLI');
+  assert.equal(nad.agenzia, '16');
+  const moa = res.records.find((r) => r._type === 'MOA');
+  assert.equal(moa.valore, 1234.56);
+  assert.equal(moa.valuta, 'EUR');
+});
+
+test('edi-ftp: X12 punctuation is taken from the fixed positions of the ISA envelope', async () => {
+  const { _internal } = await loadPlugin();
+  const isa = ['ISA', '00', '          ', '00', '          ', 'ZZ', 'SENDER         ',
+    'ZZ', 'RECEIVER       ', '240131', '0912', 'U', '00401', '000000001', '0', 'P', '>'].join('*') + '~';
+  assert.equal(isa.length, 106, 'the ISA envelope is exactly 106 characters — that is what makes this work');
+  const text = `${isa}N1*ST*ACME SPA~`;
+  const seps = _internal.detectSeparators(text);
+  assert.equal(seps.source, 'ISA');
+  assert.equal(seps.element, '*');
+  assert.equal(seps.component, '>');
+  assert.equal(seps.segment, '~');
+
+  const res = _internal.parseWithLayout(text, {
+    type: 'segment',
+    records: {
+      N1: { name: 'parte', fields: [{ name: 'ruolo', element: 1 }, { name: 'nome', element: 2 }] },
+      '*': { name: 'altro', fields: [] },
+    },
+  });
+  const n1 = res.records.find((r) => r._type === 'N1');
+  assert.equal(n1.nome, 'ACME SPA');
+});
+
+test('edi-ftp: the inspector recognises an interchange and drafts a segment layout', async () => {
+  const { _internal } = await loadPlugin();
+  const res = _internal.inspectText(EDIFACT);
+  assert.equal(res.looksLike, 'segment');
+  assert.equal(res.dialect, 'EDIFACT');
+  assert.equal(res.segments, 3);
+  assert.deepEqual(Object.keys(res.tags), ['UNB', 'NAD', 'MOA']);
+  assert.equal(res.draftLayout.type, 'segment');
+  assert.ok(res.draftLayout.records.NAD.fields.length >= 2);
+  assert.match(res.note, /meanings come from the message spec/);
+});
+
+test('edi-ftp: edi_parse handles an interchange with no layout at all', async () => {
+  const mod = await loadPlugin();
+  const dir = mkdtempSync(join(tmpdir(), 'edi-ftp-'));
+  try {
+    writeFileSync(join(dir, 'ORDERS.EDI'), EDIFACT, 'latin1');
+    const res = await mod.tools.edi_parse.handler({ file: 'ORDERS.EDI' }, { workspace: dir, signal: null });
+    assert.equal(res.stats.matched, 3);
+    assert.equal(res.records[1]._type, 'NAD');
+    assert.equal(res.records[1].el_2, 'ACME+FIGLI:160:16');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ── short-line policy ─────────────────────────────────────────────────────
@@ -575,4 +867,29 @@ test('edi-ftp: edi_parse can override the saved layout for one call', async () =
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('edi-ftp: the decimal mark is decided per value, not assumed', async () => {
+  const { _internal } = await loadPlugin();
+  const field = { name: 'x', type: 'decimal', trim: true, signed: 'none', decimals: 2, trueValues: [] };
+  const read = (text, f = field, mark = null) => _internal.coerce(text, f, { decimalMark: mark });
+
+  assert.equal(read('1.234,56'), 1234.56, 'Italian: dot groups, comma decides');
+  assert.equal(read('1234.56'), 1234.56, 'international: the dot is the decimal point');
+  assert.equal(read('1234,56'), 1234.56);
+  assert.equal(read('1.234.567'), 1234567, 'several dots and no comma is grouping');
+  assert.equal(read('12345'), 123.45, 'no marks at all: the implied decimals apply');
+  // The genuinely ambiguous one, and the escape hatch for it.
+  assert.equal(read('1.234'), 1.234);
+  assert.equal(read('1.234', { ...field, decimalSeparator: ',' }), 1234);
+  // An EDIFACT interchange states its decimal mark in the UNA header.
+  assert.equal(read('1.234', field, ','), 1234);
+});
+
+test('edi-ftp: an unusable decimalSeparator is refused when the layout is read', async () => {
+  const { _internal } = await loadPlugin();
+  assert.throws(
+    () => _internal.normalizeLayout({ type: 'fixed', fields: [{ name: 'a', start: 1, length: 4, decimalSeparator: ';' }] }),
+    /decimalSeparator must be "\." or ","/,
+  );
 });

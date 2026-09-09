@@ -1,7 +1,9 @@
 # edi-ftp
 
-Read EDI files off an FTP, FTPS or SFTP server and turn a fixed-width or
-delimited *tracciato* into structured records.
+Read EDI files off an FTP, FTPS or SFTP server and turn them into structured
+records — a fixed-width *tracciato*, a delimited file, or an EDIFACT / X12
+interchange. With a layout you get named fields; without one it infers the
+structure and returns the columns unnamed.
 
 ```
 /plugins install edi-ftp
@@ -136,6 +138,102 @@ field instead of `start`/`length`.
 
 Layouts live in `~/.config/ettore/edi-ftp/layouts/<name>.json`.
 
+### Which record is this?
+
+Four conventions, all in use. `recordType` takes whichever one your tracciato
+follows:
+
+```json
+{ "recordType": { "start": 1, "length": 2 } }          // a marker at a position
+{ "recordType": { "field": 0 } }                        // a column, in a delimited file
+{ "recordType": { "pattern": "^(TESTA|RIGA)", "group": 1 } }
+{ "recordType": { "byLength": { "120": "testata", "340": "riga" } } }
+```
+
+`byLength` is for the tracciati that mark nothing at all, where the only thing
+telling a header from a detail row is how long the row is.
+
+### Hierarchy
+
+A tracciato is flat on disk and hierarchical in meaning: a testata, then its
+righe, then the next testata. Declare the relationship and set `"nest": true`:
+
+```json
+"02": { "name": "riga", "parent": "01", "childKey": "righe", "fields": [ … ] }
+```
+
+Each child attaches to the last parent seen before it. A child arriving before
+any parent stays at the root rather than being dropped — losing a record
+because the file opened badly would be worse than an odd shape. `stats.matched`
+still counts every record; `stats.roots` counts the top-level ones.
+
+### Repeating slots
+
+`"occurs": 10` reads ten consecutive values into an array, moving by `step`
+(the field's own length unless the tracciato pads between slots):
+
+```json
+{ "name": "quantita", "start": 41, "length": 6, "type": "int", "occurs": 10 }
+```
+
+### Signs, codes, validation
+
+`"signed"` says where the sign lives: `trailing` (`012345-`), `leading`, or
+`overpunch` — the COBOL zoned decimal still produced by every mainframe, where
+the sign rides on the last digit, so `12{` is +120 and `12}` is −120. Read as
+plain text those are both 12: same number, opposite meaning, no error anywhere.
+
+`"decode"` maps codes to meanings, and `decodeUnknown` (`keep`, `null`,
+`error`) says what an unlisted code does:
+
+```json
+{ "name": "regime", "start": 3, "length": 2,
+  "decode": { "01": "Esportazione definitiva", "02": "Temporanea" },
+  "decodeUnknown": "error" }
+```
+
+`"required": true` and `"pattern": "^[A-Z]{4}$"` turn a silently wrong value
+into a reported one. Neither stops the parse; both land in `errors`.
+
+### Decimal marks
+
+`1.234,56` and `1234.56` are the same amount in two conventions, and stripping
+every dot as a thousands separator turns the second into 123456. The mark is
+decided per value: the field may name it with `decimalSeparator`, an EDIFACT
+interchange declares it in its `UNA` header, and otherwise it is inferred —
+when both marks appear the last one is the decimal, and several dots with no
+comma is grouping. One case stays ambiguous, a single dot with exactly three
+digits after it (`1.234`), read as a decimal point unless `decimalSeparator`
+says otherwise.
+
+### EDIFACT and X12
+
+`"type": "segment"` reads the other EDI family — punctuation-delimited
+segments rather than lines, which is why a line-based parser sees such a file
+as one enormous row. Fields are addressed by `element` and optionally
+`component`:
+
+```json
+{
+  "type": "segment",
+  "records": {
+    "NAD": { "name": "anagrafica", "fields": [
+      { "name": "ruolo", "element": 1 },
+      { "name": "ragioneSociale", "element": 2, "component": 0 }
+    ]},
+    "MOA": { "name": "importo", "fields": [
+      { "name": "valore", "element": 1, "component": 1, "type": "decimal" }
+    ]}
+  }
+}
+```
+
+The punctuation is not configured: EDIFACT states it in the `UNA` header, and
+X12 pins it by position because the `ISA` envelope is exactly 106 characters.
+Declare `separators` only for a file that carries neither. The release
+character (`?` in EDIFACT) is honoured, so a company name containing a `+`
+survives as one element instead of tearing the segment in half.
+
 ## Don't have the spec?
 
 `edi_inspect` reads the file and reports what it can prove: line lengths and
@@ -147,6 +245,22 @@ It ends with a **draft** layout.
 The draft is evidence, not a spec. A column that happens to be empty in the
 sample splits a field in two, and only the spec says what a field *means*.
 Correct it, then `edi_layout_save`.
+
+For an EDIFACT or X12 file there are no boundaries to guess: the inspector
+reports the dialect, the punctuation and every segment tag with its element
+count, which is the skeleton of a layout. The names still come from the message
+spec — "element 4 of NAD" is a position, not a meaning.
+
+**`edi_parse` also works with no layout at all.** It infers the structure and
+returns records with placeholder names (`campo_1`, `campo_2`, … or `el_1` for
+segments), flagged with a warning and accompanied by the inferred layout so you
+can correct it and save it. Unnamed columns you can look at beat an error
+message. When even the structure cannot be inferred it says so and hands back
+the inspection rather than inventing one.
+
+What no parser can do is derive *meaning* from data. Boundaries, delimiters and
+record markers are in the file; that column 12 is the shipping date is in the
+spec, and has to be written into the layout once.
 
 ## Encoding
 
@@ -164,7 +278,7 @@ per profile, per layout, or per call.
 | `edi_fetch` | download into the workspace, with size and SHA-256 |
 | `edi_inspect` | analyse an undocumented tracciato, propose a layout |
 | `edi_layout_save` / `edi_layout_list` / `edi_layout_show` | layouts |
-| `edi_parse` | file + layout → records as JSON, table or CSV |
+| `edi_parse` | file (+ layout, or none) → records as JSON, table or CSV |
 
 ## Limits worth knowing
 

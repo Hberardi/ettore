@@ -25,6 +25,37 @@ TLS session, which vsftpd and FileZilla Server require before they will send a
 byte. SFTP goes through `ssh2` when it is installed and says so plainly when
 it is not.
 
+Three families of tracciato, because "any layout" has to mean any: fixed-width,
+delimited, and the punctuation-delimited segments of EDIFACT and X12 — which a
+line-based parser sees as one enormous row, since such a file often has no line
+breaks at all. The punctuation is never configured: EDIFACT states it in its
+`UNA` header and X12 pins it by position, the `ISA` envelope being exactly 106
+characters. The release character is honoured through all three levels of
+splitting, so a company name containing a `+` survives as one element rather
+than tearing the segment in half.
+
+Records announce themselves in four different ways and all four are supported —
+a marker at a fixed position, a column in a delimited row, a regular
+expression, and the length of the line, which in some tracciati is the only
+thing separating a header from a detail row. Children nest under the parent
+they follow when the layout says so, an orphan staying at the root rather than
+being dropped. Fields can repeat into an array (`occurs`), carry a COBOL
+overpunch or trailing sign, decode a code into its meaning, and be checked with
+`required` and `pattern` — a wrong value that is reported beats one that is
+merely wrong.
+
+Numbers decide their own decimal mark. "1.234,56" and "1234.56" are the same
+amount written twice, and treating every dot as a thousands separator turns the
+second into 123456; the field may declare the mark, an EDIFACT interchange
+declares it in `UNA`, and otherwise the last mark present wins.
+
+`edi_parse` no longer requires a layout. Without one it infers the structure and
+returns records with placeholder names, flagged, with the inferred layout
+attached so it can be corrected and saved — unnamed columns to look at beat an
+error message. What it will not do is invent meaning: boundaries and markers
+are in the file, but that column 12 is the shipping date is in the spec, and
+the inspector says so rather than guessing.
+
 Layouts are JSON, so one can be written straight from a paper spec. The field
 that matters most is `base`: a tracciato spec counts columns from 1 and code
 counts from 0, and reading a 1-based spec as 0-based shifts every field on the

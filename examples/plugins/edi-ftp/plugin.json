@@ -1,10 +1,15 @@
 {
   "name": "edi-ftp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "apiVersion": "1",
   "main": "index.js",
-  "description": "Read EDI files from an FTP, FTPS or SFTP server: list a remote directory, fetch or peek a file, inspect an unknown fixed-width/delimited tracciato, and parse it into records with a reusable layout. Connection profiles are stored locally with the password encrypted at rest.",
+  "description": "Read EDI files from an FTP, FTPS or SFTP server: list a remote directory, fetch or peek a file, inspect an undocumented tracciato, and parse fixed-width, delimited or EDIFACT/X12 files into records \u2014 with a reusable layout, or with the structure inferred when there is none. Connection profiles are stored locally with the password encrypted at rest.",
   "author": "ettore@example.com",
   "license": "MIT",
-  "permissions": ["fs:read", "fs:write", "network:ftp", "network:ssh"]
+  "permissions": [
+    "fs:read",
+    "fs:write",
+    "network:ftp",
+    "network:ssh"
+  ]
 }
