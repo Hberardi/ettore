@@ -8,8 +8,21 @@ import { getProviderEnvVars, listConfiguredEnvProviders } from '../providers/env
 import { clearInstallSessionApprovals, listInstallSessionApprovals, setAutoApprove, getAutoApprove } from '../tools/index.js';
 import { saveConfig } from '../config/index.js';
 import { redactSecrets } from '../utils/secrets.js';
+import { listSessions, loadSession } from '../sessions/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Session timestamps are for recognising a conversation, not for auditing it:
+// today's sessions want a time, older ones want a date.
+function formatSessionTime(ts) {
+  if (!ts) return '?';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '?';
+  const sameDay = new Date().toDateString() === d.toDateString();
+  return sameDay
+    ? `today ${d.toTimeString().slice(0, 5)}`
+    : `${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 5)}`;
+}
 
 export class CommandSystem {
   constructor() {
@@ -326,6 +339,77 @@ ${setupHint()}`;
     handler: async () => {
       return { action: 'clear' };
     }
+  },
+
+  // ── /sessions, /resume, /new ──────────────────────────────────────────────
+  //
+  // Every turn already writes the conversation to
+  // ~/.local/share/ettore/sessions/<id>.json — that has always happened. What
+  // was missing was the half that reads it back, so the files accumulated and
+  // nothing could ever open one.
+  //
+  // These three commands stay pure: they return an `action` and the UI applies
+  // it, the same contract /clear uses. That keeps them testable without a
+  // terminal, and keeps mutation of the running agent in one place.
+
+  sessions: {
+    description: 'List saved sessions',
+    usage: 'sessions [limit]',
+    handler: async (args, context = {}) => {
+      const limit = Math.max(1, Math.min(50, Number(String(args || '').trim()) || 15));
+      const all = await listSessions();
+      if (!all.length) return 'No saved sessions yet.';
+
+      const rows = all.slice(0, limit).map((s) => {
+        const turns = (s.messages || []).filter((m) => m.role === 'user').length;
+        const current = s.id === context.sessionId ? ' ←  current' : '';
+        return `  ${s.id.padEnd(14)} ${formatSessionTime(s.updated).padEnd(17)} ${String(turns).padStart(3)} turn(s)  ${s.model || '?'}${current}`;
+      });
+      const more = all.length > rows.length ? `\n  … ${all.length - rows.length} older` : '';
+      return `Saved sessions (${all.length}):\n${rows.join('\n')}${more}\n\nResume one with /resume <id>, or /resume for the most recent.`;
+    }
+  },
+
+  resume: {
+    description: 'Resume a saved session, restoring its conversation',
+    usage: 'resume [id]',
+    handler: async (args, context = {}) => {
+      const id = String(args || '').trim().split(/\s+/)[0];
+
+      if (!id) {
+        // No argument: the most recent session that is not the one already
+        // open, which is what "resume" is asking for nine times out of ten.
+        const all = await listSessions();
+        const candidate = all.find((s) => s.id !== context.sessionId);
+        if (!candidate) return 'No other session to resume. /sessions lists what is saved.';
+        return { action: 'resumeSession', session: candidate };
+      }
+
+      if (id === context.sessionId) return `Session ${id} is the one already open.`;
+
+      let session;
+      try {
+        session = await loadSession(id);
+      } catch (err) {
+        if (err && err.code === 'ENOENT') {
+          const known = (await listSessions()).slice(0, 8).map((s) => s.id);
+          return `No session "${id}".${known.length ? `\nMost recent: ${known.join(', ')}` : ''}`;
+        }
+        // A half-written or hand-edited file: say which one, so it can be
+        // deleted rather than left to fail the same way every time.
+        return `Session "${id}" cannot be read: ${err.message}`;
+      }
+      if (!session || !Array.isArray(session.messages)) {
+        return `Session "${id}" has no conversation in it.`;
+      }
+      return { action: 'resumeSession', session };
+    }
+  },
+
+  new: {
+    description: 'Start a fresh session, leaving the current one saved',
+    usage: 'new',
+    handler: async () => ({ action: 'newSession' })
   },
   
   exit: {

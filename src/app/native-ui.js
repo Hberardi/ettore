@@ -22,6 +22,47 @@ import { autoResumeDecision, DEFAULT_MAX_AUTO_RESUMES } from './auto-resume.js';
 import { checkForUpdate, readLocalPackage } from '../cli/update.js';
 import { baseNameOf } from '../utils/platform.js';
 
+/**
+ * Redraw the visible transcript from a restored conversation.
+ *
+ * Only what a person said and what the assistant answered: system prompts and
+ * tool plumbing belong to the model's context, not to the screen. An assistant
+ * turn that carried nothing but tool calls has no text and is skipped — which
+ * is why the count reported back to the user counts user turns, the one number
+ * that always matches what they remember of the conversation.
+ */
+export function applyResumedSession({ tui, agent, session }) {
+  // The system prompt is deliberately NOT restored. This process's one
+  // describes the model, the tools and the workspace in use right now, which
+  // need not be the ones the session was saved under — a prompt from a session
+  // that ran under a different model would advertise tools this agent does not
+  // have. Only the conversation comes back.
+  const restored = (session.messages || []).filter((m) => m.role !== 'system');
+  agent.messages = [...agent.messages.filter((m) => m.role === 'system'), ...restored];
+  repaintTranscript(tui, restored);
+  tui.sessionId = session.id;
+  return restored.filter((m) => m.role === 'user').length;
+}
+
+// Drop the conversation but keep the system prompt: the agent stays the agent,
+// it just stops remembering what was said.
+export function clearConversation({ tui, agent }) {
+  agent.messages = agent.messages.filter((m) => m.role === 'system');
+  tui.messages.length = 0;
+}
+
+export function repaintTranscript(tui, messages) {
+  tui.messages.length = 0;
+  for (const m of messages || []) {
+    if (m.role !== 'user' && m.role !== 'assistant') continue;
+    const text = typeof m.content === 'string' ? m.content : '';
+    if (!text.trim()) continue;
+    tui.messages.push({ role: m.role, text, tools: [], id: Date.now() + tui.messages.length });
+  }
+  return tui.messages.length;
+}
+
+
 const NON_METERED_PROVIDERS = new Set(['ollama', 'nvidia', 'minimax', 'claude-code']);
 
 // Commands that can change which provider/model is active. After one runs, the
@@ -314,7 +355,9 @@ export async function startApp(options = {}) {
 
   const p = connectionManager.activeProvider || 'unknown';
   const m = connectionManager.activeModel   || 'unknown';
-  const session = await createSession(p, m);
+  // `let`, not `const`: /resume and /new replace this object, and every turn
+  // afterwards saves into whichever session is current.
+  let session = await createSession(p, m);
   tui.sessionId = session.id;
   tui.provider  = p;
   tui.model     = m;
@@ -1541,7 +1584,7 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
       tui.needsRender = true;
       return;
     }
-    const context = { commandSystem: { list: () => commandList }, config, version: '1.0.0', agent, history: [], emitter, mission, pluginRuntime, rebuildAgent: () => rebuildAgent(), startLoop, stopLoop };
+    const context = { commandSystem: { list: () => commandList }, config, version: '1.0.0', agent, history: [], emitter, mission, pluginRuntime, rebuildAgent: () => rebuildAgent(), startLoop, stopLoop, sessionId: session.id };
     try {
       const result = await cmd.handler(cmdArgs, context);
       syncMission();
@@ -1553,6 +1596,25 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
       }
       if (result && typeof result === 'object' && result.action === 'exit') { autoSaveSessionMemory().finally(() => { cleanup(); process.exit(0); }); return; }
       if (result && typeof result === 'object' && result.action === 'clear') { tui.messages.length = 0; tui.needsRender = true; return; }
+      if (result && typeof result === 'object' && result.action === 'resumeSession') {
+        session = result.session;
+        const turns = applyResumedSession({ tui, agent, session });
+        showCommandOutput(cmdName, `Resumed session ${session.id} — ${turns} turn(s) restored.`);
+        tui.needsRender = true;
+        return;
+      }
+      if (result && typeof result === 'object' && result.action === 'newSession') {
+        const previous = session.id;
+        session = await createSession(
+          connectionManager.activeProvider || 'unknown',
+          connectionManager.activeModel || 'unknown',
+        );
+        tui.sessionId = session.id;
+        clearConversation({ tui, agent });
+        showCommandOutput(cmdName, `New session ${session.id}. The previous one is saved — /resume ${previous} returns to it.`);
+        tui.needsRender = true;
+        return;
+      }
       if (result && typeof result === 'object' && result.action === 'setTheme') { setTheme(result.theme); tui.needsRender = true; return; }
       if (typeof result === 'string' && result.length > 0) {
         showCommandOutput(cmdName, result);

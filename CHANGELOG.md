@@ -8,6 +8,37 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Added — /resume, /sessions and /new, which /help had been promising all along
+
+`/help` listed `new`, `sessions` and `resume` under "Session and project".
+None of the three existed. Underneath, `src/sessions/` was worse than
+unfinished: every turn wrote the conversation to
+`~/.local/share/ettore/sessions/<id>.json`, and `listSessions`, `loadSession`
+and `deleteSession` were all written and exported — and never called by
+anything. The CLI had been diligently saving conversations nobody could reopen.
+
+The half that reads them back is now there. `/sessions` lists what is on disk,
+newest first, with the turn count and the session already open marked.
+`/resume <id>` restores a conversation, and with no argument takes the most
+recent session that is not the one already on screen. `/new` starts a fresh
+one, leaving the current conversation saved and telling you its id.
+
+Resuming does not restore the saved system prompt. This process's prompt
+describes the model, the tools and the workspace in use now, and a prompt
+carried over from a session that ran under a different model would advertise
+tools this agent does not have. Only the conversation comes back.
+
+The commands stay pure — they return an `action` and the UI applies it, the
+contract `/clear` already used — so they are testable without a terminal. The
+two pieces that were not (redrawing the transcript, and applying a resumed
+session to the running agent) were lifted out of the UI closure for the same
+reason: the mapping from stored messages to what appears on screen is exactly
+the kind of thing that can be quietly wrong.
+
+The sessions directory now honours `ETTORE_SESSIONS_DIR`, so the tests never
+touch a real conversation history. One of them checks that every command
+`/help` names actually exists, which is the regression that started this.
+
 ### Added — a plugin that reads EDI files off an FTP space
 
 `edi-ftp` covers the whole path from a remote directory to structured records:
