@@ -3,11 +3,12 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { existsSync } from 'fs';
 
-const SESSIONS_DIR = join(homedir(), '.local', 'share', 'ettore', 'sessions');
+const SESSIONS_DIR = () => process.env.ETTORE_SESSIONS_DIR
+  || join(homedir(), '.local', 'share', 'ettore', 'sessions');
 
 async function ensureDir() {
-  if (!existsSync(SESSIONS_DIR)) {
-    await mkdir(SESSIONS_DIR, { recursive: true });
+  if (!existsSync(SESSIONS_DIR())) {
+    await mkdir(SESSIONS_DIR(), { recursive: true });
   }
 }
 
@@ -20,7 +21,7 @@ export async function createSession(provider, model) {
   const session = { id, provider, model, messages: [], created: Date.now(), updated: Date.now() };
   try {
     await ensureDir();
-    await writeFile(join(SESSIONS_DIR, `${id}.json`), JSON.stringify(session, null, 2));
+    await writeFile(join(SESSIONS_DIR(), `${id}.json`), JSON.stringify(session, null, 2));
   } catch {
     session.transient = true;
   }
@@ -32,7 +33,7 @@ export async function saveSession(session) {
   session.updated = Date.now();
   try {
     await ensureDir();
-    await writeFile(join(SESSIONS_DIR, `${session.id}.json`), JSON.stringify(session, null, 2));
+    await writeFile(join(SESSIONS_DIR(), `${session.id}.json`), JSON.stringify(session, null, 2));
     return true;
   } catch {
     session.transient = true;
@@ -46,11 +47,11 @@ export async function listSessions() {
   } catch {
     return [];
   }
-  const files = await readdir(SESSIONS_DIR).catch(() => []);
+  const files = await readdir(SESSIONS_DIR()).catch(() => []);
   const sessions = [];
   for (const f of files.filter(f => f.endsWith('.json'))) {
     try {
-      const data = JSON.parse(await readFile(join(SESSIONS_DIR, f), 'utf-8'));
+      const data = JSON.parse(await readFile(join(SESSIONS_DIR(), f), 'utf-8'));
       sessions.push(data);
     } catch {}
   }
@@ -58,11 +59,11 @@ export async function listSessions() {
 }
 
 export async function loadSession(id) {
-  const data = await readFile(join(SESSIONS_DIR, `${id}.json`), 'utf-8');
+  const data = await readFile(join(SESSIONS_DIR(), `${id}.json`), 'utf-8');
   return JSON.parse(data);
 }
 
 export async function deleteSession(id) {
   const { unlink } = await import('fs/promises');
-  await unlink(join(SESSIONS_DIR, `${id}.json`)).catch(() => {});
+  await unlink(join(SESSIONS_DIR(), `${id}.json`)).catch(() => {});
 }
