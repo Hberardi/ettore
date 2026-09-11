@@ -1750,13 +1750,21 @@ export class Agent {
           continue;
         }
 
-        // Garbage detection for lite/small models that hallucinate
-        const garbageCheck = isGarbageOutput(clean || result.content);
-        if (garbageCheck.isGarbage) {
-          const fallback = buildFallbackMessage(this.config.model, garbageCheck, this.config.provider);
-          emitter?.emit('error', fallback);
-          emitTurnState('failed', { reason: 'garbage_output' });
-          return;
+        // Garbage detection for lite/small models that hallucinate when handed
+        // tool schemas. It discards the whole answer, so it must never run on a
+        // model known to be capable: MiniMax-M3 lost a complete reply to it —
+        // one Chinese word (20) plus a quoted "Human:" (40) scored exactly the
+        // 60 needed, and in a codebase that talks about chat roles that pair is
+        // ordinary prose, not hallucination.
+        const capability = String(this.config.modelCapability || '').toLowerCase();
+        if (this._isLite || capability === 'lite' || capability === 'unknown') {
+          const garbageCheck = isGarbageOutput(clean || result.content);
+          if (garbageCheck.isGarbage) {
+            const fallback = buildFallbackMessage(this.config.model, garbageCheck, this.config.provider);
+            emitter?.emit('error', fallback);
+            emitTurnState('failed', { reason: 'garbage_output' });
+            return;
+          }
         }
 
         // Force one retry with a stricter nudge when the turn ends without

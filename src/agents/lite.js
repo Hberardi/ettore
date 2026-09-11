@@ -45,6 +45,18 @@ export function isLiteModel(modelId) {
 
 // ─── Garbage / hallucination detector ────────────────────────────────────────
 
+// Fenced and inline code carry identifiers, role names and stop-token-looking
+// text that say nothing about whether the prose degenerated; markdown rules and
+// box-drawing banners are formatting, not repetition. Both are removed before
+// scoring — together they are what made an ordinary answer about this codebase
+// look like hallucination.
+function stripCodeAndRules(text) {
+  return String(text)
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/^[ \t]*[-=_*#~─━—]{3,}[ \t]*$/gm, ' ');
+}
+
 /**
  * Detect hallucinated output from models that can't handle complex prompts.
  * @param {string} text
@@ -55,11 +67,12 @@ export function isGarbageOutput(text) {
     return { isGarbage: false, confidence: 0, reason: 'empty input' };
   }
 
+  const prose = stripCodeAndRules(text);
   const reasons = [];
   let score = 0;
 
   // A) Mixed scripts in first 200 chars
-  const sample = text.slice(0, 200);
+  const sample = prose.slice(0, 200);
   const SCRIPTS = {
     cjk:        /[\u3000-\u9fff\uf900-\ufaff]/,
     cyrillic:   /[\u0400-\u04ff]/,
@@ -69,7 +82,11 @@ export function isGarbageOutput(text) {
     thai:       /[\u0e00-\u0e7f]/,
   };
   const hasLatin = /[a-zA-Z]{3,}/.test(sample);
-  const foreign = Object.entries(SCRIPTS).filter(([, re]) => re.test(sample));
+  // A stray word in another script is normal for a model that thinks in one
+  // (MiniMax, Qwen); degeneration leaves more than a character or two behind.
+  const foreign = Object.entries(SCRIPTS)
+    .map(([name, re]) => [name, (sample.match(new RegExp(re.source, 'g')) || []).length])
+    .filter(([, count]) => count >= 3);
   if (hasLatin && foreign.length >= 2) {
     score += 45; reasons.push(`mixed scripts (${foreign.map(([k]) => k).join(', ')}) in first 200 chars`);
   } else if (hasLatin && foreign.length === 1) {
@@ -77,31 +94,36 @@ export function isGarbageOutput(text) {
   }
 
   // B) Token/char repetition
-  const repMatch = text.match(/(\b\w{2,}\b)(\s+\1){5,}/i);
+  const repMatch = prose.match(/(\b\w{2,}\b)(\s+\1){5,}/i);
   if (repMatch) { score += 40; reasons.push(`repeated token: "${repMatch[1]}"`); }
-  if (/(.)\1{9,}/.test(text)) { score += 25; reasons.push('character-level repetition burst'); }
+  // Letters and digits only: a run of the separator characters someone drew
+  // across a line is formatting, not a decoder looping on one character.
+  if (/([0-9A-Za-z])\1{9,}/.test(prose)) { score += 25; reasons.push('character-level repetition burst'); }
 
   // C) Fake placeholder paths
   const FAKE_PATHS = [/\/sample\/\w/i, /\/path\/to\//i, /\/your[-_/]?\w+\//i,
                       /\/test\/write\//i, /\/foo\/bar/i, /\/example\//i];
-  const fakeHits = FAKE_PATHS.filter(re => re.test(text)).length;
+  const fakeHits = FAKE_PATHS.filter(re => re.test(prose)).length;
   if (fakeHits >= 2) { score += 30; reasons.push(`${fakeHits} fake placeholder paths`); }
   else if (fakeHits === 1) { score += 10; }
 
   // D) Consonant-cluster word salad (BPE artefacts)
-  const salad = (text.match(/\b[b-df-hj-np-tv-z]{5,}\b/gi) || []).length;
+  const salad = (prose.match(/\b[b-df-hj-np-tv-z]{5,}\b/gi) || []).length;
   if (salad >= 3) { score += 35; reasons.push(`${salad} consonant-cluster words`); }
 
   // E) Ellipsis chains
-  const ellipsis = (text.match(/[.…]{4,}/g) || []).length;
+  const ellipsis = (prose.match(/[.…]{4,}/g) || []).length;
   if (ellipsis >= 3) { score += 30; reasons.push(`${ellipsis} ellipsis chains`); }
   else if (ellipsis >= 1) { score += 10; }
 
-  // F) Leaked stop tokens
+  // F) Leaked stop tokens. A real one is proof the decoder ran off the end;
+  // "Human:" and "Assistant:" are also how anyone describes a chat transcript,
+  // so they weigh far less — at 40 they convicted a correct answer.
   const STOP = [/[<|]endoftext[|>]/i, /[<|]im_end[|>]/i, /\[\/INST\]/, /<<SYS>>/,
-                /[<|]eot_id[|>]/i, /\bHuman:\s/, /\bAssistant:\s/];
-  const stopHits = STOP.filter(re => re.test(text)).length;
+                /[<|]eot_id[|>]/i];
+  const stopHits = STOP.filter(re => re.test(prose)).length;
   if (stopHits >= 1) { score += 40; reasons.push(`leaked stop token(s)`); }
+  else if (/^\s*(Human|Assistant):\s/m.test(prose)) { score += 10; reasons.push('chat role marker at line start'); }
 
   // G) Code-block language spam in short output
   const langs = new Set((text.match(/```(\w+)/g) || []).map(s => s.slice(3)));
