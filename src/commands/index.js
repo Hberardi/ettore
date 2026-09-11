@@ -831,7 +831,8 @@ workdir: ${config.workdir}
 safetyProfile: ${config.safetyProfile}
 dynamicToolRouting: ${config.dynamicToolRouting}
 maxIterations: ${config.maxIterations || 50}
-maxToolsPerRequest: ${config.maxToolsPerRequest || 16}`;
+maxToolsPerRequest: ${config.maxToolsPerRequest || 16}
+effort: ${config.effort || 'default'}`;
 
         if (hasLocal) {
           output += '\n\nLocal config (.ettore/config.json): ✓ active';
@@ -920,6 +921,26 @@ maxToolsPerRequest: ${config.maxToolsPerRequest || 16}`;
         return `Max tools per request set to: ${count}${isLocal ? ' (project-local)' : ' (global)'}`;
       }
 
+      // `effort` was read from config by every transport but there was no
+      // command to set it: the only way was editing the config file by hand.
+      if (key === 'effort') {
+        const { normalizeEffort, EFFORT_LEVELS } = await import('../llm/model-limits.js');
+        const current = context.agent?.config?.effort || context.config?.effort || null;
+        if (!value) {
+          return `Effort: ${current || 'default (the provider decides)'}\nUsage: /config effort <${EFFORT_LEVELS.join('|')}|default> [--local]`;
+        }
+        const lower = String(value).toLowerCase();
+        const level = lower === 'default' || lower === 'off' ? '' : normalizeEffort(lower);
+        if (level === null) return `Invalid effort. Use: ${EFFORT_LEVELS.join(', ')}, default`;
+        // An empty string reads back as "unset" (see stringFrom in config).
+        if (isLocal) await saveConfigAsync('effort', level, { local: true });
+        else saveConfig('effort', level);
+        if (context.agent?.config) context.agent.config.effort = level || null;
+        if (context.config) context.config.effort = level || null;
+        return `Effort set to: ${level || 'default'}${isLocal ? ' (project-local)' : ' (global)'}. `
+          + 'Applies from the next turn, on models that accept it (Claude 4.5+, OpenAI o-series/GPT-5, gpt-oss, Gemini 2.5+).';
+      }
+
       if (key === 'max-iterations' && value) {
         const count = Number.parseInt(value, 10);
         if (!Number.isInteger(count) || count < 1 || count > 200) {
@@ -942,6 +963,7 @@ Available keys:
   tool-routing <on|off> Enable dynamic tool selection
   max-iterations <1-200> Maximum agent loop iterations
   max-tools <4-28> Maximum schemas sent per request
+  effort <level>   low|medium|high|xhigh|max|default — reasoning depth
 
 Flags:
   --local, -l      Save configuration in project directory (.ettore/config.json)
@@ -978,20 +1000,24 @@ Examples:
     description: 'Show system information',
     usage: 'system',
     aliases: ['sys', 'info'],
-    handler: async (_args, _context) => {
+    handler: async (_args, context) => {
       const os = await import('os');
       const connections = connectionManager.listConnections();
-      const active = connectionManager.getActive();
-      
+      // `getActive()` returns the connection record, whose `.provider` is the
+      // SDK wrapper instance — printed, that read "[object Object]".
+      const active = connectionManager.activeProvider
+        ? `${connectionManager.activeProvider}/${connectionManager.activeModel || 'default model'}`
+        : 'none';
+
       return `ETTORE System Info
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Version: 1.0.0
+  Version: ${context?.version || 'unknown'}
   Platform: ${os.platform()} ${os.arch()}
   CPU: ${os.cpus().length} cores
   Memory: ${Math.round(os.freemem() / 1024 / 1024)}MB free
-  
+
   Connections: ${connections.length}
-  Active: ${active ? active.provider : 'none'}
+  Active: ${active}
   Working Directory: ${process.cwd()}`;
     }
   },

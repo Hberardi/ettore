@@ -1589,7 +1589,9 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
       tui.needsRender = true;
       return;
     }
-    const context = { commandSystem: { list: () => commandList }, config, version: '1.0.0', agent, history: [], emitter, mission, pluginRuntime, rebuildAgent: () => rebuildAgent(), startLoop, stopLoop, sessionId: session.id };
+    // The real build: a hardcoded '1.0.0' here made /version, /status and
+    // /system report a release that shipped long ago.
+    const context = { commandSystem: { list: () => commandList }, config, version: tui.version || 'unknown', agent, history: [], emitter, mission, pluginRuntime, rebuildAgent: () => rebuildAgent(), startLoop, stopLoop, sessionId: session.id };
     try {
       const result = await cmd.handler(cmdArgs, context);
       syncMission();

@@ -1769,12 +1769,25 @@ class TUI {
     this.commandIndex        = 0;
     this.commandScrollOffset = 0;
     const f                  = filter.toLowerCase();
-    this.commandFiltered     = this.commandList.filter(cmd => {
-      const name    = cmd.name.toLowerCase();
-      const aliases = (cmd.aliases || []).join(' ').toLowerCase();
-      const desc    = (cmd.description || '').toLowerCase();
-      return name.includes(f) || aliases.includes(f) || desc.includes(f);
-    });
+    // Enter runs the first entry, so the order here decides which command
+    // runs. A plain substring match in list order sent "/models" to
+    // /providers (whose description mentions models), "/config" to /doctor
+    // and the alias "/m" to /resume. Rank: exact name, exact alias, name or
+    // alias prefix, name or alias substring, description; ties keep list order.
+    const rank = (cmd) => {
+      const names = [cmd.name, ...(cmd.aliases || [])].map(n => String(n).toLowerCase());
+      if (names[0] === f) return 0;
+      if (names.includes(f)) return 1;
+      if (names.some(n => n.startsWith(f))) return 2;
+      if (names.some(n => n.includes(f))) return 3;
+      if ((cmd.description || '').toLowerCase().includes(f)) return 4;
+      return -1;
+    };
+    this.commandFiltered = this.commandList
+      .map((cmd, index) => ({ cmd, index, score: rank(cmd) }))
+      .filter(entry => entry.score >= 0)
+      .sort((a, b) => a.score - b.score || a.index - b.index)
+      .map(entry => entry.cmd);
     this.needsRender = true;
   }
 
