@@ -173,6 +173,10 @@ export async function loadConfig(options = {}) {
     // someone has measured their own workload — raising it buys quality and
     // is paid in tokens, and on a subscription that is paid in quota.
     effort: stringFrom('effort', null),
+    // Model that writes context summaries. Unset picks a fast model of the
+    // same provider; "main" keeps the session's own. See /compress model.
+    compressionModel: stringFrom('compressionModel', null),
+    compressionProvider: stringFrom('compressionProvider', null),
     // safe: workspace-only; balanced: external paths require approval;
     // autonomous: external reads allowed, external writes still approved.
     safetyProfile: stringFrom('safetyProfile', 'balanced'),

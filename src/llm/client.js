@@ -3,7 +3,55 @@ import { spawn } from 'child_process';
 import { setMaxListeners as setTargetMaxListeners } from 'events';
 import { connectionManager } from '../providers/index.js';
 import { canonicalizeToolTurn } from '../agents/message-ledger.js';
-import { resolveOutputCap, effortFor } from './model-limits.js';
+import { resolveOutputCap, effortFor, normalizeEffort } from './model-limits.js';
+
+// Content blocks of a message that lives for one request only (the agent's
+// recovery overlay). A cache breakpoint placed on one would write a cache entry
+// the next request can never read back, since that block is gone by then.
+const EPHEMERAL_BLOCKS = new WeakSet();
+
+// Models that always reason, whatever they are asked, and whose effort knob
+// therefore only trades depth for speed: OpenAI's o-series and GPT-5 (not the
+// `-chat` variants, which do not reason), gpt-oss wherever it is hosted, and
+// Gemini 2.5+ except Flash-Lite, which does not think unless asked to. A hybrid
+// model is deliberately absent — there, sending any effort at all switches
+// thinking ON, which would make a "low" request slower rather than faster.
+const ALWAYS_REASONING_RE = /(?:^|\/)(?:o[134](?:-(?:mini|pro))?(?:-\d{4}-\d{2}-\d{2})?$|gpt-5(?![\w.]*-chat)|gpt-oss)|gemini-(?:2\.5|[3-9](?:\.\d+)?)-(?![\w.-]*lite)/i;
+
+/**
+ * The request fields that set reasoning effort on an OpenAI-compatible
+ * endpoint, or `{}` to send none.
+ *
+ * Only `effort` used to be honoured on the Anthropic transports, so `/effort
+ * low` and the compressor's low-effort summary made no difference to every
+ * other model. OpenRouter takes its unified `reasoning` object; the others take
+ * OpenAI's `reasoning_effort`, which tops out at `high`.
+ */
+export function reasoningParamsFor(provider, model, effort) {
+  const level = normalizeEffort(effort);
+  if (!level) return {};
+  if (!ALWAYS_REASONING_RE.test(String(model || ''))) return {};
+  const capped = level === 'xhigh' || level === 'max' ? 'high' : level;
+  if (String(provider || '').toLowerCase() === 'openrouter') {
+    return { reasoning: { effort: capped } };
+  }
+  return { reasoning_effort: capped };
+}
+
+// A 400 that names the reasoning field: the endpoint does not take it for this
+// model. Anything else is a real error and must surface.
+function isRejectedReasoningParam(error) {
+  const status = error?.status || error?.statusCode;
+  if (status !== 400 && status !== 422) return false;
+  return /reasoning/i.test(String(error?.message || ''));
+}
+
+// Prompt tokens served from the provider's cache. OpenAI and most compatible
+// servers report them under `prompt_tokens_details`; DeepSeek has its own name.
+function cachedPromptTokens(usage) {
+  const n = Number(usage?.prompt_tokens_details?.cached_tokens ?? usage?.prompt_cache_hit_tokens);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
 
 
 // Idle timeout: if no token arrives, abort the stream.
@@ -192,6 +240,7 @@ export function createClient(config) {
       ? STREAMING_IDLE_MS_LONG_REASONING
       : STREAMING_IDLE_MS;
     return new OpenAICompatClient(providerInstance.getClient(), model, {
+      provider,
       idleMs,
       modelParams: pickAllowedModelParams(config, OPENAI_MODEL_PARAM_KEYS, { maxTokens: 'max_tokens' }),
     });
@@ -206,6 +255,52 @@ export function usesAnthropicTransport(provider) {
 
 export function usesClaudeCodeTransport(provider) {
   return provider === 'claude-code';
+}
+
+// A fast model per provider for context summaries. Summarising is the one
+// call where a small model does as well as a large one, and it used to run on
+// the session's model — a reasoning model could hold the whole agent loop for
+// up to 90s while it thought about a recap.
+//
+// Same vendor only, on purpose: the transcript must not leave for a company
+// the user did not pick. That is why OpenRouter, which fronts every vendor,
+// has no entry — its "fast model" would mean some other company's servers.
+const FAST_SUMMARY_MODELS = {
+  anthropic: 'claude-haiku-4-5',
+  'claude-code': 'haiku',
+  openai: 'gpt-4o-mini',
+  google: 'gemini-2.5-flash-lite',
+  deepseek: 'deepseek-chat',
+};
+
+/**
+ * The model that should write context summaries, or null for the session's
+ * own. `compressionModel` in config wins; "main" (or "off") forces the
+ * session's model; unset or "default" takes the provider's fast model.
+ */
+export function compressionModelFor(config = {}) {
+  const explicit = String(config.compressionModel ?? '').trim();
+  const lower = explicit.toLowerCase();
+  if (lower === 'main' || lower === 'off') return null;
+  const provider = String(config.compressionProvider || config.provider || '').toLowerCase();
+  const model = explicit && lower !== 'default' && lower !== 'null'
+    ? explicit
+    : FAST_SUMMARY_MODELS[provider] || null;
+  if (!model) return null;
+  const sameProvider = !config.compressionProvider || config.compressionProvider === config.provider;
+  if (sameProvider && model === config.model) return null;
+  return model;
+}
+
+/** A client for `compressionModelFor(config)`, or null. May throw if not connected. */
+export function createCompressionClient(config = {}) {
+  const model = compressionModelFor(config);
+  if (!model) return null;
+  const provider = config.compressionProvider || config.provider;
+  // Only provider and model: sampling settings belong to the main model.
+  const client = createClient({ provider, model });
+  client.label = `${provider}/${model}`;
+  return client;
 }
 
 export function normalizeMessagesForAnthropic(messages) {
@@ -250,6 +345,11 @@ export function normalizeMessagesForAnthropic(messages) {
           if (block && typeof block === 'object' && block.type === 'text' && !block.cache_control) {
             block.cache_control = msg._cacheControl;
           }
+        }
+      }
+      if (msg._ephemeral) {
+        for (const block of blocks) {
+          if (block && typeof block === 'object') EPHEMERAL_BLOCKS.add(block);
         }
       }
       out.push({ role: 'user', content: [...pendingToolResults, ...blocks] });
@@ -364,7 +464,7 @@ export function normalizeMessagesForOpenAICompat(messages) {
 // Always streams — including tool-calling turns. Assistant text reaches the UI
 // token-by-token for immediate feedback; tool-call fragments arrive as
 // `delta.tool_calls` chunks keyed by `index` and are accumulated as they stream.
-export async function openaiCompatibleTurn(client, model, messages, tools, onToken, signal, idleMs = STREAMING_IDLE_MS, modelParams = {}) {
+export async function openaiCompatibleTurn(client, model, messages, tools, onToken, signal, idleMs = STREAMING_IDLE_MS, modelParams = {}, extra = {}) {
   const params = {
     model,
     messages: normalizeMessagesForOpenAICompat(messages),
@@ -376,6 +476,10 @@ export async function openaiCompatibleTurn(client, model, messages, tools, onTok
     stream_options: { include_usage: true },
   };
   if (tools?.length) params.tools = tools;
+  // Reasoning effort goes in before the user's params so an explicit setting
+  // in config still wins.
+  const reasoning = extra.reasoning || {};
+  Object.assign(params, reasoning);
   // User-config LLM params (es. temperature, top_p, max_tokens) — sovrascrivono
   // i default cablati se esplicitamente impostati.
   Object.assign(params, modelParams);
@@ -385,6 +489,8 @@ export async function openaiCompatibleTurn(client, model, messages, tools, onTok
 
   const { signal: streamSignal, resetTimer, clear } = makeStreamingSignal(signal, idleMs);
 
+  const startedAt = Date.now();
+  let firstChunkMs = null;
   let content = '';
   let usage = null;
   // Tool-call fragments accumulate here, indexed by delta.tool_calls[].index.
@@ -401,9 +507,22 @@ export async function openaiCompatibleTurn(client, model, messages, tools, onTok
   // Stream creation stays inside the try: if it throws, clear() still runs and
   // disarms the idle watchdog (otherwise the 120s timer would leak).
   try {
-    const stream = await retryLLMCall(() => client.chat.completions.create(params, { signal: streamSignal }), signal);
+    const create = () => client.chat.completions.create(params, { signal: streamSignal });
+    let stream;
+    try {
+      stream = await retryLLMCall(create, signal);
+    } catch (error) {
+      // The model table cannot know every host: an endpoint that refuses the
+      // reasoning field gets the request again without it, and the caller is
+      // told so the next turn does not pay for the same 400.
+      if (!Object.keys(reasoning).length || !isRejectedReasoningParam(error)) throw error;
+      for (const key of Object.keys(reasoning)) delete params[key];
+      extra.onReasoningRejected?.();
+      stream = await retryLLMCall(create, signal);
+    }
     try {
       for await (const chunk of stream) {
+        if (firstChunkMs === null) firstChunkMs = Date.now() - startedAt;
         // Final usage chunk (include_usage) carries an empty choices array.
         if (chunk.usage) usage = chunk.usage;
         const choice = chunk.choices?.[0];
@@ -456,8 +575,17 @@ export async function openaiCompatibleTurn(client, model, messages, tools, onTok
     clear();
   }
 
+  // `prompt_tokens` includes the cached share here, unlike Anthropic's
+  // `input_tokens`. Split it the Anthropic way so every consumer — the cost
+  // line, the context meter — reads one convention.
+  const cachedIn = cachedPromptTokens(usage);
   const usageObj = usage
-    ? { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens }
+    ? {
+        inputTokens: Math.max(0, (Number(usage.prompt_tokens) || 0) - cachedIn),
+        outputTokens: usage.completion_tokens,
+        cacheRead: cachedIn,
+        firstChunkMs,
+      }
     : null;
 
   // reasoning_* fields are intentionally never stored on the message: sending
@@ -484,11 +612,20 @@ export class OpenAICompatClient {
   constructor(client, model, options = {}) {
     this.client = client;
     this.model = model;
+    this.provider = options.provider || null;
     this._idleMs = options.idleMs || STREAMING_IDLE_MS;
     this._modelParams = options.modelParams || {};
+    // Set once the endpoint has refused the reasoning field for this model.
+    this._reasoningRejected = false;
   }
-  async turn(messages, tools, onToken, signal) {
-    return openaiCompatibleTurn(this.client, this.model, messages, tools, onToken, signal, this._idleMs, this._modelParams);
+  async turn(messages, tools, onToken, signal, options = {}) {
+    const reasoning = this._reasoningRejected
+      ? {}
+      : reasoningParamsFor(this.provider, this.model, options.effort);
+    return openaiCompatibleTurn(
+      this.client, this.model, messages, tools, onToken, signal, this._idleMs, this._modelParams,
+      { reasoning, onReasoningRejected: () => { this._reasoningRejected = true; } },
+    );
   }
 }
 
@@ -525,15 +662,20 @@ export function applyRollingCacheBreakpoint(messages, budget) {
 
   // Walk back to the last message carrying a taggable block. A trailing
   // message with no content blocks (or only unknown shapes) is skipped rather
-  // than silently dropping the breakpoint.
+  // than silently dropping the breakpoint. Blocks of a one-request message are
+  // stepped over: the breakpoint lands on what the next request still carries,
+  // such as the tool results an overlay message was merged with.
   for (let i = messages.length - 1; i >= 0; i--) {
     const content = messages[i]?.content;
     if (!Array.isArray(content) || !content.length) continue;
-    const block = content[content.length - 1];
-    if (!block || typeof block !== 'object') continue;
-    if (block.cache_control) return used;
-    block.cache_control = { type: 'ephemeral' };
-    return used + 1;
+    for (let j = content.length - 1; j >= 0; j--) {
+      const block = content[j];
+      if (!block || typeof block !== 'object') break;
+      if (EPHEMERAL_BLOCKS.has(block)) continue;
+      if (block.cache_control) return used;
+      block.cache_control = { type: 'ephemeral' };
+      return used + 1;
+    }
   }
   return used;
 }
@@ -597,6 +739,8 @@ export class AnthropicClient {
     let cacheCreate = 0;
     let cacheRead = 0;
     let final;
+    const startedAt = Date.now();
+    let firstChunkMs = null;
     // Stream creation stays inside the try: if it throws, clear() still runs and
     // disarms the idle watchdog (otherwise the 120s timer would leak).
     try {
@@ -606,6 +750,7 @@ export class AnthropicClient {
       );
       for await (const chunk of stream) {
         resetTimer();
+        if (firstChunkMs === null) firstChunkMs = Date.now() - startedAt;
         if (chunk.type === 'message_start') {
           const u = chunk.message?.usage;
           inputTokens = u?.input_tokens || 0;
@@ -630,6 +775,7 @@ export class AnthropicClient {
       outputTokens: final.usage?.output_tokens ?? outputTokens,
       cacheCreate:  final.usage?.cache_creation_input_tokens ?? cacheCreate,
       cacheRead:    final.usage?.cache_read_input_tokens ?? cacheRead,
+      firstChunkMs,
     };
 
     // Normalized onto the OpenAI spelling so the agent loop has one thing to check.

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { promptSeen } from './helpers/prompt-seen.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,7 +52,7 @@ test('Agent forces a verify retry when write happens but no verifier runs', asyn
           return { type: 'text', content: 'File creato.' };
         }
         if (turns === 3) {
-          const system = messages[0]?.content || '';
+          const system = promptSeen(messages);
           if (/did not verify/i.test(String(system))) sawVerifyNudge = true;
           const tc = bashCall('b1', `node -c ${target}`);
           return { type: 'tool_calls', tool_calls: [tc], message: { role: 'assistant', content: '', tool_calls: [tc] } };

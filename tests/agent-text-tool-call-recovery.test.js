@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { promptSeen } from './helpers/prompt-seen.js';
 import { EventEmitter } from 'node:events';
 import { Agent } from '../src/agents/index.js';
 import { toolHandlers } from '../src/tools/index.js';
@@ -78,7 +79,7 @@ test('an unparseable tool-call blob nudges the model back to the native API', as
   const client = {
     async turn(messages) {
       turn++;
-      systemsSeen.push(String(messages[0]?.content || ''));
+      systemsSeen.push(String(promptSeen(messages)));
       if (turn === 1) return { type: 'text', content: 'Ora leggo il file <tool_call> ...' };
       return { type: 'text', content: 'Fatto.' };
     },
@@ -101,7 +102,7 @@ test('a half-parsed blob is never replayed as an empty-args tool call', async ()
     const client = {
       async turn(messages) {
         turn++;
-        systemsSeen.push(String(messages[0]?.content || ''));
+        systemsSeen.push(String(promptSeen(messages)));
         if (turn === 1) return { type: 'text', content: '<invoke name="read"></invoke>' };
         return { type: 'text', content: 'Non riesco, mi serve il percorso.' };
       },

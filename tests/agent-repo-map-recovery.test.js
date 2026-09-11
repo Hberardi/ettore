@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { promptSeen } from './helpers/prompt-seen.js';
 import { EventEmitter } from 'node:events';
 import { Agent } from '../src/agents/index.js';
 
@@ -40,7 +41,7 @@ test('Agent does not replay rejected exploration tool calls without results', as
           message.tool_calls?.some(call => call.id === grepCall.id)
         );
         assert.equal(orphanedCall, undefined);
-        assert.match(messages[0].content, /call repo_map first/i);
+        assert.match(promptSeen(messages), /call repo_map first/i);
         return {
           type: 'tool_calls',
           tool_calls: [repoMapCall],

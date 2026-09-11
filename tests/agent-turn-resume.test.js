@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { promptSeen } from './helpers/prompt-seen.js';
 import { EventEmitter } from 'node:events';
 import { Agent } from '../src/agents/index.js';
 
@@ -22,7 +23,7 @@ test('Agent resumes a reply the provider cut off at max_tokens', async () => {
       if (turns === 1) {
         return { type: 'text', content: 'Ho aggiornato il primo file e ora sto scriv', finishReason: 'length' };
       }
-      const system = String(messages[0]?.content || '');
+      const system = String(promptSeen(messages));
       assert.match(system, /cut off by the output token limit/i);
       assert.match(system, /resume 1\/3/i);
       return { type: 'text', content: 'endo il secondo. Fatto.' };
@@ -165,7 +166,7 @@ test('A "continua" prompt keeps the previous plan instead of wiping it', async (
   const client = {
     async turn(messages) {
       turns++;
-      seenSystems.push(String(messages[0]?.content || ''));
+      seenSystems.push(String(promptSeen(messages)));
       if (turns === 1) {
         return { type: 'text', content: '<todo>\n1. Primo passo\n2. Secondo passo\n</todo>\n<done:1>\nPrimo passo chiuso.' };
       }

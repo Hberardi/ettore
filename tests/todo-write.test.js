@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { promptSeen } from './helpers/prompt-seen.js';
 import { EventEmitter } from 'node:events';
 import { Agent } from '../src/agents/index.js';
 import { toolHandlers, setAgentTodoSink } from '../src/tools/index.js';
@@ -151,7 +152,7 @@ test('Agent auto-continues when todos come from todo_write and are unfinished', 
         // Stop with text but only step 1 marked done — auto-continue should kick in.
         return { type: 'text', content: '<done:1>\nFermato qui.' };
       }
-      const system = messages[0]?.content || '';
+      const system = promptSeen(messages);
       assert.match(String(system), /auto-continue/i);
       return { type: 'text', content: '<done:2>\n<done:3>\nfatto tutto' };
     },

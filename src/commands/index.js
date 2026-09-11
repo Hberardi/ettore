@@ -1089,7 +1089,7 @@ Example: /keys remove openai`;
   
   compress: {
     description: 'Compress conversation context to reduce token usage',
-    usage: 'compress [preview|apply|auto|stats|threshold|history|undo]',
+    usage: 'compress [preview|apply|auto|stats|threshold|model|history|undo]',
     aliases: ['ctx'],
     handler: async (args, context) => {
       const [subcommand, ...rest] = args;
@@ -1128,7 +1128,18 @@ Example: /keys remove openai`;
         const pct = Math.min(100, Math.round((s.usedTokens / s.maxTokens) * 100));
         const filled = Math.round(pct / 10);
         const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
-        return `Context Stats\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  Tokens used     : ~${s.usedTokens} / ${s.maxTokens}  (${pct}%)\n  [${bar}]\n  Compressions run: ${s.compressionCount}\n  Tokens saved    : ~${s.totalSaved}\n  Auto-compress   : ${s.autoEnabled ? 'ON' : 'OFF'}  (threshold: ${s.threshold})`;
+        return `Context Stats\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  Tokens used     : ~${s.usedTokens} / ${s.maxTokens}  (${pct}%)\n  [${bar}]\n  Compressions run: ${s.compressionCount}\n  Tokens saved    : ~${s.totalSaved}\n  Auto-compress   : ${s.autoEnabled ? 'ON' : 'OFF'}  (threshold: ${s.threshold})\n  Summary model   : ${s.summaryModel}`;
+      }
+
+      if (subcommand === 'model') {
+        const [value] = rest;
+        if (!value) {
+          return `Summary model: ${compressor.summaryModelLabel()}\nUsage: /compress model <model-id>|default|main\n  default  fast model of the current provider (when one is known)\n  main     the session's own model`;
+        }
+        saveConfig('compressionModel', value);
+        if (agent.config) agent.config.compressionModel = value;
+        compressor.resetSummaryClient();
+        return `✓ Summary model: ${compressor.summaryModelLabel()}`;
       }
 
       if (subcommand === 'threshold') {
@@ -1153,7 +1164,7 @@ Example: /keys remove openai`;
         return `✓ Compression undone. Context restored to ~${result.restoredTokens} tokens.`;
       }
 
-      return `Usage: /compress [preview|apply|auto on|off|stats|threshold <n>|history|undo]`;
+      return `Usage: /compress [preview|apply|auto on|off|stats|threshold <n>|model <id>|default|main|history|undo]`;
     }
   },
 

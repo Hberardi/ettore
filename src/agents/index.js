@@ -12,7 +12,7 @@ import {
   injectEcosystemIntoPrompt,
   appendEcosystemExperience
 } from '../memory/index.js';
-import { setRetryNotifier } from '../llm/client.js';
+import { setRetryNotifier, createCompressionClient } from '../llm/client.js';
 import { ContextCompressor, estimateTokens } from './compressor.js';
 import { isLiteModel, applyLitePrompt, isGarbageOutput, buildFallbackMessage } from './lite.js';
 import {
@@ -39,7 +39,7 @@ import {
 import { shouldPlanExplicitly, extractPlan, PLANNING_REMINDER } from './planner.js';
 import { parseTextToolCalls } from './text-tool-calls.js';
 import { translateProviderError } from './error-translator.js';
-import { renderSystemPrompt } from './prompts.js';
+import { renderSystemPrompt, pruneToolGuidance } from './prompts.js';
 import {
   buildTurnOverlay,
   createTurnRecoveryState,
@@ -335,7 +335,13 @@ export class Agent {
     // Kick off async memory load — awaited before first user turn in run()
     this._memoryReady = this._loadMemory();
     // Context compressor (shared across run() calls for session stats)
-    this.compressor = new ContextCompressor(client, config);
+    // Summaries go to a fast model of the same provider when one is known
+    // (see createCompressionClient). The factory is lazy: nothing is built or
+    // connected until the first compression actually needs it.
+    this.compressor = new ContextCompressor(client, {
+      ...config,
+      summaryClientFactory: () => createCompressionClient(this.config),
+    });
     this.contextWindow = Number(config.contextWindow) || null;
     if (this.contextWindow) this.compressor.updateContextWindow(this.contextWindow);
   }
@@ -865,13 +871,38 @@ export class Agent {
     return this._toolPluginByName.get(name) || null;
   }
 
+  // The recovery overlay used to be appended here. Every provider caches the
+  // request by prefix — OpenAI, DeepSeek, Kimi, MiniMax and Gemini implicitly,
+  // Anthropic at its breakpoints — and the system prompt sits at the head of
+  // that prefix, so each overlay threw away the cached tools, system prompt and
+  // transcript twice: once when it was added, again when it was cleared. It now
+  // travels as a trailing message instead (see `_messagesForProvider`), and the
+  // system prompt only changes when the active skills do.
   _renderActiveSystemPrompt() {
-    const base = this._systemPromptBase || this._systemTemplate || '';
+    // Rules for tools this turn was not given are dropped (see
+    // pruneToolGuidance). `_routedToolNames` is set once tools are routed;
+    // until then the prompt is sent whole.
+    const base = pruneToolGuidance(
+      this._systemPromptBase || this._systemTemplate || '',
+      this._routedToolNames,
+    );
     const skillPrompt = String(this._activeSkillPrompt || '').trim();
+    return skillPrompt ? `${base}${skillPrompt}` : base;
+  }
+
+  /**
+   * The transcript as sent to the provider: `this.messages` plus, when a
+   * recovery overlay is pending, one trailing user message carrying it. The
+   * message is never stored, so it lasts exactly one provider call and leaves
+   * the cached prefix of the next one untouched.
+   */
+  _messagesForProvider() {
     const overlay = String(this._pendingTurnOverlay || '').trim();
-    let prompt = skillPrompt ? `${base}${skillPrompt}` : base;
-    if (overlay) prompt += `\n\nTURN RECOVERY OVERLAY\n${overlay}`;
-    return prompt;
+    if (!overlay) return this.messages;
+    return [
+      ...this.messages,
+      { role: 'user', content: `TURN RECOVERY OVERLAY\n${overlay}`, _ephemeral: true },
+    ];
   }
 
   _activateSkills(prompt, emitter = null) {
@@ -916,13 +947,10 @@ export class Agent {
 
   _queueTurnOverlay(text) {
     this._pendingTurnOverlay = String(text || '').trim();
-    this._refreshActiveSystemPrompt();
   }
 
   _clearTurnOverlay() {
-    if (!this._pendingTurnOverlay) return;
     this._pendingTurnOverlay = '';
-    this._refreshActiveSystemPrompt();
   }
 
   async run(userPrompt, emitter, options = {}) {
@@ -1193,6 +1221,14 @@ export class Agent {
         }
         const tools = routedTools;
         this.workingMemory.routedTools = selectedToolNames(tools);
+        // Tool rules in the system prompt follow the routed set. The route is
+        // memoized for the turn, so this re-renders only when it really moves.
+        const routedToolKey = this.workingMemory.routedTools.join(',');
+        if (routedToolKey !== this._routedToolKey) {
+          this._routedToolKey = routedToolKey;
+          this._routedToolNames = this.workingMemory.routedTools.slice();
+          this._refreshActiveSystemPrompt();
+        }
         emitter?.emit('toolRoute', {
           count: tools.length,
           names: this.workingMemory.routedTools,
@@ -1223,6 +1259,12 @@ export class Agent {
         if (this.compressor.autoEnabled && this.compressor.needsCompression(this.messages)) {
           this.messages = await this.compressor.compress(this.messages, emitter, controller.signal);
           emitter?.emit('tokenCount', estimateTokens(this.messages));
+        }
+        // Close to the threshold: start the summary now, in the background,
+        // so the compression that comes next does not hold the loop for it.
+        // A no-op below the prefetch ratio or while a job is already running.
+        if (this.compressor.autoEnabled && this.compressor.prefetch(this.messages)) {
+          this._debugLog(emitter, 'compression.prefetch_started', { tokens: estimateTokens(this.messages) });
         }
 
         // Hard pre-turn guard: never hit provider with an overgrown context.
@@ -1442,6 +1484,7 @@ export class Agent {
           }, AGENT_TURN_TIMEOUT_MS);
         });
         let result;
+        const providerStartedAt = Date.now();
         try {
           const ledger = repairMessageHistory(this.messages);
           if (ledger.repaired) {
@@ -1458,7 +1501,7 @@ export class Agent {
           }
           emitTurnState('model', { iteration: iterations });
           result = await Promise.race([
-            this.client.turn(this.messages, tools, onToken, signal, { effort: this._effortForMode() }),
+            this.client.turn(this._messagesForProvider(), tools, onToken, signal, { effort: this._effortForMode() }),
             turnTimeout,
           ]);
         } finally {
@@ -1487,7 +1530,15 @@ export class Agent {
 
         // Emit real usage (or estimate) for cost/ctx tracking
         if (result.usage) {
-          emitter?.emit('usage', result.usage);
+          const durationMs = Date.now() - providerStartedAt;
+          emitter?.emit('usage', { ...result.usage, durationMs });
+          this._debugLog(emitter, 'turn.timing', {
+            iteration: iterations,
+            durationMs,
+            firstChunkMs: result.usage.firstChunkMs ?? null,
+            cacheRead: result.usage.cacheRead ?? 0,
+          });
+          this.compressor.noteCacheActivity(result.usage);
         } else {
           // Fallback: estimate from message history
           const estTokens = estimateTokens(this.messages, tools);

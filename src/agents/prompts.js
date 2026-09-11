@@ -7,14 +7,14 @@ export const BUILD_SYSTEM_PROMPT = `You are ETTORE, an advanced AI coding assist
 
 You help with software engineering tasks: reading code, editing files, running commands, debugging, explaining code.
 
-ETTORE dynamically exposes only the tools relevant to the current turn. Call only tools present in the current request schema. Available capabilities may include: bash, bash_session, dev_server, browser_app, desktop_app, browser_check, dep_inspect, read, read_pdf, read_doc, read_server_console, write, edit, repo_map, repo_find_symbol, apply_patch_structured, run_tests, run_checks, glob, grep, list_dir, file_info, git_status, git_diff, websearch, webfetch, web_image, video_transcript, ask_user.
+ETTORE dynamically exposes only the tools relevant to the current turn. Call only tools present in the current request schema.
 
 ## TOOL CALL PROTOCOL
 Tool calls are validated against the schema. Malformed or empty tool calls are rejected, and the agent aborts after a few consecutive failures. Follow these rules strictly:
 
 - **Complete JSON**: every tool_call argument object MUST be valid JSON ending with a closing brace \`}\`. A truncated \`{"file_path":\` will be rejected and counts as a malformed call.
 - **No empty objects for tools that require arguments**: do not call \`read\` with \`{}\`, \`write\` with \`{}\`, or \`edit\` with \`{}\`. If a required argument is missing or you do not know it, DO NOT call the tool — respond in prose explaining what is missing.
-- **One tool call per logical step**: do not bundle a \`read\` for a file you have not located yet. First call \`glob\`/\`grep\` to find the file, THEN call \`read\`.
+- **Batch independent calls**: when several tool calls do not depend on each other's results — reading files whose paths you already know, a \`grep\` plus a \`glob\`, \`git_status\` plus \`git_diff\` — emit them ALL in the SAME response. They run in parallel, and every call you batch saves a full model round trip. Chain calls only when one needs the other's output: do not \`read\` a file you have not located yet — \`glob\`/\`grep\` first, THEN \`read\`.
 - **Honor required fields**: every property listed in the schema's \`required\` array MUST be present in the arguments object.
 - **Correct types**: strings in quotes, numbers without quotes, booleans as \`true\`/\`false\`, arrays in \`[]\`, objects in \`{}\`.
 - **If you cannot supply valid arguments**, answer in prose: \`I need <X> to proceed — could you provide it?\` Never retry the same broken tool call shape.
@@ -104,6 +104,7 @@ Rules:
 - Explain what changes would be needed without making them.
 - For directory/file exploration, produce a detailed and visually clean report (clear sections, concise bullets, key findings first).
 - For exploration tasks, use \`repo_map\` first, then drill down with \`glob\`/\`grep\`/\`read\` only where needed.
+- Batch independent read-only calls (several \`read\`s of known paths, a \`grep\` plus a \`glob\`) into ONE response: they run in parallel and each one batched saves a round trip.
 - The working directory is: {{WORKDIR}}`;
 
 const CAVEMAN_LEVELS = new Set([
@@ -160,4 +161,56 @@ export function renderSystemPrompt(mode, workdir, options = {}) {
   const base = template.replace('{{WORKDIR}}', workdir)
     + renderProviderQuirksPrompt(options.provider, options.model);
   return base + renderCavemanPrompt(options.cavemanLevel);
+}
+
+const MUSIC_VIDEO_GUIDANCE_TOOLS = ['audio_read', 'generate_scene_image', 'generate_scene_clip', 'lyrics_to_srt', 'assemble_music_video'];
+
+// Rules of the build prompt that only matter when their tool is in the
+// request: the bullet starting with the prefix, plus its continuation lines
+// (indented two spaces). Together they are about 40% of the prompt and were
+// paid on every call whether or not the turn could use them — desktop
+// automation alone is ~1.9k characters.
+const TOOL_GUIDANCE = [
+  ['- Use bash_session (NOT bash)', ['bash_session']],
+  ['- Use websearch for', ['websearch']],
+  ['- Use webfetch to', ['webfetch']],
+  ['- Use web_image to', ['web_image']],
+  ['- Use video_transcript when', ['video_transcript']],
+  ['- MUSIC VIDEO GENERATION', MUSIC_VIDEO_GUIDANCE_TOOLS],
+  ['- Use read_server_console', ['read_server_console']],
+  ['- RUN THE APP TO FIND THE BUG (web)', ['browser_app', 'dev_server']],
+  ['- RUN THE APP TO FIND THE BUG (desktop)', ['desktop_app']],
+  ['- Always stop what you started', ['browser_app', 'desktop_app']],
+  ['- When answering from web results', ['websearch', 'webfetch']],
+];
+
+// Everything after this line — project and ecosystem memory included — is
+// left alone: a user's own note that happens to start like a rule is theirs.
+const GUIDANCE_END = '\n- The working directory is: ';
+
+/**
+ * The prompt without the tool rules whose tools are not in `toolNames`.
+ * `toolNames` null/undefined means "unknown" and returns the prompt as is.
+ *
+ * The result only changes when the routed tool set does, which already
+ * changes the request prefix on its own, so this never costs a cache hit.
+ */
+export function pruneToolGuidance(prompt, toolNames) {
+  const text = String(prompt || '');
+  if (!toolNames) return text;
+  const end = text.indexOf(GUIDANCE_END);
+  if (end < 0) return text;
+  const has = new Set(toolNames);
+  const kept = [];
+  let dropping = false;
+  for (const line of text.slice(0, end).split('\n')) {
+    if (line.startsWith('- ')) {
+      const rule = TOOL_GUIDANCE.find(([prefix]) => line.startsWith(prefix));
+      dropping = Boolean(rule) && !rule[1].some(name => has.has(name));
+    } else if (!line.startsWith('  ')) {
+      dropping = false;
+    }
+    if (!dropping) kept.push(line);
+  }
+  return kept.join('\n') + text.slice(end);
 }

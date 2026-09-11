@@ -21,8 +21,10 @@ test('Agent retries with tools when a build request gets code-only text first', 
           };
         }
         if (turns === 2) {
-          const sysNudge = messages.find(m => m.role === 'system' && /real workspace changes/i.test(String(m.content || '')));
-          assert.ok(sysNudge, 'expected workspace-edit retry overlay in system prompt');
+          const last = messages[messages.length - 1];
+          assert.equal(last.role, 'user');
+          assert.match(String(last.content || ''), /real workspace changes/i, 'expected the workspace-edit retry overlay as the trailing message');
+          assert.doesNotMatch(String(messages[0].content || ''), /TURN RECOVERY OVERLAY/, 'the overlay must not touch the cached system prompt');
           const toolCall = {
             id: 'call_write_1',
             function: {
@@ -73,9 +75,9 @@ test('a model that keeps announcing gets a second, escalated nudge', async () =>
   const client = {
     async turn(messages) {
       turns++;
-      const sys = String(messages[0]?.content || '');
-      const i = sys.indexOf('TURN RECOVERY OVERLAY');
-      overlays.push(i >= 0 ? sys.slice(i) : '');
+      const last = messages[messages.length - 1];
+      const text = last?.role === 'user' ? String(last.content || '') : '';
+      overlays.push(text.startsWith('TURN RECOVERY OVERLAY') ? text : '');
       return {
         type: 'text',
         content: 'Piano: Trovare i punti di codice rilevanti\nProssimo passo: cerco "\\.kw-"',

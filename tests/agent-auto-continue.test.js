@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { promptSeen } from './helpers/prompt-seen.js';
 import { EventEmitter } from 'node:events';
 import { Agent } from '../src/agents/index.js';
 
@@ -24,7 +25,7 @@ test('Agent auto-continues when a <todo> plan has unfinished steps', async () =>
           content: '<todo>\n1. Step A\n2. Step B\n3. Step C\n</todo>\n<done:1>\nFatto il primo.',
         };
       }
-      const system = messages[0]?.content || '';
+      const system = promptSeen(messages);
       assert.match(String(system), /auto-continue 1\/30/i);
       assert.match(String(system), /Step B/);
       assert.match(String(system), /Step C/);
@@ -132,8 +133,9 @@ test('Agent forces a retry when the model announces an action but never executes
           content: 'Piano: Applicare le modifiche richieste\nProssimo passo: scrivo /tmp/foo.py\nOra creo il form padre con il menu Visualizza:',
         };
       }
-      // The retry must inject a system overlay before re-asking the model.
-      const sysNudge = messages.find(m => m.role === 'system' && /announced an action/i.test(String(m.content || '')));
+      // The retry must inject an overlay before re-asking the model — as a
+      // trailing message, so the cached system prompt stays untouched.
+      const sysNudge = messages.find(m => m.role === 'user' && /announced an action/i.test(String(m.content || '')));
       assert.ok(sysNudge, 'expected a nudge after the announcement stall');
       return { type: 'text', content: 'Fatto.' };
     },
@@ -151,7 +153,7 @@ test('Agent retries a short diagnostic announcement instead of ending the turn',
     async turn(messages) {
       turns++;
       if (turns === 1) return { type: 'text', content: 'Diagnostico subito.' };
-      const nudge = messages.find(m => m.role === 'system' && /announced an action/i.test(String(m.content || '')));
+      const nudge = messages.find(m => m.role === 'user' && /announced an action/i.test(String(m.content || '')));
       assert.ok(nudge, 'expected a nudge after the diagnostic announcement');
       return { type: 'text', content: 'Ho trovato il problema.' };
     },
@@ -200,7 +202,7 @@ test('Agent aborts after consecutive invalid tool calls (MiniMax loop guard)', a
   const client = {
     async turn(messages) {
       turns++;
-      overlays.push(String(messages[0]?.content || ''));
+      overlays.push(String(promptSeen(messages)));
       // Always return an invalid tool_call: read with empty args
       return {
         type: 'tool_calls',
@@ -241,7 +243,7 @@ test('a stalled auto-continue escalates once, then stops with an explanation', a
   const client = {
     async turn(messages) {
       turns++;
-      overlays.push(String(messages[0]?.content || ''));
+      overlays.push(String(promptSeen(messages)));
       if (turns === 1) {
         return { type: 'text', content: '<todo>\n1. Step A\n2. Step B\n3. Step C\n</todo>\nInizio.' };
       }

@@ -25,7 +25,7 @@ export function attachVerboseTokenLogger(em) {
   let cachedTotal = 0;
   let costTotal = 0;
   let turn = 0;
-  em.on('usage', ({ inputTokens, outputTokens, cacheCreate, cacheRead, costUsd }) => {
+  em.on('usage', ({ inputTokens, outputTokens, cacheCreate, cacheRead, costUsd, firstChunkMs, durationMs }) => {
     // On a cached Anthropic turn `input_tokens` counts only what the cache did
     // not cover — a warm agent turn reports single digits while several
     // thousand tokens are actually being billed. The two cache counters carry
@@ -52,8 +52,14 @@ export function attachVerboseTokenLogger(em) {
     const equiv = NON_METERED_PROVIDERS.has(provider) ? ' equiv' : '';
     const costStr = cost === null ? 'n/a' : `$${cost.toFixed(4)}${equiv}`;
     const cacheStr = createN || readN ? ` (cache w=${createN} r=${readN})` : '';
+    // Time to the first streamed chunk is the latency the prompt cache buys
+    // back; the total is what the user actually waited for.
+    const secs = ms => `${(Number(ms) / 1000).toFixed(1)}s`;
+    const timeStr = Number(firstChunkMs) > 0 || Number(durationMs) > 0
+      ? `  ·  ${Number(firstChunkMs) > 0 ? `ttft=${secs(firstChunkMs)} ` : ''}${Number(durationMs) > 0 ? `total=${secs(durationMs)}` : ''}`.trimEnd()
+      : '';
     process.stderr.write(
-      `📊 turn ${turn}: in=${promptN}${cacheStr} out=${outN}  ·  session in=${inputTotal} out=${outputTotal} cost=$${costTotal.toFixed(4)}${equiv} (this turn: ${costStr})\n`,
+      `📊 turn ${turn}: in=${promptN}${cacheStr} out=${outN}${timeStr}  ·  session in=${inputTotal} out=${outputTotal} cost=$${costTotal.toFixed(4)}${equiv} (this turn: ${costStr})\n`,
     );
   });
   return {

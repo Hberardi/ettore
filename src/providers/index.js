@@ -325,12 +325,32 @@ export class ConnectionManager {
     return { success: true, models: conn.models };
   }
 
-  async refreshModels(providerName, { force = false, silent = false } = {}) {
+  async refreshModels(providerName, options = {}) {
     const name = providerName.toLowerCase();
     const conn = this.connections.get(name);
     if (!conn) {
       return { success: false, error: `Not connected to ${providerName}` };
     }
+
+    // Startup reads the model list from several places within milliseconds.
+    // A provider loaded from the environment has no fetch time yet, so each
+    // of those reads found the cache empty and started its own /models
+    // request: four network round trips on boot, and four "↻ Refreshed"
+    // lines for one catalog. Callers that arrive while a fetch is running
+    // now share it.
+    this._refreshesInFlight ??= new Map();
+    const running = this._refreshesInFlight.get(name);
+    if (running) return running;
+    const fetch = this._refreshModelsNow(name, conn, providerName, options);
+    this._refreshesInFlight.set(name, fetch);
+    try {
+      return await fetch;
+    } finally {
+      if (this._refreshesInFlight.get(name) === fetch) this._refreshesInFlight.delete(name);
+    }
+  }
+
+  async _refreshModelsNow(name, conn, providerName, { force = false, silent = false } = {}) {
 
     const now = Date.now();
     // Within the active window: skip if cache is fresh.

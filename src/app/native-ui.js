@@ -1305,8 +1305,13 @@ export async function startApp(options = {}) {
         ? 'n/a'
         : `$${tui.sessionCost.toFixed(4)}${NON_METERED_PROVIDERS.has(provider) ? ' equiv' : ''}`;
       const cacheStr = createN || readN ? ` (cache w=${createN} r=${readN})` : '';
+      const secs = ms => `${(Number(ms) / 1000).toFixed(1)}s`;
+      const { firstChunkMs, durationMs } = usageEvent;
+      const timeStr = Number(firstChunkMs) > 0 || Number(durationMs) > 0
+        ? `  ·  ${Number(firstChunkMs) > 0 ? `ttft=${secs(firstChunkMs)} ` : ''}${Number(durationMs) > 0 ? `total=${secs(durationMs)}` : ''}`.trimEnd()
+        : '';
       process.stderr.write(
-        `📊 turn: in=${promptN}${cacheStr} out=${outN}  ·  session in=${tui.inputTokensTotal} out=${tui.outputTokensTotal} cost=${costStr}\n`,
+        `📊 turn: in=${promptN}${cacheStr} out=${outN}${timeStr}  ·  session in=${tui.inputTokensTotal} out=${tui.outputTokensTotal} cost=${costStr}\n`,
       );
     }
     tui.needsRender = true;

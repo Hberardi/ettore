@@ -55,6 +55,11 @@ const CONTINUATION_PROMPT_RE = /^\s*(?:continua|prosegui|vai(?:\s+avanti)?|avant
 const WEB_INTENT_RE = /\b(latest|current|today|news|web|online|website|url|docs?|documentation|internet|image|images|photo|picture|aggiornat[oaie]|oggi|notizie|sito|pagina|immagin[ei]|foto)\b/i;
 const DOCUMENT_INTENT_RE = /\b(pdf|docx?|odt|document[oi]?)\b/i;
 const VIDEO_INTENT_RE = /\b(youtube|youtu\.be|video|trascrivi|transcript)\b/i;
+// The music-video pipeline the build prompt describes. Its tools sat in no
+// routing family, so with dynamic routing on — the default — the model was
+// walked through a pipeline it had never been handed the tools to run.
+const MUSIC_VIDEO_TOOLS = ['audio_read', 'generate_scene_image', 'generate_scene_clip', 'lyrics_to_srt', 'assemble_music_video'];
+const MUSIC_VIDEO_INTENT_RE = /\b(music ?video|video ?musicale|videoclip|canzone|song|brano|mp3|wav|flac|lyrics|testo della canzone|storyboard)\b/i;
 const RUNTIME_INTENT_RE = /\b(server|browser|page|frontend|runtime|console|logs?|localhost|porta|errore.*avvio|app|apps?|webapp|desktop|gui|ui|window|finestra|schermata|screenshot|click|clicca|electron|tk|qt|gtk|prova(?:re|la|lo)?|test(?:are|a)?\s+l['’]?app)\b/i;
 const DEPENDENCY_INTENT_RE = /\b(dependenc|package|npm|pnpm|yarn|pip|cargo|vulnerab|audit|dipendenz|pacchett)\b/i;
 const SHELL_INTENT_RE = /\b(command|shell|terminal|bash|script|execute|run|comando|terminale|esegui)\b/i;
@@ -200,7 +205,16 @@ export function selectToolDefinitions(definitions = [], context = {}) {
   }
   if (VIDEO_INTENT_RE.test(prompt)) {
     selected.add('video_transcript');
-    contextualPriority.push('video_transcript');
+    selected.add('video_describe');
+    contextualPriority.push('video_transcript', 'video_describe');
+  }
+  // Build only: these write files and bill per generated clip.
+  if (mode === 'build' && MUSIC_VIDEO_INTENT_RE.test(prompt)) {
+    addMany(selected, MUSIC_VIDEO_TOOLS);
+    // Ahead of the other prompt families: a music-video request also reads
+    // as "video" and often as "foto", and those schemas must not crowd out
+    // the pipeline's last step under the tool cap.
+    contextualPriority.unshift(...MUSIC_VIDEO_TOOLS);
   }
   if (RUNTIME_INTENT_RE.test(prompt)) {
     addMany(selected, RUNTIME_TOOLS);

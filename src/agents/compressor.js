@@ -129,6 +129,17 @@ export class ContextCompressor {
     this._history = [];
     this._snapshot = null; // for undo
     this._privacyWarned = getConfig('compressionPrivacyWarned') || false;
+    // Builds the client that writes summaries — a fast model of the same
+    // provider — or returns null to use the session's own. Resolved lazily
+    // and cached: `undefined` means not asked yet, `null` means none usable.
+    this._summaryClientFactory = typeof config.summaryClientFactory === 'function'
+      ? config.summaryClientFactory
+      : null;
+    this._fastClient = undefined;
+    // A summary started in the background once the transcript nears the
+    // threshold, so the compression that follows does not stall the loop.
+    this.prefetchRatio = 0.75;
+    this._prefetchJob = null;
   }
 
   _deriveThreshold(contextWindow) {
@@ -187,7 +198,8 @@ export class ContextCompressor {
   // compressor as the heavier hammer for when this isn't enough.
   lossyShrink(messages, { keepLast = this.keepLast, maxChars = 200, headTail = 150 } = {}) {
     const halfThreshold = Math.max(2000, Math.floor(this.threshold / 2));
-    if (estimateTokens(messages) <= halfThreshold) return messages;
+    const tokens = estimateTokens(messages);
+    if (tokens <= halfThreshold) return messages;
 
     const sys = messages[0];
     const rest = messages.slice(1);
@@ -195,6 +207,20 @@ export class ContextCompressor {
 
     const head = rest.slice(0, rest.length - keepLast);
     const tail = rest.slice(-keepLast);
+
+    // With a prompt cache in play, every elision rewrites a message the cache
+    // already holds, and everything after it is prefilled again at full price.
+    // A steady loop moves one result out of the tail per iteration, so eager
+    // elision paid that on the recent tail every single call. Batch it: wait
+    // until a few results have piled up and elide them in one go; close to the
+    // threshold, elide regardless. Without an observed cache there is nothing
+    // to protect, and eager elision stays the cheaper choice.
+    const LOSSY_BATCH = 4;
+    const LOSSY_FORCE_RATIO = 0.9;
+    if (this.cacheObserved && tokens < this.threshold * LOSSY_FORCE_RATIO) {
+      const pending = head.filter(m => m.role === 'tool' && String(m.content || '').length > maxChars * 2).length;
+      if (pending < LOSSY_BATCH) return messages;
+    }
 
     const shrunkenHead = head.map((m) => {
       if (m.role !== 'tool') return m;
@@ -237,8 +263,25 @@ export class ContextCompressor {
     const system = messages[0];
     const rest = messages.slice(1);
     const keepStart = safeHistoryKeepStart(rest, this.keepLast);
-    const toCompress = rest.slice(0, keepStart);
-    const toKeep = rest.slice(keepStart);
+
+    // A summary prefetched in the background is used when the messages it
+    // covers are still, object for object, the head of this transcript. It
+    // may cover a little less than a fresh split would; the rest is kept. A
+    // user cancel stops the wait, not the loop: the fresh path below then
+    // unwinds on the same signal.
+    let prefetched = this._takePrefetched(rest);
+    if (prefetched) {
+      const aborted = new Promise(resolve => {
+        if (!signal) return;
+        if (signal.aborted) resolve({ degraded: 'aborted' });
+        else signal.addEventListener('abort', () => resolve({ degraded: 'aborted' }), { once: true });
+      });
+      const outcome = await Promise.race([prefetched.promise, aborted]);
+      prefetched = outcome.degraded ? null : { ...prefetched, summary: outcome.summary };
+    }
+
+    const toCompress = prefetched ? prefetched.prefix : rest.slice(0, keepStart);
+    const toKeep = rest.slice(toCompress.length);
 
     if (toCompress.length === 0) return messages;
 
@@ -247,43 +290,9 @@ export class ContextCompressor {
     // Save snapshot for undo
     this._snapshot = messages.slice();
 
-    // Call LLM for summary (low temperature, concise). Wrap in a
-    // Promise.race against a hard timeout so a provider stall cannot
-    // freeze the agent loop forever, and forward any caller-supplied
-    // abort signal so a user cancel during compression also unwinds.
-    const summaryPrompt = COMPRESSION_PROMPT + serializeForCompression(toCompress);
-    let summary = '';
+    let summary = prefetched ? prefetched.summary : '';
     let degraded = null;
-    try {
-      const summaryMessages = [
-        { role: 'user', content: summaryPrompt }
-      ];
-      // Compression is summarisation, and it is an extra call on top of the
-      // turn that triggered it. Spending the session's effort setting on it
-      // pays for depth the task does not need.
-      const innerTurn = this.client.turn(summaryMessages, [], (token) => { summary += token; }, signal, { effort: 'low' });
-      let timeoutTimer;
-      const timeoutPromise = new Promise((_, reject) => {
-        timeoutTimer = setTimeout(
-          () => reject(new Error(`compression LLM call timed out after ${Math.round(COMPRESS_TURN_TIMEOUT_MS / 1000)}s`)),
-          COMPRESS_TURN_TIMEOUT_MS,
-        );
-      });
-      let result;
-      try {
-        result = await Promise.race([innerTurn, timeoutPromise]);
-      } finally {
-        if (timeoutTimer) clearTimeout(timeoutTimer);
-      }
-      if (result?.type === 'text') summary = result.content;
-    } catch (e) {
-      degraded = e?.message || 'compression LLM call failed';
-      summary = toCompress
-        .filter(m => m.role === 'user' || m.role === 'assistant')
-        .slice(-5)
-        .map(m => `[${m.role}]: ${String(m.content || '').slice(0, 150)}`)
-        .join('\n');
-    }
+    if (!prefetched) ({ summary, degraded } = await this._summarize(toCompress, signal));
     if (degraded) {
       // Surface the degraded path to the UI so the user knows the summary is
       // a low-quality fallback, not an LLM-produced one.
@@ -338,8 +347,134 @@ export class ContextCompressor {
     return { success: true, messages: restored, restoredTokens: estimateTokens(restored) };
   }
 
+  // ── Summary client ────────────────────────────────────────────────────────
+
+  _getFastClient() {
+    if (this._fastClient === undefined) {
+      // A factory that throws (provider not connected, say) means "none".
+      try { this._fastClient = this._summaryClientFactory?.() || null; } catch { this._fastClient = null; }
+    }
+    return this._fastClient;
+  }
+
+  /** Forget the cached summary client, after /compress model changes it. */
+  resetSummaryClient() {
+    this._fastClient = undefined;
+    this._prefetchJob = null;
+  }
+
+  summaryModelLabel() {
+    const fast = this._getFastClient();
+    return fast ? (fast.label || fast.model || 'fast model') : 'main model';
+  }
+
+  async _callSummary(client, prompt, signal) {
+    let summary = '';
+    // Compression is summarisation, and it is an extra call on top of the
+    // turn that triggered it. Spending the session's effort setting on it
+    // pays for depth the task does not need.
+    const innerTurn = client.turn([{ role: 'user', content: prompt }], [], (token) => { summary += token; }, signal, { effort: 'low' });
+    // Hard ceiling so a provider stall cannot freeze the agent loop.
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`compression LLM call timed out after ${Math.round(COMPRESS_TURN_TIMEOUT_MS / 1000)}s`)),
+        COMPRESS_TURN_TIMEOUT_MS,
+      );
+      timer.unref?.();
+    });
+    try {
+      const result = await Promise.race([innerTurn, timeout]);
+      if (result?.type === 'text') summary = result.content;
+    } finally {
+      clearTimeout(timer);
+    }
+    return summary;
+  }
+
+  /**
+   * A summary of `toCompress` from the fast client when there is one, else
+   * from the session's client, plus `degraded` when neither could write it.
+   * Never rejects.
+   */
+  async _summarize(toCompress, signal) {
+    const prompt = COMPRESSION_PROMPT + serializeForCompression(toCompress);
+    const fast = this._getFastClient();
+    if (fast && fast !== this.client) {
+      try {
+        const summary = await this._callSummary(fast, prompt, signal);
+        if (String(summary || '').trim()) return { summary, degraded: null };
+      } catch (e) {
+        // A model the provider refuses will be refused again: stop asking
+        // for the rest of the session. A timeout or a 5xx may not recur.
+        const status = e?.status || e?.statusCode;
+        if ([400, 401, 403, 404].includes(status) || /model.*not.*(found|exist)/i.test(e?.message || '')) {
+          this._fastClient = null;
+        }
+      }
+    }
+    try {
+      return { summary: await this._callSummary(this.client, prompt, signal), degraded: null };
+    } catch (e) {
+      return {
+        summary: toCompress
+          .filter(m => m.role === 'user' || m.role === 'assistant')
+          .slice(-5)
+          .map(m => `[${m.role}]: ${String(m.content || '').slice(0, 150)}`)
+          .join('\n'),
+        degraded: e?.message || 'compression LLM call failed',
+      };
+    }
+  }
+
+  /**
+   * Fed each turn's usage. Any cached read or write proves the provider keeps
+   * a prefix cache for this session, which makes lossyShrink batch its
+   * elisions instead of rewriting the cached history every iteration.
+   */
+  noteCacheActivity(usage) {
+    if ((Number(usage?.cacheRead) || 0) + (Number(usage?.cacheCreate) || 0) > 0) {
+      this.cacheObserved = true;
+    }
+  }
+
+  // ── Background prefetch ───────────────────────────────────────────────────
+
+  /**
+   * Starts summarising the compressible head in the background once the
+   * transcript passes `prefetchRatio` of the threshold, so the compression
+   * that follows finds the summary ready instead of holding the loop for a
+   * whole model call. Returns true when a job was started.
+   */
+  prefetch(messages) {
+    if (!this.autoEnabled || this._prefetchJob) return false;
+    if (this._sessionCount >= MAX_COMPRESSIONS_PER_SESSION) return false;
+    const tokens = estimateTokens(messages);
+    if (tokens < this.threshold * this.prefetchRatio || tokens > this.threshold) return false;
+    const rest = messages.slice(1);
+    const prefix = rest.slice(0, safeHistoryKeepStart(rest, this.keepLast));
+    if (prefix.length === 0) return false;
+    // No signal: the job outlives the run that started it, and a cancelled
+    // run is no reason to throw away a summary the next compression can use.
+    this._prefetchJob = { prefix, promise: this._summarize(prefix, null) };
+    return true;
+  }
+
+  // The prefetched job, when the messages it summarised are still the exact
+  // head of `rest` — the same objects, so nothing under it was rewritten.
+  _takePrefetched(rest) {
+    const job = this._prefetchJob;
+    this._prefetchJob = null;
+    if (!job || job.prefix.length > rest.length) return null;
+    for (let i = 0; i < job.prefix.length; i++) {
+      if (rest[i] !== job.prefix[i]) return null;
+    }
+    return job;
+  }
+
   getStats(messages) {
     return {
+      summaryModel: this.summaryModelLabel(),
       usedTokens: messages ? estimateTokens(messages) : 0,
       maxTokens: this.threshold,
       compressionCount: this._sessionCount,
