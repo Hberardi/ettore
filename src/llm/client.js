@@ -101,29 +101,38 @@ function raiseSignalListenerCap(signal) {
   try { setTargetMaxListeners(0, signal); } catch {}
 }
 
+// How long the first token may take. Kept apart from the inter-token idle
+// window: before the first token the wait is the provider's queue, not a
+// stalled stream. NVIDIA's hosted Nemotron 3 Ultra was measured taking 58s just
+// to open the stream for a 22-token prompt and 78s to first token on a real
+// agent turn, so on a busy moment the old 120s from request start aborted a
+// reply that was on its way — and a timeout is never retried. Stays under the
+// agent's 300s turn ceiling.
+const STREAMING_FIRST_CHUNK_MS = 240_000;
+
 /**
- * Wraps a parent AbortSignal with a watchdog that fires if no token
- * arrives within STREAMING_IDLE_MS. Call resetTimer() on every token.
+ * Wraps a parent AbortSignal with a watchdog: the first token may take up to
+ * `firstChunkMs`, every later one up to `idleMs`. Call resetTimer() on every
+ * token.
  */
-function makeStreamingSignal(parentSignal, idleMs = STREAMING_IDLE_MS) {
+export function makeStreamingSignal(parentSignal, idleMs = STREAMING_IDLE_MS, firstChunkMs = Math.max(idleMs, STREAMING_FIRST_CHUNK_MS)) {
   const ctrl = new AbortController();
   let idleTimer = null;
 
-  const resetTimer = () => {
+  const arm = (ms, message) => {
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      ctrl.abort(new Error(`Streaming idle timeout — no token for ${idleMs / 1000}s`));
-    }, idleMs);
+    idleTimer = setTimeout(() => ctrl.abort(new Error(message)), ms);
     // A watchdog must never be the reason the process stays alive.
     idleTimer.unref?.();
   };
+  const resetTimer = () => arm(idleMs, `Streaming idle timeout — no token for ${idleMs / 1000}s`);
 
   parentSignal?.addEventListener('abort', () => {
     clearTimeout(idleTimer);
     ctrl.abort(parentSignal.reason);
   }, { once: true });
 
-  resetTimer();
+  arm(firstChunkMs, `Streaming timeout — the provider sent nothing for ${firstChunkMs / 1000}s (queued or overloaded)`);
   return { signal: ctrl.signal, resetTimer, clear: () => clearTimeout(idleTimer) };
 }
 
