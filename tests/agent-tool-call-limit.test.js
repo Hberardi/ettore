@@ -140,3 +140,63 @@ test('Agent: exhausting the tool-call budget lands the turn instead of losing th
   assert.ok(recoveries.some((r) => r.reason === 'tool_call_limit'));
   assert.ok(!states.some((s) => s && s.state === 'failed'));
 });
+
+// Agent with a client of our own — the helper above always answers in prose,
+// which is the opposite of what a tool-loop test needs.
+function agentWithClient(client, config = {}) {
+  return new Agent(client, {
+    provider: 'test',
+    model: 'gpt-4o',
+    modelCapability: 'full',
+    workdir: process.cwd(),
+    contextWindow: 128000,
+    ...config,
+  });
+}
+
+// 83 shell calls in one turn is what sent a real session into the hard stop.
+// Only `read` had a repeat budget, so an identical command could run until the
+// per-turn ceiling caught it — by which point the turn was already lost.
+test('Agent: a command repeated with nothing changed in between is refused early', async () => {
+  let ran = 0;
+  const call = { id: 'b1', function: { name: 'bash', arguments: JSON.stringify({ command: 'ls -la' }) } };
+  const client = {
+    async turn() {
+      return { type: 'tool_calls', tool_calls: [call], message: { role: 'assistant', content: '', tool_calls: [call] } };
+    },
+  };
+  const agent = agentWithClient(client, { maxIterations: 8 });
+  agent._getAllToolHandlers = () => ({ bash: async () => { ran++; return 'total 0'; } });
+
+  const emitter = new EventEmitter();
+  const outputs = [];
+  emitter.on('toolEnd', ({ output }) => outputs.push(String(output)));
+
+  await agent.run('guarda la cartella', emitter);
+
+  assert.equal(ran, 3, 'the shell command runs up to its budget, not once per iteration');
+  assert.ok(outputs.some(o => /already ran 3 times/.test(o)), `expected a refusal telling the model why: ${outputs.slice(-1)}`);
+});
+
+test('Agent: the hard stop names the repeated command instead of advising a bigger budget', async () => {
+  const call = (id) => ({ id, function: { name: 'bash', arguments: JSON.stringify({ command: 'npm test' }) } });
+  const client = {
+    async turn() {
+      const calls = [call('a'), call('b')];
+      return { type: 'tool_calls', tool_calls: calls, message: { role: 'assistant', content: '', tool_calls: calls } };
+    },
+  };
+  const agent = agentWithClient(client, { maxToolCallsPerTurn: 4, maxIterations: 8 });
+  agent._getAllToolHandlers = () => ({ bash: async () => 'ok' });
+
+  const emitter = new EventEmitter();
+  const errors = [];
+  emitter.on('error', (msg) => errors.push(msg));
+
+  await agent.run('lancia i test', emitter);
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /The same call ran \d+ times: bash \(npm test\)/);
+  assert.match(errors[0], /a bigger budget would only make it longer/);
+  assert.doesNotMatch(errors[0], /maxToolCallsPerTurn/, 'raising the limit is the wrong advice for a loop');
+});

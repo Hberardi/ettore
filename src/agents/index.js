@@ -80,7 +80,13 @@ const LOOP_GUARDED_TOOLS = new Set(['repo_map', 'glob', 'grep', 'list_dir', 'fil
 // model can burn the whole per-turn tool-call allowance on it (81 identical
 // reads is what motivated this). The Nth identical call is refused with an
 // instruction instead.
-const REPEAT_BUDGET_TOOLS = { read: 2 };
+// `bash` is the same failure wearing a different name: 83 shell calls in one
+// turn is what the per-turn ceiling caught, and nothing stopped them earlier
+// because only `read` had a budget. The budget is looser than read’s: a
+// repeated command is not always a loop (polling a log or a server is real
+// work), and it resets whenever a write moves the workspace revision, which
+// is what keeps re-running a test suite after an edit perfectly fine.
+const REPEAT_BUDGET_TOOLS = { read: 2, bash: 3, bash_session: 3 };
 
 // Tools that actually mutate state and therefore trigger the post-
 // execution self-critique check. Read-only tools are intentionally
@@ -518,6 +524,26 @@ export class Agent {
 
   _toolCallKey(name, args = {}) {
     return `${name}:${this._shortHash(this._stableStringify(args || {}))}`;
+  }
+
+  /**
+   * The call this turn repeated the most, as `{ name, count, preview }`, or
+   * null when nothing has run yet. Lets a model stuck on one command be told
+   * apart from a task that genuinely needs more calls.
+   */
+  _mostRepeatedToolCall() {
+    let top = null;
+    for (const entry of Object.values(this.workingMemory.toolCalls || {})) {
+      if (!entry || typeof entry.count !== 'number') continue;
+      if (!top || entry.count > top.count) top = entry;
+    }
+    if (!top) return null;
+    const firstArg = Object.values(top.args || {}).find(v => typeof v === 'string');
+    return {
+      name: top.name,
+      count: top.count,
+      preview: firstArg ? String(firstArg).replace(/\s+/g, ' ').slice(0, 60) : '',
+    };
   }
 
   _updateWorkingMemoryGoal(userPrompt) {
@@ -1985,10 +2011,18 @@ export class Agent {
         }
         // Second breach: the model kept calling tools even after being sent an
         // empty tool list. Now it is a hard stop.
+        // The two causes want opposite advice, and the execution registry can
+        // tell them apart: a model repeating one command would only loop twice
+        // as long on twice the budget, while a genuinely large task wants room.
+        const repeated = this._mostRepeatedToolCall();
+        const looping = repeated && repeated.count >= 3;
         emitter?.emit('error',
           `Tool-call limit reached for this turn (${limit}). The model tried to issue ${attempted} tool-calls in a single turn: [${callSummary}]. ` +
-          `This usually means the model is stuck in a loop or the task is large enough to need more headroom. ` +
-          `Raise the limit by adding "maxToolCallsPerTurn": ${limit * 2} to .ettore/config.json, or split the task into smaller turns.`
+          (looping
+            ? `The same call ran ${repeated.count} times: ${repeated.name}${repeated.preview ? ` (${repeated.preview})` : ''}. `
+              + `That is a loop, and a bigger budget would only make it longer — rephrase the request, or run that command yourself and paste the result.`
+            : `This usually means the task is large enough to need more headroom. `
+              + `Raise the limit by adding "maxToolCallsPerTurn": ${limit * 2} to .ettore/config.json, or split the task into smaller turns.`)
         );
         emitTurnState('failed', { reason: 'tool_call_limit' });
         this._debugLog(emitter, 'turn.failed', {
