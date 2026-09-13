@@ -8,6 +8,134 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.4.4] — 2026-09-13
+
+### Fixed — a repeated shell command now stops at the fourth call, not the eightieth
+
+A session ended on "Tool-call limit reached for this turn (80)", the attempted
+calls reading [bash, bash, bash]. The repeat guard that exists for exactly this
+— refuse a call whose arguments already ran while nothing changed, and hand the
+model an instruction instead of a result — covered the exploration tools and
+`read`, and nothing else. `bash` could repeat until the per-turn ceiling caught
+it, by which point the turn was already lost.
+
+`bash` and `bash_session` get a budget of 3, looser than `read`'s 2 because a
+repeated command is not always a loop, and the count resets when a write moves
+the workspace revision — which is what keeps re-running a test suite after an
+edit ordinary. The message at the ceiling also stopped giving the wrong advice:
+it now names the call that repeated and how often, and only recommends a bigger
+budget when the calls were varied enough for the task to be genuinely large.
+
+### Fixed — a capable model no longer loses a whole answer to the garbage detector
+
+MiniMax-M3 answered and the user was shown `⚠ "MiniMax-M3" ha generato output
+incoerente (confidenza: 60%)` instead of the reply. One Chinese word scored 20,
+a quoted `Human:` line scored 40, and the turn was discarded at exactly the
+threshold — on an answer that was correct.
+
+The detector was written for chat-only models that hallucinate when handed tool
+schemas, and its own comment said so, but nothing restricted it to them: a
+model the capability table calls full was judged by a bar meant for a 1B model,
+and the verdict destroyed the turn rather than annotating it. It now runs only
+on lite models and on those whose capability is unknown. The signals were
+loosened too: code and markdown rules are stripped before scoring (this CLI
+prints box-drawing banners, so an answer describing its own output scored for
+repetition), a foreign script needs three characters rather than one word, and
+`Human:`/`Assistant:` weigh 10 instead of 40 — they are also simply how a
+transcript is written down.
+
+### Fixed — a provider left queuing gets 240s for its first token
+
+NVIDIA's hosted Nemotron 3 Ultra took 58s to open the stream for a 22-token
+prompt and 78s to first token on a real agent turn. The watchdog ran a single
+120s window from the moment the request left, so on a busy moment a reply on
+its way was aborted — and a timeout is never retried, which is why the model
+looked like it simply did not answer.
+
+The first token now has its own 240s window, under the agent's 300s turn
+ceiling, and the 120s idle window starts once the stream is producing. Silence
+before the first token reports the provider as queued or overloaded instead of
+as an idle stream.
+
+### Fixed — every slash command now reaches itself from the command palette
+
+Enter runs the first entry of the palette, and the palette matched the typed
+text as a substring of every name, alias and description, in list order. Typing
+`/models` ran `/providers`, whose description mentions models; `/config` ran
+`/doctor`; `/memory` ran `/agent`; and the aliases `/m`, `/s`, `/c` and `/v` ran
+`/resume`, `/help` and `/doctor`. Nine names and aliases landed on the wrong
+command. The exact name now ranks first, then the exact alias, then prefixes,
+then substrings, with descriptions last.
+
+Found by running all 36 commands with their read-only subcommands in an
+isolated home, which also turned up `/system` printing `Active: [object
+Object]` and a hardcoded version that had `/version`, `/status` and `/system`
+all reporting 1.0.0 on 1.4.3.
+
+### Added — /config effort, for a setting every transport already read
+
+`effort` was read from config by every transport but nothing could set it short
+of editing the file by hand. `/config effort <low|medium|high|xhigh|max|default>`
+now does, `--local` included, and `/config` shows the current value.
+
+### Changed — the agent loop is faster on every model, not only on Claude
+
+Three things decide what a turn costs: how many model calls it makes, how much
+of each request the provider must process again, and how long the model thinks.
+All three had been tuned on the Anthropic path and left alone elsewhere.
+
+The recovery overlay was appended to the system prompt and removed one call
+later. Every provider caches by prefix — OpenAI, DeepSeek, Kimi, MiniMax and
+Gemini implicitly, Anthropic at its breakpoints — and the system prompt heads
+that prefix, so each overlay threw the cached tools, prompt and transcript away
+twice. It now travels as a trailing message that lives for one request.
+
+The prompt told models to make "one tool call per logical step" while the loop
+already ran batches in parallel; it now asks for independent calls in one
+response. `effort` reaches models that always reason on other providers, and is
+kept away from hybrid models where it would switch thinking on. Context
+summaries go to a fast model of the same vendor instead of the session's own —
+a reasoning model could hold the loop for 90s over a recap — and from 75% of
+the threshold the summary is written in the background. Tool-specific rules
+enter the system prompt only when their tool is routed, taking a plain coding
+turn from about 3k to 1.65k prompt tokens. Once a prompt cache is observed,
+elision of old tool results batches instead of rewriting cached history every
+iteration. A provider loaded from the environment had its model list fetched
+four times at boot, one request per early caller; concurrent refreshes now
+share one. And `--verbose-tokens` reports time to first chunk, total time and
+cached prompt tokens for OpenAI-compatible providers, so the next change can be
+measured rather than argued.
+
+One bug fell out of it: the music-video tools were in no routing family at all,
+so with dynamic routing — the default — the prompt walked the model through a
+pipeline it had never been handed the tools to run. They are now routed on
+intent, in build mode only.
+
+### Fixed — auto-update on Windows, and the reasons it gave being erased
+
+`npm install -g` can never succeed while ETTORE is running on Windows: the CLI
+is launched through `ettore.cmd`, cmd.exe holds a batch file open for as long
+as it executes it, and that shim is one of the files npm must rewrite. The
+install is now handed to a detached PowerShell that waits for the process to
+exit before running npm, so the update lands while the user is elsewhere and
+the next launch is the new version. POSIX keeps installing and restarting in
+place.
+
+The explanations were also being written to the terminal immediately before the
+TUI opened the alternate screen buffer, which discards what was there — so
+every reason an update did not happen was printed and erased in the same
+breath.
+
+### Fixed — model families recognised by name, not by this year's version numbers
+
+`moonshotai/kimi-k3` was reported as unknown: the pattern pinned the family to
+versions 1 and 2, and `\bmoonshot\b` never matched `moonshotai`, which is the
+form every router uses. The MiniMax pattern had already stopped at M2 once and
+had to be amended for M3. Kimi, MiniMax and DeepSeek now match any version,
+while the series marker stays mandatory — `minimax-text-01` is a chat-only
+model in the same namespace, and the test guarding against promoting it caught
+the first attempt at this.
+
 ### Fixed — an installed plugin could not see the dependencies ETTORE installs for it
 
 Reported from a real session: `excel-full` and `pgadmin` both announced that

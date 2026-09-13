@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.4.3-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.4.4-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -11,7 +11,7 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 
 ## Features
 
-- 🤖 **AI-Powered** - OpenAI, Anthropic, Ollama (local), OpenAI-compatible endpoints, and MiniMax
+- 🤖 **32 providers** - OpenAI, Anthropic, your Claude subscription, Gemini, Ollama (local), NVIDIA, Groq, DeepSeek, MiniMax, Kimi, OpenRouter — and any OpenAI-compatible endpoint
 - 💻 **Tool Execution** - bash, read, write, edit, grep, glob, web search, web fetch, image inspection
 - 🖱️ **Runs your apps** - opens web apps in a real browser (reads the browser console: errors, exceptions, failed requests) and launches desktop apps (captures stdout/stderr, screenshots, clicks and types) to reproduce bugs before fixing them
 - 🎨 **Native TUI** - Custom ANSI renderer (no React/Ink) with themes and a sidebar
@@ -21,8 +21,9 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 - 🔌 **Easy Setup** - `/connect <provider> <key>` or environment variables
 - 💾 **Persistent Config** - API keys saved in a per-user config directory, `0600` on Linux/macOS ([details](#configuration))
 - 🧠 **Context Tools** - compression, project memory, working memory, sessions, auto-approve
+- ⚡ **Fast on every provider** - requests are shaped so the provider can reuse its prompt cache, context summaries are written by a fast model of the same provider, and `--verbose-tokens` reports time-to-first-token and cached tokens per call
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn
-- 🧩 **Seven plugins included** - PostgreSQL, Excel, extended git, shell history, palette shortcuts — installed with `/plugins install`, and you can write your own
+- 🧩 **Eight plugins included** - PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts — installed with `/plugins install`, and you can write your own
 
 ## Installation
 
@@ -108,8 +109,10 @@ PowerShell (nothing to install), on Linux it needs `xdotool` or `ydotool` — se
 
 ## Tuning how hard the model thinks
 
-Two settings in `.ettore/config.json` decide how much room a turn gets. Both
-are optional, and both do nothing on a model that does not support them.
+Two settings decide how much room a turn gets. Both are optional, and both do
+nothing on a model that does not support them. Set `effort` from the CLI with
+`/config effort <level>` (add `--local` for this project only), or write either
+of them into `.ettore/config.json` by hand:
 
 ```jsonc
 {
@@ -127,6 +130,13 @@ mode: it reads and reasons but writes nothing, so it is the one place a lower
 setting is a saving rather than a trade. Context compression always runs at
 `low` — it is summarisation, and an extra call on top of the turn that
 triggered it.
+
+`effort` reaches more than Claude: it is sent as `reasoning_effort` to OpenAI
+o-series and GPT-5, to gpt-oss wherever it is hosted, and to Gemini 2.5+, and
+as OpenRouter's `reasoning` field for the same models routed through it. It is
+deliberately not sent to hybrid models, where any effort at all switches
+thinking *on* and would make a `low` request slower than no setting at all. An
+endpoint that refuses the field gets the request again without it.
 
 `maxTokens` is a stop, not a target: you are billed for what the model writes,
 not for the room it was given. It matters because on a model with adaptive
@@ -248,23 +258,31 @@ installed, ETTORE keeps its native PDF and binary-text fallbacks.
 | `/status` | Show active provider, model, and config |
 | `/doctor` | Diagnose setup, config, providers, and permissions |
 | `/keys list\|add\|remove` | Manage saved API keys |
+| `/reconnect [provider]` | Re-validate saved keys and reconnect |
 | `/theme <name>` | Switch theme (`default`, `midnight`, `matrix`, `forest`) |
 | `/auto-approve [edits\|installs] on\|off` | Skip approval prompts (sensitive commands still prompt) |
 | `/config [key] [value] [--local]` | Show/set configuration; `--local` writes `.ettore/config.json` |
 | `/config max-iterations <1-200> [--local]` | Set the agent loop budget (default: 50) |
+| `/config effort <low\|medium\|high\|xhigh\|max\|default>` | How hard the model thinks, on models that accept it |
 | `/memory show\|add\|clear\|edit\|export\|path` | Persistent project memory |
+| `/ecosystem show\|prune\|export\|path` | Learned playbook memory, reused across turns |
 | `/skills list\|show\|create\|reload` | Global skills with automatic prompt activation |
 | `/mission [status\|history\|clear]` | Live execution graph: plan, waves, tools, files, tokens |
-| `/compress [preview\|apply\|auto\|stats\|history\|undo]` | Manage context compression |
+| `/compress [preview\|apply\|auto\|stats\|threshold\|history\|undo]` | Manage context compression |
+| `/compress model <id\|default\|main>` | Which model writes context summaries (default: a fast one from the same provider) |
 | `/agent [stats\|memory\|clear]` | Inspect agent runtime memory |
 | `/caveman [level\|off]` | Toggle compressed reply style (saves tokens) |
 | `/approvals [list\|clear] [project\|system\|download]` | Inspect or reset session approvals |
 | `/sessions` / `/resume` / `/new` | Session management |
 | `/history [n]` | Show recent commands |
-| `/team` | Multi-agent team orchestration |
+| `/alias list` | Show command aliases |
+| `/team [create\|list\|show\|delete] [name]` | Multi-agent team orchestration |
+| `/loop [start <goal>\|stop\|status\|list\|run\|clear]` | Run a goal repeatedly until it is done |
+| `/video_music` | Open the music-video web studio (mp3 + photo → video) |
 | `/plugins [list\|available\|install\|enable\|disable\|reload\|info] [name]` | Manage plugins; `install` with no name offers a picker |
 | `/select [provider]` | Pick a model interactively |
 | `/system` | Platform and runtime info |
+| `/init` | Reload project memory and reset the conversation |
 | `/version` | Show ETTORE version |
 | `/help [command]` | Show help for a specific command |
 | `/clear` | Clear the screen |
