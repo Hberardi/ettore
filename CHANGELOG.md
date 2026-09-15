@@ -8,6 +8,46 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-09-15
+
+### Fixed — a shell command's stderr could come back empty
+
+`prepublishOnly` failed on "bash_session: stdout and stderr are separated":
+exit code correct, stdout correct, stderr `''`. The same test then passed 5
+times in isolation and 3 full suite runs in a row, which is the shape of a
+race, not of a broken assertion.
+
+A command's end was detected by a sentinel on stdout. stderr is a separate
+pipe, delivered independently, so the arrival of the stdout sentinel says
+nothing about whether the command's stderr has been read yet — and the code
+compensated with a single `setImmediate` before detaching the stream
+listeners. That is a guess about the event loop rather than a fact about the
+data, and when it lost, the loss was silent and total: an agent driving
+`bash_session` would see a failing command's diagnostic output as empty while
+its exit code and stdout looked perfectly normal.
+
+stderr is now framed the same way stdout is. Both dialects print a bare
+sentinel to stderr before the `EXIT:` line goes to stdout, and the call
+settles only once both have arrived. A pipe preserves order within itself, so
+the stderr sentinel arriving proves every earlier byte of stderr is already
+buffered — the completion condition is answered by the data instead of by the
+scheduler. In bash, `$?` is captured into a variable first, since the new
+stderr `printf` would otherwise overwrite the exit code before it is read.
+
+A 250ms grace window covers the one case where the counterpart can never
+arrive: a command that closes or redirects the session's stderr (`exec 2>&-`).
+There the call degrades to stdout-only instead of hanging for the full command
+timeout.
+
+Honest limit: the original failure could not be reproduced on demand — 150
+runs under full CPU contention lost stderr 0 times on the old code. What the
+new tests pin down is the mechanism (both dialects frame stderr, the exit code
+survives the extra `printf`, large and interleaved stderr arrive whole, a
+closed fd 2 still settles promptly), not the original scheduling. The argument
+for the fix is structural: waiting on a marker in the stream removes the whole
+class of timing-dependent loss, whatever the precise interleaving that caused
+it.
+
 ## [1.5.0] — 2026-09-15
 
 ### Fixed — the `<plan>` block was never parsed

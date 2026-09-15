@@ -298,3 +298,120 @@ test('PowerShell session: no prompt text leaks into captured output', windowsOnl
   const out = await session.run('Write-Output solo');
   assert.equal(out.stdout.trim(), 'solo', `prompt or banner leaked: ${JSON.stringify(out.stdout)}`);
 });
+
+// ── stderr framing ───────────────────────────────────────────────────────────
+//
+// stdout and stderr are separate pipes. The end of a command used to be read
+// off stdout alone, with one `setImmediate` of slack for stderr to catch up —
+// a guess about the event loop, and under load it lost. The failure was silent
+// and total: correct exit code, correct stdout, stderr reported as empty.
+
+test('bash_session: stderr survives repeated runs, not just a lucky one', posixOnly, async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    // One pass proves nothing about a rare race; the whole point is that every
+    // pass holds.
+    for (let i = 0; i < 40; i++) {
+      const r = await session.run(`echo out_${i}; echo err_${i} >&2`);
+      assert.equal(r.exitCode, 0, `run ${i} exit code`);
+      assert.match(r.stdout, new RegExp(`out_${i}`), `run ${i} stdout`);
+      assert.match(r.stderr, new RegExp(`err_${i}`), `run ${i} stderr`);
+      // The framing is protocol, not output: none of it may reach the caller.
+      assert.doesNotMatch(r.stderr, /__ETTORE_SESSION_END_/, `run ${i} leaked the sentinel`);
+      assert.doesNotMatch(r.stdout, /__ETTORE_SESSION_END_/, `run ${i} leaked the sentinel`);
+    }
+  } finally {
+    killBashSession();
+  }
+});
+
+test('bash_session: stderr larger than one pipe buffer arrives whole', posixOnly, async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    // Comfortably past the 64KiB pipe buffer, so the write is split across
+    // several reads and cannot land in a single `data` event.
+    const lines = 4000;
+    const r = await session.run(
+      `for i in $(seq 1 ${lines}); do echo "stderr line $i padding_padding_padding" >&2; done; echo done_out`,
+    );
+    assert.equal(r.exitCode, 0);
+    assert.match(r.stdout, /done_out/);
+    assert.equal(r.stderr.split('\n').filter(l => l.startsWith('stderr line')).length, lines);
+    assert.match(r.stderr, /stderr line 1 /);
+    assert.match(r.stderr, new RegExp(`stderr line ${lines} `));
+  } finally {
+    killBashSession();
+  }
+});
+
+test('bash_session: stdout and stderr stay separate when interleaved', posixOnly, async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    const r = await session.run('for i in 1 2 3; do echo "o$i"; echo "e$i" >&2; done');
+    assert.equal(r.exitCode, 0);
+    assert.deepEqual(r.stdout.trim().split('\n'), ['o1', 'o2', 'o3']);
+    assert.deepEqual(r.stderr.trim().split('\n'), ['e1', 'e2', 'e3']);
+  } finally {
+    killBashSession();
+  }
+});
+
+test('bash_session: a command that closes stderr still settles promptly', posixOnly, async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    // `exec 2>&-` closes the session's stderr for good, so the stderr sentinel
+    // can never arrive. Without the grace window the call would hang until the
+    // command timeout; with it, the turn degrades to stdout-only and returns.
+    const startedAt = Date.now();
+    const r = await session.run('exec 2>&-; echo still_here');
+    const elapsed = Date.now() - startedAt;
+    assert.equal(r.exitCode, 0);
+    assert.match(r.stdout, /still_here/);
+    assert.ok(elapsed < 5000, `took ${elapsed}ms — the grace window did not fire`);
+  } finally {
+    killBashSession();
+  }
+});
+
+test('bash_session: the exit code survives the stderr framing', posixOnly, async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    // The stderr printf runs between the command and the exit-code printf, so
+    // `$?` has to be captured before it or every command would report 0.
+    const r = await session.run('echo boom >&2; exit 3');
+    assert.equal(r.exitCode, 3);
+    assert.match(r.stderr, /boom/);
+
+    const ok = await session.run('true');
+    assert.equal(ok.exitCode, 0);
+
+    const failing = await session.run('ls /definitely/not/a/real/path');
+    assert.notEqual(failing.exitCode, 0);
+    assert.ok(failing.stderr.trim().length > 0, 'a failing command must report why');
+  } finally {
+    killBashSession();
+  }
+});
+
+test('both dialects frame stderr as well as stdout', () => {
+  const bash = SHELL_DIALECTS.bash.frame('echo hi', 'SENT');
+  assert.match(bash, /__ettore_ec=\$\?/, 'exit code must be captured before the stderr printf');
+  assert.match(bash, /printf '\\n%s\\n' 'SENT' >&2/);
+  assert.match(bash, /printf '\\n%sEXIT:%d\\n' 'SENT' \$__ettore_ec/);
+  assert.ok(
+    bash.indexOf('>&2') < bash.indexOf('EXIT:%d'),
+    'the stderr sentinel must be written before the stdout one',
+  );
+
+  const ps = SHELL_DIALECTS.powershell.frame('echo hi', 'SENT');
+  assert.match(ps, /\[Console\]::Error\.Write/);
+  assert.ok(
+    ps.indexOf('[Console]::Error.Write') < ps.indexOf('[Console]::Out.Write'),
+    'the stderr sentinel must be written before the stdout one',
+  );
+});

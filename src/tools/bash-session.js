@@ -5,9 +5,10 @@
 // and shell options persist between calls, unlike the one-shot `bash` tool
 // that spawns a fresh process each time.
 //
-// Commands are framed with a random sentinel so we can detect their end
-// without relying on a real PTY. Calls are serialized through a Promise
-// chain so parallel tool batches don't interleave on shared stdin/stdout.
+// Commands are framed with a random sentinel on BOTH stdout and stderr so we
+// can detect their end without relying on a real PTY. Calls are serialized
+// through a Promise chain so parallel tool batches don't interleave on shared
+// stdin/stdout.
 //
 // On timeout or abort the shell is killed and respawned on the next call —
 // a stuck command may have left stdin or job-control state in an unknown
@@ -20,6 +21,13 @@ import { killProcessTree, resolveShell } from '../utils/platform.js';
 
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
+// How long to keep waiting for the stderr sentinel once stdout's has arrived.
+// It is a fallback, not the mechanism: normally both are already in hand. It
+// exists for the command that makes its counterpart unreachable — `exec 2>&-`
+// closes the session's stderr, `exec 2>/dev/null` redirects it — where waiting
+// for a sentinel that can never come would otherwise hold the call for the
+// full command timeout.
+const STDERR_SENTINEL_GRACE_MS = 250;
 
 let _sharedSession = null;
 
@@ -29,8 +37,23 @@ function makeSentinel() {
 
 // Per-shell framing. Both dialects must satisfy the same contract: run the
 // command in the session's own scope (so `cd` sticks), keep the shell alive
-// after an error, and print `<sentinel>EXIT:<code>` on stdout once the command
-// is done and not before.
+// after an error, print the bare `<sentinel>` on stderr, and then print
+// `<sentinel>EXIT:<code>` on stdout — both once the command is done and not
+// before.
+//
+// stderr is framed for the same reason stdout is. It is a separate pipe,
+// delivered independently of stdout, so "the stdout sentinel arrived" says
+// nothing about whether the command's stderr has been read yet. This used to
+// be papered over with a single `setImmediate` before detaching the listeners,
+// which is a guess about the event loop rather than a fact about the data:
+// under load the stderr read slipped past it and a command's entire error
+// output was reported as empty, with a correct exit code and correct stdout
+// beside it. A sentinel on stderr turns the question into one the data answers
+// — a pipe preserves order, so the sentinel arriving proves every earlier byte
+// of stderr is already in the buffer.
+//
+// The stderr sentinel is emitted BEFORE the stdout one, so by the time the
+// stdout sentinel is seen its counterpart is already in flight.
 export const SHELL_DIALECTS = {
   bash: {
     args: ['--noprofile', '--norc'],
@@ -49,8 +72,15 @@ export const SHELL_DIALECTS = {
     // and we frame a bogus success. Redirecting the group's default stdin
     // fixes both; a command with its own redirect (heredoc, `< file`, an
     // explicit pipe) still wins, because that redirect is applied closer in.
+    //
+    // `$?` is captured into a variable first: the stderr printf below would
+    // otherwise overwrite it before the exit code is read. Both printfs sit
+    // outside the brace group, so a `2>&1` inside the user's command
+    // redirects the command's own output without capturing the framing.
     frame: (command, sentinel) =>
-      `{ ${command}\n} < /dev/null\nprintf '\\n%sEXIT:%d\\n' '${sentinel}' $?\n`,
+      `{ ${command}\n} < /dev/null\n__ettore_ec=$?\n`
+      + `printf '\\n%s\\n' '${sentinel}' >&2\n`
+      + `printf '\\n%sEXIT:%d\\n' '${sentinel}' $__ettore_ec\n`,
   },
   powershell: {
     // `-Command -` reads statements from stdin, which is what makes the
@@ -74,6 +104,7 @@ export const SHELL_DIALECTS = {
       '$__ettore_ok = $?',
       '$__ettore_ec = if ($__ettore_ok) { if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE } }'
         + ' else { if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 } }',
+      `[Console]::Error.Write("\`n" + '${sentinel}' + "\`n")`,
       `[Console]::Out.Write("\`n" + '${sentinel}' + "EXIT:" + $__ettore_ec + "\`n")`,
       '',
     ].join('\n'),
@@ -156,7 +187,12 @@ class BashSession {
       let stderrBuf = '';
       let bufferOverflow = false;
       let settled = false;
-      let sentinelSeen = false;
+      let stdoutSentinelSeen = false;
+      let stderrSentinelSeen = false;
+      // Filled in by the stdout branch, consumed once both streams are framed.
+      let framedStdout = '';
+      let framedExitCode = 0;
+      let graceTimer = null;
 
       const heartbeat = onProgress ? setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
@@ -169,11 +205,23 @@ class BashSession {
         settled = true;
         if (heartbeat) clearInterval(heartbeat);
         clearTimeout(timer);
+        if (graceTimer) clearTimeout(graceTimer);
         this.process?.stdout?.off('data', onStdout);
         this.process?.stderr?.off('data', onStderr);
         this.process?.off('exit', onExit);
         signal?.removeEventListener?.('abort', onAbort);
         resolve(value);
+      };
+
+      // Completion is the conjunction of the two streams, not a bet on timing.
+      const settleIfFramed = () => {
+        if (!stdoutSentinelSeen || !stderrSentinelSeen) return;
+        settle({
+          stdout: framedStdout.replace(/\r?\n+$/, ''),
+          stderr: stderrBuf.replace(/\r?\n+$/, ''),
+          exitCode: framedExitCode,
+          bufferOverflow,
+        });
       };
 
       const onStdout = (data) => {
@@ -183,24 +231,23 @@ class BashSession {
           stdoutBuf = stdoutBuf.slice(-MAX_BUFFER_BYTES);
         }
         const idx = stdoutBuf.indexOf(sentinel);
-        if (idx !== -1 && !sentinelSeen) {
-          sentinelSeen = true;
-          const before = stdoutBuf.slice(0, idx);
+        if (idx !== -1 && !stdoutSentinelSeen) {
+          stdoutSentinelSeen = true;
+          framedStdout = stdoutBuf.slice(0, idx);
           const after = stdoutBuf.slice(idx + sentinel.length);
           const codeMatch = after.match(/EXIT:(-?\d+)/);
-          const exitCode = codeMatch ? parseInt(codeMatch[1], 10) : 0;
-          // Defer settle so any pending stderr `data` events already queued by
-          // the kernel get a chance to fire on the current event-loop turn —
-          // otherwise stderr written before the sentinel can be lost when we
-          // detach listeners.
-          setImmediate(() => {
-            settle({
-              stdout: before.replace(/\r?\n+$/, ''),
-              stderr: stderrBuf.replace(/\r?\n+$/, ''),
-              exitCode,
-              bufferOverflow,
-            });
-          });
+          framedExitCode = codeMatch ? parseInt(codeMatch[1], 10) : 0;
+          if (!stderrSentinelSeen) {
+            // Its counterpart was written first, so it is on its way; give the
+            // pipe the time it needs rather than a single event-loop turn. The
+            // timer only fires for a command that made it unreachable.
+            graceTimer = setTimeout(() => {
+              stderrSentinelSeen = true;
+              settleIfFramed();
+            }, STDERR_SENTINEL_GRACE_MS);
+            graceTimer.unref?.();
+          }
+          settleIfFramed();
         }
       };
 
@@ -209,6 +256,15 @@ class BashSession {
         if (stderrBuf.length > MAX_BUFFER_BYTES) {
           bufferOverflow = true;
           stderrBuf = stderrBuf.slice(-MAX_BUFFER_BYTES);
+        }
+        const idx = stderrBuf.indexOf(sentinel);
+        if (idx !== -1 && !stderrSentinelSeen) {
+          stderrSentinelSeen = true;
+          // Cut the framing back out: it is our protocol, not the command's
+          // error output. Anything after it belongs to a later command and is
+          // dropped with it.
+          stderrBuf = stderrBuf.slice(0, idx);
+          settleIfFramed();
         }
       };
 
