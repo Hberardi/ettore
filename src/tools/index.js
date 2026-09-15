@@ -77,6 +77,16 @@ export function setAgentTodoSink(sink) {
   activeTodoSink = sink || null;
 }
 
+// Registered by Agent.run() so the `explore` tool can start a read-only
+// sub-agent without this module knowing anything about the Agent class.
+// Same contract as the todo sink: cleared at the end of every turn, so
+// outside an agent run the tool reports that rather than half-working.
+let activeSubagentRunner = null;
+
+export function setSubagentRunner(runner) {
+  activeSubagentRunner = typeof runner === 'function' ? runner : null;
+}
+
 function getToolAbortSignal(timeoutMs = null) {
   const signal = toolAbortStorage.getStore() || activeToolAbortSignal;
   if (!signal && !timeoutMs) return undefined;
@@ -2529,6 +2539,17 @@ export const toolHandlers = {
     }
   },
 
+  async explore({ question, context: briefing }) {
+    if (!activeSubagentRunner) {
+      return 'Error: explore is only available during an agent turn.';
+    }
+    const asked = String(question || '').trim();
+    if (!asked) {
+      return 'Error: explore requires a "question" saying what you need to find out.';
+    }
+    return activeSubagentRunner({ question: asked, context: String(briefing || '').trim() });
+  },
+
   async todo_write({ action, items, index }) {
     if (!activeTodoSink) {
       return 'Error: todo_write is only available during an agent turn.';
@@ -3030,6 +3051,30 @@ export const toolDefinitions = [
           workdir: { type: 'string', description: 'Optional working directory' },
           timeout_ms: { type: 'number', minimum: 10000, maximum: 600000, description: 'Timeout per check command in ms (10000-600000). Default: 240000' }
         }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'explore',
+      description: 'Answer a question about the codebase in a SEPARATE read-only context, and get back only the answer. '
+        + 'The sub-agent does its own repo_map/glob/grep/read work; none of that output enters your context — you receive a short report with file:line references. '
+        + 'Use it when finding the answer would cost many searches and reads whose raw output you do not need to keep: "where is X implemented and who calls it", "how does the Y flow work end to end", "which files would a Z change touch". '
+        + 'Do NOT use it for something you can settle with one or two reads you already know the paths for, and do not use it to make changes — it cannot write, run commands or install anything.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: {
+            type: 'string',
+            description: 'What you need to find out, as a self-contained question. The sub-agent sees none of this conversation, so name the symbols, files or behaviour explicitly.'
+          },
+          context: {
+            type: 'string',
+            description: 'Optional. Anything from the current task the sub-agent needs in order to answer well — constraints, what you already ruled out, the shape of the answer you want back.'
+          }
+        },
+        required: ['question']
       }
     }
   },

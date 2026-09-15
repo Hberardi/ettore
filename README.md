@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.4.4-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.5.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -12,7 +12,7 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 ## Features
 
 - 🤖 **32 providers** - OpenAI, Anthropic, your Claude subscription, Gemini, Ollama (local), NVIDIA, Groq, DeepSeek, MiniMax, Kimi, OpenRouter — and any OpenAI-compatible endpoint
-- 💻 **Tool Execution** - bash, read, write, edit, grep, glob, web search, web fetch, image inspection
+- 💻 **Tool Execution** - bash, read, write, edit, grep, glob, web search, web fetch, image inspection, delegated codebase search
 - 🖱️ **Runs your apps** - opens web apps in a real browser (reads the browser console: errors, exceptions, failed requests) and launches desktop apps (captures stdout/stderr, screenshots, clicks and types) to reproduce bugs before fixing them
 - 🎨 **Native TUI** - Custom ANSI renderer (no React/Ink) with themes and a sidebar
 - 🖼️ **Vision** - Reads local images; agent can discover, download, and inspect public web images
@@ -22,7 +22,8 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 - 💾 **Persistent Config** - API keys saved in a per-user config directory, `0600` on Linux/macOS ([details](#configuration))
 - 🧠 **Context Tools** - compression, project memory, working memory, sessions, auto-approve
 - ⚡ **Fast on every provider** - requests are shaped so the provider can reuse its prompt cache, context summaries are written by a fast model of the same provider, and `--verbose-tokens` reports time-to-first-token and cached tokens per call
-- 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn
+- 🔍 **Delegated search** - `explore` answers one question about the codebase in a separate read-only context and returns a short report with `file:line` references; the greps and full-file reads behind it never enter the main conversation
+- 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn, and its steps drive the progress panel and the auto-continue, so a plan left half-done is resumed instead of dropped
 - 🧩 **Eight plugins included** - PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts — installed with `/plugins install`, and you can write your own
 
 ## Installation
@@ -263,6 +264,8 @@ installed, ETTORE keeps its native PDF and binary-text fallbacks.
 | `/auto-approve [edits\|installs] on\|off` | Skip approval prompts (sensitive commands still prompt) |
 | `/config [key] [value] [--local]` | Show/set configuration; `--local` writes `.ettore/config.json` |
 | `/config max-iterations <1-200> [--local]` | Set the agent loop budget (default: 50) |
+| `/config max-tools <4-28> [--local]` | How many tool schemas reach the model per turn (default: 20) |
+| `/config tool-routing on\|off [--local]` | Route a relevant subset per turn, or hand over every tool |
 | `/config effort <low\|medium\|high\|xhigh\|max\|default>` | How hard the model thinks, on models that accept it |
 | `/memory show\|add\|clear\|edit\|export\|path` | Persistent project memory |
 | `/ecosystem show\|prune\|export\|path` | Learned playbook memory, reused across turns |
@@ -343,9 +346,34 @@ progress, parallel tool waves, changed files, decisions, and token usage.
 /mission clear
 ```
 
+## Delegating a search
+
+Finding an answer in a large codebase is cheap; what it leaves behind is not.
+Twenty grep hits and six full file reads stay in the transcript for the rest of
+the session, are re-sent on every turn, and are the first thing the context
+compressor discards — so by the time the edit gets written, the context is full
+of the search and short of the code.
+
+`explore` moves that somewhere else. The agent hands it one question; it
+investigates in a throwaway read-only context of its own and returns a short
+report with `file:line` references. None of the searching reaches the main
+conversation — only the answer does, and the report says so, so the agent opens
+the files it cites before editing them rather than trusting evidence it never
+saw.
+
+It is for questions like *where is X implemented and who calls it*, *how does
+the Y flow work end to end*, *which files would a Z change touch* — not for
+something a single read of a path you already know would settle. It runs in plan
+mode, so it cannot write, run commands or install anything; it cannot delegate
+again; and it is bounded at twelve iterations and eight minutes.
+
+You still see it working: the sub-agent's own `repo_map`, `grep` and `read`
+calls scroll past in the running-tool display like any others, while the
+`explore` call that started them stays open.
+
 ## Plugins
 
-ETTORE ships seven plugins and can load your own. A plugin adds **tools** the
+ETTORE ships eight plugins and can load your own. A plugin adds **tools** the
 agent can call and **slash commands** you can type — they merge with the
 built-in set rather than replacing it.
 
@@ -365,6 +393,7 @@ built-in set rather than replacing it.
 |---|---|---|
 | **pgadmin** | PostgreSQL from the terminal: list and describe databases, schemas, tables, views, indexes, constraints and functions; run queries; `EXPLAIN`/`ANALYZE`; `pg_dump` and `pg_restore`, the latter through a local web wizard | `pg` |
 | **excel-full** | Read, create and edit `.xlsx`: formulas, cell styles, number formats, sheet management, charts, one-page reports | `exceljs`, `pureimage` |
+| **edi-ftp** | EDI files over FTP, FTPS or SFTP: list a remote directory, fetch or peek a file, inspect an undocumented tracciato, and parse fixed-width, delimited or EDIFACT/X12 into records — with a saved layout or with the structure inferred. Connection profiles are stored locally, password encrypted at rest | — for FTP/FTPS; `ssh2`, installed separately, for SFTP |
 | **git-helpers** | Beyond the built-in `git_status` / `git_diff`: blame, log, diff stat, branch audit | — |
 | **git-history** | Read-only history: commit log, line-range blame grouped by change, single-commit inspection | — |
 | **bash-monitor** | Times every shell command, warns on slow ones, keeps a queryable history | — |
@@ -391,15 +420,33 @@ and it is what tells you which tool to blame when something misbehaves.
 
 ### Which tools reach the model
 
-The agent is offered a bounded set of tools each turn, chosen from what the
-prompt asks for. Plugin tools take a guaranteed share of it and are ranked by
-how well their name and description match the request, so asking about a
-database restore surfaces `pg_restore_wizard` rather than whichever plugin
-happened to load first — and the core toolset is never crowded out.
+The agent is offered a bounded set of tools each turn — 20 by default, out of
+nearly forty. What the prompt asks for decides the **order**; it does not decide
+what exists. Whatever the prompt looks like, the agent always has the tools to
+find code, change it, and run something; whatever slots are left over are filled
+with the tools whose absence hurts most, and only the priced or narrowly
+specialised ones (music-video generation, desktop automation) wait to be asked
+for by name.
 
-Plan mode is read-only, and ETTORE cannot inspect what a plugin's handler does.
-A plugin tool is offered there only if it declares `risk: 'low'`, which is the
-author stating that it does not write.
+That distinction matters more than it sounds. Asked "controlla se il progetto
+compila", an agent routed purely by keyword gets no shell, no `run_checks` and
+no `run_tests` — and answers by reading the source and guessing, confidently.
+
+Plugin tools take a guaranteed share of the set and are ranked by how well their
+name and description match the request, so asking about a database restore
+surfaces `pg_restore_wizard` rather than whichever plugin happened to load first
+— and the core toolset is never crowded out.
+
+Plan mode is read-only, and that is enforced by the router, not by the prompt:
+nothing that writes, runs a command or launches a process is offered there. Since
+ETTORE cannot inspect what a plugin's handler does, a plugin tool is offered in
+plan mode only if it declares `risk: 'low'`, which is the author stating that it
+does not write.
+
+Raise or lower the budget with `/config max-tools <4-28>` (add `--local` to
+keep it to this project), or set `"maxToolsPerRequest"` in
+`.ettore/config.json` directly. `/config tool-routing off` hands the model
+every tool instead.
 
 ### Writing one
 

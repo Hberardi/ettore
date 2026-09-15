@@ -831,7 +831,7 @@ workdir: ${config.workdir}
 safetyProfile: ${config.safetyProfile}
 dynamicToolRouting: ${config.dynamicToolRouting}
 maxIterations: ${config.maxIterations || 50}
-maxToolsPerRequest: ${config.maxToolsPerRequest || 16}
+maxToolsPerRequest: ${config.maxToolsPerRequest || 20}
 effort: ${config.effort || 'default'}`;
 
         if (hasLocal) {

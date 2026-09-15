@@ -39,6 +39,7 @@ Rules:
 - Reference file:line when relevant.
 - Prefer list_dir/file_info/git_status/git_diff over bash for project inspection and git review.
 - For repository exploration, call \`repo_map\` first to get the high-level structure (top dirs, entrypoints, key files), then use \`glob\`/\`grep\`/\`read\` only for targeted drill-down.
+- Use \`explore\` to delegate a search whose raw output you do not need to keep. It answers one question in a separate read-only context and returns a short report with file:line references — the greps and full-file reads behind it never enter this conversation, which is what leaves room for the code you are about to change. Delegate "where is X implemented and who calls it", "how does the Y flow work end to end", "which files would a Z change touch". Do NOT delegate what one or two reads of paths you already know would settle, and do not expect it to change anything: it cannot write, run commands or install. Read its report as evidence you have not seen yourself — open the files it cites before editing them.
 - Use bash_session (NOT bash) when a sequence of commands depends on shared state — cd into a subdir then run tests, source a venv then invoke its tools, export a variable then reference it. bash_session keeps the working directory and environment between calls; bash starts fresh every time.
 - Use websearch for current facts, documentation, news, package/API changes, prices, laws, or anything likely to have changed.
 - Use webfetch to inspect a specific URL or to open a promising websearch result. If the site requires username/password, webfetch will ask the user interactively for temporary credentials and will not save them; never ask the user to paste passwords into normal chat.
@@ -171,6 +172,7 @@ const MUSIC_VIDEO_GUIDANCE_TOOLS = ['audio_read', 'generate_scene_image', 'gener
 // paid on every call whether or not the turn could use them — desktop
 // automation alone is ~1.9k characters.
 const TOOL_GUIDANCE = [
+  ['- Use \`explore\` to delegate', ['explore']],
   ['- Use bash_session (NOT bash)', ['bash_session']],
   ['- Use websearch for', ['websearch']],
   ['- Use webfetch to', ['webfetch']],

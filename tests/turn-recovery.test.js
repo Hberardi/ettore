@@ -4,10 +4,14 @@ import {
   buildTurnOverlay,
   createTurnRecoveryState,
   responseAnnouncesUnexecutedAction,
+  responseDefersWork,
+  extractDeferral,
   responseLooksLikeUnappliedCode,
   toolBatchNeedsSequential,
   toolBatchExecutionGroups,
   userLikelyRequestedWorkspaceEdit,
+  promptFileTargets,
+  unaddressedTargets,
 } from '../src/agents/turn-recovery.js';
 
 test('userLikelyRequestedWorkspaceEdit detects edit intent in English and Italian', () => {
@@ -64,12 +68,76 @@ test('createTurnRecoveryState returns clean defaults', () => {
     maxWorkspaceEditRetries: 2,
     lastWorkspaceEditProgress: null,
     verifyRetryUsed: false,
+    deferralRetryUsed: false,
     repoMapNudgeUsed: false,
+    unaddressedTargetsRetryUsed: false,
     truncationResumes: 0,
     maxTruncationResumes: 3,
     invalidToolCallStreak: 0,
     maxInvalidToolCallStreak: 3,
   });
+});
+
+test('responseDefersWork catches work parked on a condition nothing satisfies', () => {
+  // The shape that started this: the model reads "tool use is disabled for
+  // this recovery turn", treats it as an outage that will pass, and promises
+  // to resume. Nothing ever resumes it.
+  for (const parked of [
+    'Tool use ancora disabilitato — appena torna disponibile parto dallo step 1 senza ulteriori conferme.',
+    'Tool use disabilitato. Riprendo appena possibile.',
+    'Continuo appena i tool tornano disponibili.',
+    'Attendo che i tool tornino attivi.',
+    'I will resume as soon as the tools are available again.',
+    'Procedo più tardi con il resto del piano.',
+  ]) {
+    assert.equal(responseDefersWork(parked), true, parked);
+  }
+});
+
+test('responseDefersWork leaves a real answer alone', () => {
+  // A finished turn that reports a limitation is not a deferral, and
+  // "continuo" as ordinary prose ("continuo a vedere l'errore") must not
+  // cost the user a round-trip.
+  for (const delivered of [
+    'Ho letto tre file e trovato il bug alla riga 42. Non ho potuto eseguire i test.',
+    'Continuo a vedere lo stesso errore di parsing nel modulo doganale.',
+    'Il refactor è completo: ho aggiornato quattro file e i test passano.',
+    'Quando avrai deciso il nome della colonna, dimmelo.',
+    'Fatto.',
+    '',
+  ]) {
+    assert.equal(responseDefersWork(delivered), false, delivered);
+  }
+});
+
+test('extractDeferral quotes the sentence that did the deferring', () => {
+  const quote = extractDeferral('Ho letto il file.\nRiprendo appena i tool tornano disponibili.');
+  assert.match(quote, /Riprendo appena i tool/);
+  assert.ok(quote.length <= 160);
+  assert.equal(extractDeferral('Fatto.'), '');
+});
+
+test('responseAnnouncesUnexecutedAction covers the resumption verbs too', () => {
+  assert.equal(responseAnnouncesUnexecutedAction('Riparto dallo step 1 senza ulteriori conferme.'), true);
+  assert.equal(responseAnnouncesUnexecutedAction('Riprendo dal punto in cui ero.'), true);
+  assert.equal(responseAnnouncesUnexecutedAction('Proseguo con il secondo file.'), true);
+  assert.equal(responseAnnouncesUnexecutedAction('Ho finito il lavoro.'), false);
+});
+
+test('tool_loop_finalize tells the model there is no later turn to wait for', () => {
+  const overlay = buildTurnOverlay('tool_loop_finalize', { reason: 'the budget is exhausted' });
+  assert.match(overlay, /the budget is exhausted/);
+  assert.match(overlay, /not coming back/i);
+  assert.match(overlay, /do not promise to resume/i);
+  // The old wording ("tool use is now disabled") is what invited the deferral.
+  assert.doesNotMatch(overlay, /tool use is now disabled/i);
+});
+
+test('deliver_now quotes the deferral and asks for the answer instead', () => {
+  const overlay = buildTurnOverlay('deliver_now', { quote: 'parto dallo step 1' });
+  assert.match(overlay, /parto dallo step 1/);
+  assert.match(overlay, /nothing resumes on its own/i);
+  assert.ok(buildTurnOverlay('deliver_now', {}).length > 0, 'renders without a quote');
 });
 
 test('buildTurnOverlay explains a truncated reply without inviting a restart', () => {
@@ -92,4 +160,43 @@ test('buildTurnOverlay renders known overlays and returns empty string for unkno
   assert.match(buildTurnOverlay('repo_map_first'), /call repo_map first/i);
   assert.match(buildTurnOverlay('invalid_tool_call', { streak: 1, max: 3 }), /1\/2 warning before abort/i);
   assert.equal(buildTurnOverlay('missing_key'), '');
+});
+
+// ── The completion gate: files named in the prompt that the turn never read ──
+
+test('promptFileTargets picks out real paths and leaves runtime names alone', () => {
+  assert.deepEqual(
+    promptFileTargets('aggiorna navbar.html e src/components/footer.html'),
+    ['navbar.html', 'src/components/footer.html'],
+  );
+  // A version string and a sentence-ending abbreviation are not files.
+  assert.deepEqual(promptFileTargets('siamo alla 1.4.4, aggiorna il parser ecc.'), []);
+  // The runtime is not a file in the repository.
+  assert.deepEqual(promptFileTargets('un progetto Node.js con Vue.js'), []);
+  assert.deepEqual(promptFileTargets(''), []);
+});
+
+test('promptFileTargets stops at six so a bulk request is not chased file by file', () => {
+  const prompt = Array.from({ length: 12 }, (_, i) => `f${i}.js`).join(' ');
+  assert.equal(promptFileTargets(prompt).length, 6);
+});
+
+test('unaddressedTargets reports only what no tool call went near', () => {
+  const prompt = 'aggiorna navbar.html e footer.html';
+  const args = '{"file_path":"templates/components/navbar.html"}';
+  assert.deepEqual(unaddressedTargets(prompt, args), ['footer.html']);
+
+  // A grep that merely mentions the file counts as going near it.
+  assert.deepEqual(
+    unaddressedTargets(prompt, `${args} {"pattern":"footer.html"}`),
+    [],
+  );
+  // No tool ran at all: everything the prompt named is unaddressed.
+  assert.deepEqual(unaddressedTargets(prompt, ''), ['navbar.html', 'footer.html']);
+});
+
+test('the overlay names the files the turn skipped', () => {
+  const text = buildTurnOverlay('unaddressed_targets', { targetList: '`footer.html`' });
+  assert.match(text, /footer\.html/);
+  assert.match(text, /has not been done/i);
 });

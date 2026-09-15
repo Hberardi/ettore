@@ -297,3 +297,137 @@ test('auto-continue keeps going while the model is still making progress', async
   assert.equal(turns, 4, 'progress on every turn must never be mistaken for a stall');
   assert.equal(exhausted.length, 0, 'a completed plan must not warn about open steps');
 });
+
+test('Agent auto-continues on a <plan> the model never turned into a todo list', async () => {
+  let turns = 0;
+  const client = {
+    async turn(messages) {
+      turns++;
+      if (turns === 1) {
+        return {
+          type: 'text',
+          content: '<plan>\n{"goal":"g","steps":['
+            + '{"id":1,"title":"Leggi il parser"},'
+            + '{"id":2,"title":"Aggiorna il parser"},'
+            + '{"id":3,"title":"Esegui i test"}'
+            + ']}\n</plan>\nHo letto il parser.',
+        };
+      }
+      const system = promptSeen(messages);
+      // The plan-derived list runs on the shorter leash, not the 30-attempt one.
+      assert.match(String(system), /auto-continue 1\/4/i);
+      assert.match(String(system), /Aggiorna il parser/);
+      assert.match(String(system), /Esegui i test/);
+      return { type: 'text', content: '<done:1>\n<done:2>\n<done:3>\nTask completato.' };
+    },
+  };
+
+  const agent = makeAgent(client);
+  const emitter = new EventEmitter();
+  const todoLists = [];
+  const autoContinues = [];
+  emitter.on('todoList', items => todoLists.push(items));
+  emitter.on('autoContinue', info => autoContinues.push(info));
+
+  await agent.run('implementa il nuovo parser passo per passo', emitter);
+
+  assert.equal(turns, 2);
+  assert.deepEqual(todoLists[0], ['Leggi il parser', 'Aggiorna il parser', 'Esegui i test']);
+  assert.equal(autoContinues.length, 1);
+  assert.equal(autoContinues[0].max, 4);
+});
+
+test('Agent leaves a one-step plan alone instead of auto-continuing it', async () => {
+  let turns = 0;
+  const client = {
+    async turn() {
+      turns++;
+      return {
+        type: 'text',
+        content: '<plan>\n{"goal":"g","steps":[{"id":1,"title":"Rinomina la variabile"}]}\n</plan>\nFatto.',
+      };
+    },
+  };
+
+  const agent = makeAgent(client);
+  const emitter = new EventEmitter();
+  const todoLists = [];
+  emitter.on('todoList', items => todoLists.push(items));
+
+  await agent.run('implementa la rinomina passo per passo', emitter);
+
+  assert.equal(turns, 1);
+  assert.deepEqual(todoLists, []);
+});
+
+test('Agent pushes back when the prompt named a file the turn never went near', async () => {
+  let turns = 0;
+  const client = {
+    async turn(messages) {
+      turns++;
+      if (turns === 1) {
+        return {
+          type: 'tool_calls',
+          tool_calls: [{
+            id: 'c1',
+            type: 'function',
+            function: { name: 'read', arguments: JSON.stringify({ file_path: 'navbar.html' }) },
+          }],
+        };
+      }
+      if (turns === 2) return { type: 'text', content: 'Ho aggiornato la navbar.' };
+      const system = promptSeen(messages);
+      assert.match(String(system), /footer\.html/);
+      assert.doesNotMatch(String(system), /navbar\.html`/);
+      return { type: 'text', content: 'Anche il footer è a posto.' };
+    },
+  };
+
+  const agent = makeAgent(client);
+  const emitter = new EventEmitter();
+  const recoveries = [];
+  emitter.on('loopRecovery', info => recoveries.push(info.reason));
+
+  const out = await agent.run('aggiorna navbar.html e footer.html', emitter);
+
+  assert.equal(turns, 3);
+  assert.ok(recoveries.includes('unaddressed_targets'));
+  assert.equal(out, 'Anche il footer è a posto.');
+});
+
+test('Agent leaves a turn alone once every named file was touched', async () => {
+  let turns = 0;
+  const client = {
+    async turn() {
+      turns++;
+      if (turns === 1) {
+        return {
+          type: 'tool_calls',
+          tool_calls: [
+            {
+              id: 'c1',
+              type: 'function',
+              function: { name: 'read', arguments: JSON.stringify({ file_path: 'navbar.html' }) },
+            },
+            {
+              id: 'c2',
+              type: 'function',
+              function: { name: 'read', arguments: JSON.stringify({ file_path: 'footer.html' }) },
+            },
+          ],
+        };
+      }
+      return { type: 'text', content: 'Entrambi aggiornati.' };
+    },
+  };
+
+  const agent = makeAgent(client);
+  const emitter = new EventEmitter();
+  const recoveries = [];
+  emitter.on('loopRecovery', info => recoveries.push(info.reason));
+
+  await agent.run('aggiorna navbar.html e footer.html', emitter);
+
+  assert.equal(turns, 2);
+  assert.equal(recoveries.includes('unaddressed_targets'), false);
+});

@@ -1,4 +1,4 @@
-import { toolHandlers, toolDefinitions, setToolAbortSignal, setAgentTodoSink, runWithToolAbortSignal, validateToolArgs, coerceToolArgsToSchema } from '../tools/index.js';
+import { toolHandlers, toolDefinitions, setToolAbortSignal, setAgentTodoSink, setSubagentRunner, runWithToolAbortSignal, validateToolArgs, coerceToolArgsToSchema } from '../tools/index.js';
 import { EventEmitter, setMaxListeners as setTargetMaxListeners } from 'events';
 import { createHash } from 'crypto';
 import { stat } from 'fs/promises';
@@ -43,11 +43,14 @@ import { renderSystemPrompt, pruneToolGuidance } from './prompts.js';
 import {
   buildTurnOverlay,
   createTurnRecoveryState,
+  responseDefersWork,
+  extractDeferral,
   extractAnnouncement,
   modelDeclaredCompletion,
   responseAnnouncesUnexecutedAction,
   responseLooksLikeUnappliedCode,
   toolBatchExecutionGroups,
+  unaddressedTargets,
   userLikelyRequestedWorkspaceEdit,
 } from './turn-recovery.js';
 import { redactSecrets } from '../utils/secrets.js';
@@ -99,6 +102,33 @@ const MUTATION_TOOL_NAMES = new Set([
   'bash_session',
   'memory_write',
 ]);
+// What the exploration sub-agent is told, on top of the read-only plan-mode
+// prompt it already gets. The whole value of the sub-agent is that its
+// searching happens somewhere the parent's context never sees, so the one
+// thing it must get right is the shape of what comes back: an answer, not a
+// transcript of how it was found.
+const SUBAGENT_BRIEF = `You are an exploration sub-agent. You have been given ONE question by the main agent, and you are answering it in a context of your own: nothing you read, grep or map is visible to whoever asked, and nothing you write here survives beyond your answer.
+
+So answer, do not narrate. Investigate with the read-only tools until you can say something definite, then reply with:
+- the answer itself, stated plainly;
+- the evidence as \`path/to/file:line\` references — the asker will open them, so they must be real and exact;
+- anything you could NOT determine, named explicitly, so the asker does not mistake a gap for a negative.
+
+Keep it under ~40 lines. Do not restate the question, do not describe your search, do not list the files you opened unless one of them IS the answer. If the question cannot be answered from this repository, say that in one sentence rather than guessing.`;
+
+// A sub-agent that runs as long as its parent has saved nobody anything, and
+// its report is supposed to be short by construction.
+const SUBAGENT_MAX_ITERATIONS = 12;
+const SUBAGENT_MAX_TOOL_CALLS = 30;
+// The report goes into the parent's context, which is the thing being
+// protected. A sub-agent that ignores the brief and dumps a transcript gets
+// truncated rather than allowed to undo the point of the call.
+const SUBAGENT_REPORT_MAX_CHARS = 6000;
+// Its own ceiling, under the tool timeout in getToolTimeoutMs, so a sub-agent
+// that will not converge is cancelled and reported rather than left running
+// behind a tool result the parent has already given up on.
+const SUBAGENT_TIMEOUT_MS = 480_000;
+
 const AGENT_TURN_TIMEOUT_MS = 300_000;
 // How many times per user turn a text-leaked tool-call blob may be converted
 // back into real tool calls before the loop stops covering for the model.
@@ -121,6 +151,9 @@ export function getToolTimeoutMs(name) {
   if (name === 'apply_patch_structured') return 30_000;
   if (name === 'run_tests') return 300_000;
   if (name === 'run_checks') return 300_000;
+  // A whole nested agent loop, bounded above by SUBAGENT_TIMEOUT_MS so the
+  // sub-agent is cancelled rather than orphaned behind a timed-out result.
+  if (name === 'explore') return 600_000;
   if (name === 'repo_map') return 120_000;
   if (name === 'repo_find_symbol') return 60_000;
   if (name === 'dev_server') return 120_000;
@@ -252,7 +285,12 @@ export class Agent {
     this.maxIterations = Math.max(1, Number(config.maxIterations) || 50);
     this.maxReadOnlyToolBatches = Math.max(2, Number(config.maxReadOnlyToolBatches) || 12);
     this.maxToolCallsPerTurn = Number(config.maxToolCallsPerTurn) || 80;
-    this.maxToolsPerRequest = Math.max(4, Math.min(28, Number(config.maxToolsPerRequest) || 16));
+    // 16 of 37 tools left the route permanently short: the base build set
+    // alone is 15, so the intent families were competing for one free slot and
+    // a prompt that matched none reached the model with no way to run, test or
+    // launch anything. 20 leaves five slots for the router to fill (see
+    // BUILD_FILL) and is still well inside what a model handles cleanly.
+    this.maxToolsPerRequest = Math.max(4, Math.min(28, Number(config.maxToolsPerRequest) || 20));
     this.dynamicToolRouting = config.dynamicToolRouting !== false;
     const configuredSafetyProfile = config.safetyProfile == null
       ? null
@@ -276,6 +314,10 @@ export class Agent {
     this._todoDoneIdx = new Set();
     this._todoFromBlock = false;
     this._todoFromMarkdown = false;
+    // Set when the step list came from a parsed <plan> rather than from
+    // todo_write. Plan-derived steps drive auto-continue on a shorter leash —
+    // see the cap at the auto-continue decision.
+    this._todoFromPlan = false;
     this._autoContinueCount = 0;
     // Whether the task in progress is one that changes files. A bare
     // "continua" carries no intent of its own, so without this the tool
@@ -979,6 +1021,82 @@ export class Agent {
     this._pendingTurnOverlay = '';
   }
 
+  /**
+   * Answer one question in a throwaway read-only context.
+   *
+   * The expensive part of an exploration is not finding the answer, it is what
+   * finding it leaves behind: twenty grep hits and six full file reads sit in
+   * the transcript for the rest of the session, get re-sent on every turn, and
+   * are the first thing the compressor elides — so by the time the edit is
+   * written, the context is full of the search and short of the code. A
+   * sub-agent moves all of that somewhere the parent never sees and hands back
+   * the two paragraphs that were the point.
+   *
+   * Plan mode is the enforcement: the sub-agent is read-only by construction,
+   * not by instruction.
+   */
+  async _exploreWithSubagent({ question, context: briefing }, emitter, parentSignal) {
+    if (this._isSubagent) {
+      return 'Error: explore is not available inside an exploration sub-agent. Answer from what you can read yourself.';
+    }
+
+    const sub = new Agent(this.client, {
+      ...this.config,
+      maxIterations: SUBAGENT_MAX_ITERATIONS,
+      maxToolCallsPerTurn: SUBAGENT_MAX_TOOL_CALLS,
+      maxAutoContinues: 1,
+      // The brief already states what to produce; a planning handshake on top
+      // of it spends a turn of an already small budget.
+      requireExplicitPlan: false,
+      explicitPlan: 'off',
+      verifyAfterEdit: false,
+      // Plugin tools belong to the parent's task, and a plugin's handler
+      // cannot be assumed read-only just because the mode is.
+      pluginRegistry: null,
+      // Already loaded — re-reading the catalogue per call is pure waste.
+      skillSystem: this.skillSystem,
+    }, 'plan');
+    sub._isSubagent = true;
+
+    const childEmitter = new EventEmitter();
+    // An unhandled 'error' on an EventEmitter throws. A sub-agent that fails
+    // is a tool result the parent can read and work around, not a crash of
+    // the parent's turn.
+    childEmitter.on('error', () => {});
+    for (const name of ['toolStart', 'toolEnd']) {
+      childEmitter.on(name, payload => emitter?.emit(name, { ...payload, subagent: true }));
+    }
+
+    const cancelSub = () => { try { sub.cancel(); } catch {} };
+    parentSignal?.addEventListener?.('abort', cancelSub, { once: true });
+    const timer = setTimeout(cancelSub, SUBAGENT_TIMEOUT_MS);
+
+    const prompt = briefing
+      ? `${SUBAGENT_BRIEF}\n\nQUESTION: ${question}\n\nCONTEXT FROM THE MAIN TASK: ${briefing}`
+      : `${SUBAGENT_BRIEF}\n\nQUESTION: ${question}`;
+
+    emitter?.emit('subagentStart', { question });
+    this._debugLog(emitter, 'subagent.started', { question: String(question).slice(0, 160) });
+    try {
+      const report = String(await sub.run(prompt, childEmitter) || '').trim();
+      if (!report) {
+        return 'The exploration sub-agent came back with nothing. Investigate directly with grep/glob/read.';
+      }
+      const clipped = report.length > SUBAGENT_REPORT_MAX_CHARS
+        ? `${report.slice(0, SUBAGENT_REPORT_MAX_CHARS)}\n[report truncated at ${SUBAGENT_REPORT_MAX_CHARS} characters]`
+        : report;
+      this._debugLog(emitter, 'subagent.completed', { reportChars: report.length });
+      return `Exploration report — produced in a separate read-only context, so the files behind it are NOT in your conversation:\n\n${clipped}`;
+    } catch (err) {
+      this._debugLog(emitter, 'subagent.failed', { error: String(err?.message || err) });
+      return `Error: the exploration sub-agent failed (${err?.message || err}). Investigate directly with grep/glob/read.`;
+    } finally {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener?.('abort', cancelSub);
+      emitter?.emit('subagentEnd', { question });
+    }
+  }
+
   async run(userPrompt, emitter, options = {}) {
     const promptText = String(userPrompt || '');
     // A continuation prompt inherits the previous intent; a fresh request
@@ -1074,6 +1192,7 @@ export class Agent {
       this._todoDoneIdx = new Set();
       this._todoFromBlock = false;
       this._todoFromMarkdown = false;
+      this._todoFromPlan = false;
     }
     this._autoContinueCount = 0;
     this._planEmitted = false;
@@ -1102,6 +1221,10 @@ export class Agent {
     let lastAutoContinueProgress = null;
     let autoContinueStallNudgeUsed = false;
     const touchedFiles = new Set();
+    // Every tool argument the turn issued, concatenated. Read by the
+    // unaddressed-target gate to answer one question cheaply: did anything in
+    // this turn go near the file the user named?
+    let referencedInToolArgs = '';
     // `parseBuffer` accumulates all text for <todo>/<done:N> parsing across chunks.
     // `emitBuffer` holds text that is safe to display (i.e. past any partial marker).
     let parseBuffer = '';
@@ -1118,11 +1241,14 @@ export class Agent {
     // auto-continue logic and the progress panel both react identically
     // regardless of whether the plan came from a tool call or from tagged text.
     const todoSink = {
-      setList: (items) => {
+      setList: (items, { fromPlan = false } = {}) => {
         this._todoList = items.slice();
         this._todoDoneIdx = new Set();
         this._todoFromBlock = true;
         this._todoFromMarkdown = false;
+        // A todo_write call supersedes a plan-seeded list and takes it off the
+        // shorter auto-continue leash: the model is now tracking its own steps.
+        this._todoFromPlan = fromPlan;
         todoEmitted = true;
         emitter?.emit('todoList', items.slice());
       },
@@ -1147,10 +1273,31 @@ export class Agent {
     };
     setAgentTodoSink(todoSink);
 
+    // A <plan> the model writes is a commitment, and until now nothing in the
+    // loop read it: the plan was parsed, emitted to the UI panel and dropped.
+    // Auto-continue looks only at the todo list, so a model that outlined five
+    // steps, executed two and stopped ended the turn with an empty pending
+    // list and got no nudge — the user had to notice the missing work and type
+    // "continua". Seeding the list from the plan makes the plan load-bearing.
+    //
+    // todo_write always wins: this only fires while the model has set no list
+    // of its own, and a later todo_write replaces whatever was seeded here.
+    const seedTodoFromPlan = (plan) => {
+      if (this._todoList.length) return;
+      const items = (plan?.steps || [])
+        .map(step => String(step?.title || '').trim())
+        .filter(Boolean);
+      // A single step is not a plan worth chasing, and chasing it would cost a
+      // round-trip on every trivially-planned turn.
+      if (items.length < 2) return;
+      todoSink.setList(items, { fromPlan: true });
+      this._debugLog(emitter, 'turn.todo_seeded_from_plan', { steps: items.length });
+    };
+
     // Surface provider backoff. Four 429 retries can spend minutes waiting; in
     // silence that reads as a frozen CLI, and the error that follows tells the
     // user to retry something the CLI already retried for them.
-    setRetryNotifier((info) => {
+    const parentRetryNotifier = (info) => {
       if (info?.phase === 'waiting') {
         emitter?.emit('providerRetry', {
           attempt: info.attempt,
@@ -1166,7 +1313,25 @@ export class Agent {
         this._retriesSpent = info.attempts;
         this._debugLog(emitter, 'provider.retry_exhausted', info);
       }
-    });
+    };
+    setRetryNotifier(parentRetryNotifier);
+
+    // `explore` runs a whole nested agent, and a nested run() owns the same
+    // module-level singletons this one does — it registers its own abort
+    // signal, todo sink, retry notifier and runner, and clears all four on its
+    // way out. Without putting the parent's back, the next tool in the very
+    // same batch runs with no abort signal and a dead todo sink.
+    const subagentRunner = async (request) => {
+      try {
+        return await this._exploreWithSubagent(request, emitter, controller.signal);
+      } finally {
+        setToolAbortSignal(controller.signal);
+        setAgentTodoSink(todoSink);
+        setRetryNotifier(parentRetryNotifier);
+        setSubagentRunner(subagentRunner);
+      }
+    };
+    setSubagentRunner(subagentRunner);
 
     // Emit as much of `emitBuffer` as is safe — we hold back only the
     // incomplete control tags that this parser knows how to suppress.
@@ -1429,7 +1594,12 @@ export class Agent {
           if (this._planningActive && !this._planEmitted) {
             const planMatch = parseBuffer.match(PLAN_CAPTURE_RE);
             if (planMatch) {
-              const plan = extractPlan(planMatch[1]);
+              // extractPlan matches the <plan>…</plan> block itself, so it
+            // needs the whole match. Handing it the captured body meant its
+            // very first regex never matched and it returned null every time:
+            // no plan was ever emitted, the UI panel never filled, and the
+            // planning reminder bought nothing but the tokens it cost.
+            const plan = extractPlan(planMatch[0]);
               if (plan && plan.steps && plan.steps.length) {
                 this._plan = plan;
                 this._planEmitted = true;
@@ -1439,6 +1609,7 @@ export class Agent {
                   steps: plan.steps.length,
                   goal: plan.goal.slice(0, 80),
                 });
+                seedTodoFromPlan(plan);
               }
               // Strip the block from both buffers regardless of parse success
               // so a malformed plan does not leak JSON scaffolding into the
@@ -1676,7 +1847,12 @@ export class Agent {
         if (this._planningActive && !this._planEmitted) {
           const planMatch = result.content.match(PLAN_CAPTURE_RE);
           if (planMatch) {
-            const plan = extractPlan(planMatch[1]);
+            // extractPlan matches the <plan>…</plan> block itself, so it
+            // needs the whole match. Handing it the captured body meant its
+            // very first regex never matched and it returned null every time:
+            // no plan was ever emitted, the UI panel never filled, and the
+            // planning reminder bought nothing but the tokens it cost.
+            const plan = extractPlan(planMatch[0]);
             if (plan && plan.steps && plan.steps.length) {
               this._plan = plan;
               this._planEmitted = true;
@@ -1687,6 +1863,7 @@ export class Agent {
                 goal: plan.goal.slice(0, 80),
                 source: 'final',
               });
+              seedTodoFromPlan(plan);
             }
           }
         }
@@ -1791,6 +1968,27 @@ export class Agent {
             emitTurnState('failed', { reason: 'garbage_output' });
             return;
           }
+        }
+
+        // A text-only recovery turn that parked the work instead of delivering
+        // it. Deliberately not folded into the announcement stall below: that
+        // one retries to get tool calls, and here there are no tools to get —
+        // the route stays empty for as long as forceTextOnlyNextTurn holds, so
+        // that retry would spend another turn producing prose. What is missing
+        // is the answer itself, asked for once.
+        if (
+          forceTextOnlyNextTurn
+          && !turnRecoveryState.deferralRetryUsed
+          && result.type === 'text'
+          && responseDefersWork(clean)
+        ) {
+          const deferral = extractDeferral(clean);
+          this.messages.push({ role: 'assistant', content: result.content });
+          turnRecoveryState.deferralRetryUsed = true;
+          this._queueNamedTurnOverlay('deliver_now', { quote: deferral });
+          emitter?.emit('loopRecovery', { reason: 'deferred_work', iteration: iterations });
+          this._debugLog(emitter, 'turn.deferred_work', { quote: deferral });
+          continue;
         }
 
         // Force one retry with a stricter nudge when the turn ends without
@@ -1898,8 +2096,17 @@ export class Agent {
           const progressKey = `${this._todoDoneIdx.size}:${touchedFiles.size}:${toolCallCount}`;
           const stalled = lastAutoContinueProgress === progressKey;
           const pendingLines = pendingTodos.map(({ text, i }) => `${i + 1}. ${text}`).join('\n');
+          // A plan-seeded list is the agent's own inference about what the
+          // model committed to, not a list the model is tracking. When the
+          // model does the work but never ticks a step off, every one of those
+          // steps stays pending forever, so the generous 30-attempt budget
+          // would spend thirty round-trips asking a finished model to finish.
+          // Four is enough to rescue a genuinely half-done plan.
+          const autoContinueCap = this._todoFromPlan
+            ? Math.min(this.maxAutoContinues, 4)
+            : this.maxAutoContinues;
           if (
-            this._autoContinueCount < this.maxAutoContinues
+            this._autoContinueCount < autoContinueCap
             && !(stalled && autoContinueStallNudgeUsed)
           ) {
             this._autoContinueCount++;
@@ -1910,13 +2117,13 @@ export class Agent {
             } else {
               this._queueNamedTurnOverlay('auto_continue', {
                 attempt: this._autoContinueCount,
-                max: this.maxAutoContinues,
+                max: autoContinueCap,
                 pendingLines,
               });
             }
             emitter?.emit('autoContinue', {
               attempt: this._autoContinueCount,
-              max: this.maxAutoContinues,
+              max: autoContinueCap,
               remaining: pendingTodos.length,
               stalled,
             });
@@ -1942,6 +2149,31 @@ export class Agent {
             remaining: pendingTodos.length,
             attempts: this._autoContinueCount,
           });
+        }
+
+        // Completion gate: the user named files this turn never went near.
+        //
+        // Last of the recovery checks on purpose — an open todo step, an
+        // announcement or a deferral all describe the turn more precisely, and
+        // each has already had its say by here. What is left is the turn that
+        // looks finished from every angle the loop can see and still stopped a
+        // file short of what was asked.
+        if (
+          !turnRecoveryState.unaddressedTargetsRetryUsed
+          && this.mode === 'build'
+          && !this._isLite
+          && !forceTextOnlyNextTurn
+          && toolCallCount > 0
+        ) {
+          const missed = unaddressedTargets(promptText, referencedInToolArgs);
+          if (missed.length) {
+            turnRecoveryState.unaddressedTargetsRetryUsed = true;
+            const targetList = missed.map(name => `\`${name}\``).join(', ');
+            this._queueNamedTurnOverlay('unaddressed_targets', { targetList });
+            emitter?.emit('loopRecovery', { reason: 'unaddressed_targets', iteration: iterations });
+            this._debugLog(emitter, 'turn.unaddressed_targets', { missed });
+            continue;
+          }
         }
 
         // Final assistant response
@@ -1977,6 +2209,9 @@ export class Agent {
         message: canonical.message,
       };
       const callNames = result.tool_calls.map(tc => tc.function?.name || 'unknown');
+      for (const tc of result.tool_calls) {
+        referencedInToolArgs += ` ${String(tc.function?.arguments || '').toLowerCase()}`;
+      }
       const explorationBatch = callNames.some(name => ['glob', 'grep', 'list_dir', 'file_info'].includes(name));
       const hasRepoMapInBatch = callNames.includes('repo_map');
       if (explorationBatch && !hasRepoMapInBatch && !repoMapUsedThisTurn && !turnRecoveryState.repoMapNudgeUsed) {
@@ -2451,6 +2686,7 @@ export class Agent {
       }
       setToolAbortSignal(null);
       setAgentTodoSink(null);
+      setSubagentRunner(null);
       setRetryNotifier(null);
     }
 
@@ -2477,6 +2713,7 @@ export class Agent {
     this._todoDoneIdx = new Set();
     this._todoFromBlock = false;
     this._todoFromMarkdown = false;
+    this._todoFromPlan = false;
     this._autoContinueCount = 0;
     this._editIntentActive = false;
   }

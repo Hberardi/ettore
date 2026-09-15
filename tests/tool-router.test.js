@@ -108,10 +108,17 @@ test('an overlay ordering an edit brings the toolchain with it', () => {
 });
 
 test('a sticky edit intent survives a bare continuation', () => {
-  const plain = route('continua');
+  // Probed at a cap the base set already fills. With slots to spare the router
+  // tops them up with run_checks/run_tests on purpose — a question-shaped
+  // prompt that cannot compile or run tests is the failure that motivated the
+  // fill — so the absence of a tool is no longer what stickiness means. What
+  // it means is priority: when the cap bites, a continuation of an edit task
+  // keeps its verification toolchain and a cold one does not.
+  const cap = { maxTools: 14 };
+  const plain = route('continua', cap);
   assert.equal(plain.includes('run_checks'), false);
 
-  const sticky = route('continua', { editIntentSticky: true });
+  const sticky = route('continua', { ...cap, editIntentSticky: true });
   assert.ok(sticky.includes('run_checks'));
   assert.ok(sticky.includes('run_tests'));
 });
@@ -148,6 +155,10 @@ test('the agent hands the write tools to the provider on a continuation turn', a
     workdir: process.cwd(),
     contextWindow: 128000,
     verifyAfterEdit: false,
+    // Same reason as the sticky-intent test above: at the default cap the
+    // router fills the spare slots with the verification tools whatever the
+    // prompt looks like, so intent has to be read where the cap bites.
+    maxToolsPerRequest: 14,
   }, 'build');
 
   await agent.run('modifica templates/components/navbar.html', new EventEmitter());
@@ -163,4 +174,37 @@ test('the agent hands the write tools to the provider on a continuation turn', a
   // A fresh question that asks for no change clears the intent again.
   await agent.run('spiegami come funziona il parser', new EventEmitter());
   assert.equal(routed[2].includes('run_checks'), false);
+});
+
+test('plan mode is never handed a tool that can change something', () => {
+  const planRoute = (prompt, extra = {}) => selectedToolNames(selectToolDefinitions(toolDefinitions, {
+    mode: 'plan', prompt, maxTools: 20, ...extra,
+  }));
+
+  // Each of these used to reach a shell or a process launcher through a branch
+  // that checked the prompt but not the mode.
+  const cases = [
+    ['modifica il parser e verifica i test', { verificationNeeded: true }],
+    ['controlla le dipendenze npm del progetto', {}],
+    ['controlla il server e i log runtime', {}],
+    ['esegui il comando di build nel terminale', {}],
+    ['aggiorna il sito e lancia i test', { verificationNeeded: true, mutationToolUsed: true }],
+  ];
+  const forbidden = [
+    'bash', 'bash_session', 'run_checks', 'run_tests',
+    'write', 'edit', 'apply_patch_structured',
+    'dev_server', 'browser_app', 'desktop_app',
+  ];
+  for (const [prompt, extra] of cases) {
+    const names = planRoute(prompt, extra);
+    for (const tool of forbidden) {
+      assert.equal(names.includes(tool), false, `plan mode was handed ${tool} for "${prompt}"`);
+    }
+  }
+
+  // The read-only runtime pair is still reachable — plan mode may look at
+  // what is already running.
+  const runtime = planRoute('controlla il server e i log runtime');
+  assert.ok(runtime.includes('read_server_console'));
+  assert.ok(runtime.includes('browser_check'));
 });

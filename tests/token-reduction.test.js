@@ -151,7 +151,7 @@ test('lossyShrink elides old tool results without LLM calls', () => {
   assert.equal(tailTool.content, 'E'.repeat(5000));
   // The old tool messages must be elided with the marker.
   const oldTool = after[1];
-  assert.match(oldTool.content, /\[elided — original 5000 chars\]/);
+  assert.match(oldTool.content, /\[elided 5000 chars/);
   assert.equal(oldTool.__lossyShrunk, true);
 });
 

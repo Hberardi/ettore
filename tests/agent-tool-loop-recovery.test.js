@@ -173,3 +173,69 @@ test('strictly guarded tools still dedupe on the second identical call', async (
   const blocked = await agent._shouldSkipDuplicateTool('grep', args);
   assert.match(blocked.reason, /Skipped duplicate grep call/);
 });
+
+test('a text-only turn that parks the work is asked once for the real answer', async () => {
+  const original = toolHandlers.webfetch;
+  toolHandlers.webfetch = async () => 'page content';
+  try {
+    let turn = 0;
+    const toolCounts = [];
+    const client = {
+      async turn(_messages, tools) {
+        turn++;
+        toolCounts.push(tools.length);
+        // Two identical batches trip the duplicate brake, which hands the
+        // model a turn with no tools at all.
+        if (turn <= 2) return toolTurn(`call_${turn}`, 'https://example.com/page');
+        if (turn === 3) {
+          return {
+            type: 'text',
+            content: 'Tool use ancora disabilitato — appena torna disponibile parto dallo step 1 senza ulteriori conferme.',
+          };
+        }
+        return { type: 'text', content: 'Ho letto la pagina: contiene il contenuto atteso. I test non sono stati eseguiti.' };
+      },
+    };
+    const emitter = new EventEmitter();
+    const recoveries = [];
+    emitter.on('loopRecovery', event => recoveries.push(event));
+    const agent = new Agent(client, config());
+    const answer = await agent.run('read this online page', emitter);
+
+    assert.match(answer, /Ho letto la pagina/);
+    assert.ok(recoveries.some(r => r.reason === 'deferred_work'), 'emette loopRecovery deferred_work');
+    // Turns 3 and 4 both ran with an empty tool route: the retry is for the
+    // answer, not for another attempt at calling tools.
+    assert.deepEqual(toolCounts.slice(2), [0, 0]);
+  } finally {
+    toolHandlers.webfetch = original;
+  }
+});
+
+test('a model that parks the work twice is not asked a third time', async () => {
+  const original = toolHandlers.webfetch;
+  toolHandlers.webfetch = async () => 'page content';
+  try {
+    let turn = 0;
+    const client = {
+      async turn(_messages, tools) {
+        turn++;
+        if (turn <= 2) return toolTurn(`call_${turn}`, 'https://example.com/page');
+        return { type: 'text', content: 'Riprendo appena i tool tornano disponibili.' };
+      },
+    };
+    const emitter = new EventEmitter();
+    const recoveries = [];
+    emitter.on('loopRecovery', event => recoveries.push(event));
+    const agent = new Agent(client, config());
+    await agent.run('read this online page', emitter);
+
+    assert.equal(
+      recoveries.filter(r => r.reason === 'deferred_work').length,
+      1,
+      'il nudge deliver_now vale una volta sola',
+    );
+  } finally {
+    toolHandlers.webfetch = original;
+  }
+});

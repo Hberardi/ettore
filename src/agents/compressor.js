@@ -97,6 +97,51 @@ function sanitizeToolResult(content) {
   return safe.slice(0, 3000); // hard cap on individual tool outputs
 }
 
+// The arguments that say *what* a call was about, in the order they identify
+// it. One is enough: "read(file_path=src/app.js)" tells the model everything it
+// needs to fetch the content back.
+const IDENTIFYING_ARGS = ['file_path', 'path', 'pattern', 'command', 'query', 'url', 'symbol'];
+
+function describeCallArgs(raw) {
+  let args;
+  try {
+    args = JSON.parse(String(raw || '{}'));
+  } catch {
+    return '';
+  }
+  if (!args || typeof args !== 'object') return '';
+  for (const key of IDENTIFYING_ARGS) {
+    const value = args[key];
+    if (typeof value === 'string' && value.trim()) {
+      return `${key}=${value.trim().replace(/\s+/g, ' ').slice(0, 80)}`;
+    }
+  }
+  return '';
+}
+
+// Maps each tool_call_id to a short "what produced this" label.
+//
+// A tool result message carries only its id and its content, so once the
+// content is elided the model is left holding an anonymous stump: the old
+// stamp was "[elided — original 12345 chars] 1\timport foo…", which does not
+// say which file that came from, and the system prompt's advice to "re-read a
+// narrower range" is unusable when the range's file is unknown. Reading the
+// name and the identifying argument back off the assistant turn that made the
+// call is what makes the elision recoverable.
+function toolCallOrigins(messages) {
+  const origins = new Map();
+  for (const message of messages) {
+    if (!Array.isArray(message?.tool_calls)) continue;
+    for (const call of message.tool_calls) {
+      const name = call?.function?.name;
+      if (!call?.id || !name) continue;
+      const args = describeCallArgs(call.function?.arguments);
+      origins.set(call.id, args ? `${name}(${args})` : `${name}()`);
+    }
+  }
+  return origins;
+}
+
 function serializeForCompression(messages) {
   return messages.map(m => {
     if (m.role === 'tool') {
@@ -222,15 +267,22 @@ export class ContextCompressor {
       if (pending < LOSSY_BATCH) return messages;
     }
 
+    const origins = toolCallOrigins(messages);
     const shrunkenHead = head.map((m) => {
       if (m.role !== 'tool') return m;
       const text = String(m.content || '');
       if (text.length <= maxChars * 2) return m;
       const firstNL = text.indexOf('\n');
       const firstLine = firstNL >= 0 ? text.slice(0, firstNL) : text.slice(0, headTail);
+      // Name the call and say what to do about it. An edit written against a
+      // file whose content was silently elided is a wrong edit, and the model
+      // has no way to know the content is gone unless the stump says so.
+      const origin = origins.get(m.tool_call_id);
+      const from = origin ? ` from ${origin}` : '';
       return {
         ...m,
-        content: `[elided — original ${text.length} chars] ${firstLine.slice(0, headTail)}…`,
+        content: `[elided ${text.length} chars${from} — content no longer in context;`
+          + ` call it again if you need the exact output] ${firstLine.slice(0, headTail)}…`,
         __lossyShrunk: true,
       };
     });

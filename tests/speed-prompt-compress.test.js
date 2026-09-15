@@ -212,7 +212,7 @@ test('without an observed cache, elision stays eager', () => {
   c.noteCacheActivity({ cacheRead: 0, cacheCreate: 0 });
   const out = c.lossyShrink(messages, { keepLast: 2 });
   assert.notEqual(out, messages);
-  assert.match(String(out[3].content), /\[elided — original 20000 chars\]/);
+  assert.match(String(out[3].content), /\[elided 20000 chars/);
 });
 
 test('near the threshold the batch is not waited for', () => {

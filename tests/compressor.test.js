@@ -54,3 +54,54 @@ test('hard guard reserves output space on small context windows', () => {
   assert.equal(c.getHardGuardLimit(16000, 8192), 8000);
   assert.ok(c.getHardGuardLimit(128000, 8192) < 128000);
 });
+
+test('an elided tool result still says which call produced it', () => {
+  const c = new ContextCompressor(null, {});
+  const messages = [{ role: 'system', content: 'sys' }];
+  // Enough turns that the first results fall outside keepLast, and enough
+  // bulk that lossyShrink's half-threshold gate opens.
+  for (let i = 0; i < 12; i++) {
+    messages.push({
+      role: 'assistant',
+      content: '',
+      tool_calls: [{
+        id: `call_${i}`,
+        function: { name: 'read', arguments: JSON.stringify({ file_path: `src/mod_${i}.js` }) },
+      }],
+    });
+    messages.push({
+      role: 'tool',
+      tool_call_id: `call_${i}`,
+      content: `1\timport foo\n${'y'.repeat(4000)}`,
+    });
+  }
+
+  const shrunk = c.lossyShrink(messages);
+  const elided = shrunk.filter(m => m.__lossyShrunk);
+  assert.ok(elided.length > 0, 'nothing was elided — fixture is too small');
+  for (const message of elided) {
+    const index = message.tool_call_id.split('_')[1];
+    assert.match(message.content, /read\(file_path=src\/mod_\d+\.js\)/);
+    assert.ok(
+      message.content.includes(`src/mod_${index}.js`),
+      `elision names the wrong call: ${message.content.slice(0, 120)}`,
+    );
+    assert.match(message.content, /call it again/);
+  }
+});
+
+test('an elided result with no matching call degrades to the plain stamp', () => {
+  const c = new ContextCompressor(null, {});
+  const messages = [{ role: 'system', content: 'sys' }];
+  for (let i = 0; i < 12; i++) {
+    messages.push({ role: 'assistant', content: `step ${i}` });
+    messages.push({ role: 'tool', tool_call_id: `orphan_${i}`, content: 'z'.repeat(4000) });
+  }
+
+  const shrunk = c.lossyShrink(messages);
+  const elided = shrunk.filter(m => m.__lossyShrunk);
+  assert.ok(elided.length > 0);
+  for (const message of elided) {
+    assert.match(message.content, /^\[elided \d+ chars — content no longer in context;/);
+  }
+});

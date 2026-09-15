@@ -8,6 +8,95 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-09-15
+
+### Fixed — the `<plan>` block was never parsed
+
+Both parse sites handed `extractPlan()` the *captured body* of the block, but
+that function matches `<plan>…</plan>` itself, so its first regex never matched
+and it returned `null` every time. No plan was ever emitted: the UI panel never
+filled, and the planning reminder — about a kilobyte appended to every
+non-trivial turn — was paid for and thrown away.
+
+### Fixed — a plan with unfinished steps now continues instead of stopping
+
+Even once parsed, nothing in the loop read the plan: auto-continue looks only at
+the todo list. A model that outlined five steps, executed two and stopped ended
+the turn with no pending todos and no nudge, and the user had to notice the
+missing work and type "continua". The plan now seeds the todo list when the
+model has not written one with `todo_write`, on a shorter leash than a declared
+plan — four auto-continues rather than thirty, because a list the agent inferred
+is not a list the model is tracking.
+
+### Fixed — the router no longer withholds the tools a turn needs
+
+Intent regexes decided not just which tools to prioritise but which ones existed
+at all. "controlla se il progetto compila" and "quanti test falliscono?" matched
+no family and reached the model with no `bash`, no `run_checks` and no
+`run_tests` — nothing that can compile or run anything — so the answer was
+improvised from reading source. "il bottone non risponde quando ci clicco" never
+matched the runtime family, because `click|clicca` matches neither "clicco" nor
+"cliccando" and no word for the thing being clicked was listed. Build mode was
+also missing `glob`, `list_dir` and `file_info` while its system prompt
+instructed the model to use them.
+
+Intent now decides priority; availability is decided by whether there is room.
+`glob` and `bash` join the base build set, spare slots are filled with the tools
+whose absence hurts most, and the per-request cap moves from 16 to 20 — the base
+set alone was 15, so the contextual families had been competing for one slot.
+
+### Fixed — plan mode could be handed a shell
+
+The verification branch added `bash`, `bash_session`, `run_checks` and
+`run_tests` to the routed set without checking the mode, so a plan-mode turn
+whose prompt tripped the verification flag received a shell in the one mode
+whose whole promise is that it will not change anything. The dependency and
+runtime branches had the same hole (`bash`, and `dev_server`/`browser_app`/
+`desktop_app`). Plan mode now gets only the read-only halves.
+
+### Added — `explore`, a read-only sub-agent for searches
+
+Answers one question in a separate context and returns a short report with
+file:line references. The greps and full-file reads behind it never enter the
+main conversation — which is the point: exploration output is what fills the
+context, is re-sent every turn, and is the first thing the compressor elides, so
+by the time the edit is written the context is full of the search and short of
+the code. Read-only by construction (it runs in plan mode), cannot delegate
+again, and is bounded at 12 iterations.
+
+### Fixed — an elided tool result now says what it was
+
+`lossyShrink` replaced old tool output with `[elided — original 12345 chars]`
+followed by its first line, which does not say which call produced it. The
+system prompt's advice to "re-read a narrower range" is unusable when the
+range's file is unknown, and an edit written against a file whose content was
+silently dropped is a wrong edit. The stamp now names the call and its
+identifying argument, and says the content is gone.
+
+### Added — a completion gate for files the turn never opened
+
+The loop could already see an announcement, a deferral and an unticked step.
+What it could not see was the quiet half-finish: two files asked for, one
+touched, a confident summary, turn over. When the prompt names a file and no
+tool call in the whole turn went near it, the turn gets one chance to say what
+happened to it.
+
+### Fixed — a turn that runs out of tools now answers instead of promising to resume
+
+When the tool loop stops early — a duplicate batch, the tool-call budget, the
+iteration ceiling — the model gets one last turn with no tools, to report what
+it found. That turn was introduced with "tool use is now disabled for this
+recovery turn", which reads like an outage that will pass, and models answered
+accordingly: *"appena tornano disponibili parto dallo step 1"*. Nothing ever
+resumes it. The turn ended with the user holding a promise instead of an answer,
+and the work already done went unreported.
+
+The overlay now states the part that was missing — the tools are not coming
+back, and nothing postponed gets picked up unless the user writes again — and a
+second check catches the model that parks the work anyway: the deferring
+sentence is quoted back to it and the real answer asked for, once. Once only,
+because a model that parks the work twice will not deliver on the third ask.
+
 ## [1.4.4] — 2026-09-13
 
 ### Fixed — a repeated shell command now stops at the fourth call, not the eightieth

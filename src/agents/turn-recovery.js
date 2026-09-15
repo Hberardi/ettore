@@ -34,7 +34,7 @@ export function responseAnnouncesUnexecutedAction(text) {
   if (/(?:^|\n)\s*(piano|plan|prossim[oa]\s+pass[oi]?|next\s+steps?)\s*[:.]/i.test(body)) {
     return true;
   }
-  if (/(?:^|\n|\.\s+)\s*(?:ora\s+|adesso\s+)?(scrivo|creo|aggiorno|modifico|implemento|sistemo|applico|procedo|sostituisco|aggiungo|rimuovo|inserisco|riscrivo)\b/i.test(body)) {
+  if (/(?:^|\n|\.\s+)\s*(?:ora\s+|adesso\s+)?(scrivo|creo|aggiorno|modifico|implemento|sistemo|applico|procedo|proseguo|riparto|riprendo|sostituisco|aggiungo|rimuovo|inserisco|riscrivo)\b/i.test(body)) {
     return true;
   }
   if (/(?:^|\n|\.\s+)\s*(?:ora\s+|adesso\s+)?(diagnostico|verifico|controllo|analizzo|esamino|ispeziono|indago|leggo|apro|esploro|mappo|cerco(?!\s+di\b))\b(?:\s+(?:subito|ora|adesso))?/i.test(body)) {
@@ -60,6 +60,36 @@ export function extractAnnouncement(text) {
   // than quoting the title of the plan.
   const specific = matches.find(line => !/^\s*(piano|plan)\s*[:.]/i.test(line));
   return (specific || matches[0]).slice(0, 160);
+}
+
+// The "I'll do it later" shape, which an announcement detector misses by
+// design: the model is not claiming to act now, it is parking the work on a
+// condition it cannot observe — usually the tools coming back. Nothing wakes
+// it up, so the turn ends with the user holding a promise instead of an answer.
+const RESUMPTION_VERBS = /\b(?:parto|riparto|riprendo|riprender[oò]|continuo|continuer[oò]|proseguo|proseguir[oò]|procedo|attendo|aspetto|riprendiamo|i'?ll\s+(?:resume|restart|continue|proceed|start|retry|pick\s+up)|i\s+will\s+(?:resume|continue|proceed|start)|resuming|waiting|standing\s+by)\b/i;
+
+const DEFERRAL_CONDITIONS = /(?:\bappena\b|\bquando\b|\bpi[uù]\s+tardi\b|\bin\s+seguito\b|\bsuccessivamente\b|\bpi[uù]\s+avanti\b|\bprossimo\s+turno\b|\bas\s+soon\s+as\b|\bonce\b|\bwhen\s+(?:the\s+)?tools?\b|\blater\b|\bnext\s+turn\b)/i;
+
+// The outage named outright. Checked only on a turn that already has no tools,
+// where there is no innocent reading of "i tool sono disabilitati" — outside
+// that gate the same sentence could be the model explaining itself correctly.
+const TOOL_STATE = /\b(?:tool|tools|strument[oi])\b[^.\n]{0,48}\b(?:disabilitat\w*|disattivat\w*|non\s+disponibil\w*|bloccat\w*|torn\w+|ritorn\w+|riattiv\w+|disponibil\w*|disabled|unavailable|blocked|back|available|re-?enabled)/i;
+
+export function responseDefersWork(text) {
+  const body = String(text || '');
+  if (!body.trim()) return false;
+  if (TOOL_STATE.test(body)) return true;
+  return RESUMPTION_VERBS.test(body) && DEFERRAL_CONDITIONS.test(body);
+}
+
+// The sentence that did the deferring, quoted back at the model — the same
+// trick [[extractAnnouncement]] uses, and for the same reason.
+export function extractDeferral(text) {
+  const match = String(text || '')
+    .split(/\n|(?<=[.!?])\s+/)
+    .map(line => line.trim())
+    .find(line => line && responseDefersWork(line));
+  return match ? match.slice(0, 160) : '';
 }
 
 // Phrases that only make sense when the whole job is over. Deliberately
@@ -120,6 +150,75 @@ export function modelDeclaredCompletion(text) {
 }
 
 
+// ── Targets the user named and the turn never went near ─────────────────────
+//
+// The loop can already tell when the model announced work it did not do, when
+// it deferred, and when a declared step is still open. What none of those see
+// is the quiet half-finish: "aggiorna navbar.html e footer.html", two files
+// asked for, one touched, a confident summary, turn over. No step was left
+// unticked because no step list existed, nothing was announced, nothing was
+// deferred — the work simply stopped one file short.
+//
+// A file the user named by path is a file the turn is about. If no tool call
+// in the whole turn so much as mentioned it, the request was not carried out
+// on it, and that is checkable without spending an LLM call on a judge.
+
+// Extensions that make a token a file rather than a version string or a
+// sentence. Deliberately an allowlist: `1.4.4`, `v2.0` and `etc.` all look
+// like paths to a permissive pattern.
+const FILE_EXT = new RegExp(
+  '\\.(?:js|mjs|cjs|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|php'
+  + '|sh|bash|zsh|json|jsonc|ya?ml|toml|ini|env|cfg|conf|md|mdx|rst|txt|csv|tsv'
+  + '|css|scss|sass|less|html?|xml|svg|vue|svelte|sql|proto|lock|gradle|make)$',
+  'i',
+);
+
+// `Node.js`, `Vue.js` and friends are the names of tools, not files in the
+// repository, and a prompt that mentions the runtime must not be read as a
+// request to edit a file called after it.
+const NOT_A_FILE = new Set([
+  'node.js', 'next.js', 'nuxt.js', 'vue.js', 'react.js', 'three.js', 'd3.js',
+  'express.js', 'ember.js', 'backbone.js', 'chart.js', 'jquery.js', 'alpine.js',
+  'socket.io', 'crypto.js', 'js', 'ts',
+]);
+
+const PATH_TOKEN_RE = /[A-Za-z0-9_@.~-]+(?:\/[A-Za-z0-9_@.~-]+)*/g;
+
+export function promptFileTargets(prompt) {
+  const text = String(prompt || '');
+  const found = [];
+  const seen = new Set();
+  for (const raw of text.match(PATH_TOKEN_RE) || []) {
+    const token = raw.replace(/[.,;:!?]+$/, '');
+    if (!FILE_EXT.test(token)) continue;
+    const key = token.toLowerCase();
+    if (NOT_A_FILE.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    found.push(token);
+    // A prompt naming a dozen files is a bulk request; chasing each one turns
+    // the gate into the thing that never lets a turn end.
+    if (found.length >= 6) break;
+  }
+  return found;
+}
+
+/**
+ * Targets from the prompt that no tool call in the turn referred to.
+ *
+ * `referenced` is the concatenation of every tool call's arguments for the
+ * turn — matching on the basename is deliberately loose: a turn that read
+ * `./src/navbar.html` or grepped for `navbar.html` has demonstrably gone near
+ * the file, and the gate is here to catch the file nothing went near at all.
+ */
+export function unaddressedTargets(prompt, referenced = '') {
+  const haystack = String(referenced || '').toLowerCase();
+  if (!haystack) return promptFileTargets(prompt);
+  return promptFileTargets(prompt).filter((target) => {
+    const base = target.split('/').pop().toLowerCase();
+    return !haystack.includes(base);
+  });
+}
+
 export function toolBatchNeedsSequential(validTools = []) {
   if (validTools.length <= 1) return false;
   const names = validTools.map(t => t.name);
@@ -162,7 +261,14 @@ export function createTurnRecoveryState() {
     maxWorkspaceEditRetries: 2,
     lastWorkspaceEditProgress: null,
     verifyRetryUsed: false,
+    // One shot only. A model that parks the work twice is not going to deliver
+    // on a third ask, and each attempt costs a full round-trip.
+    deferralRetryUsed: false,
     repoMapNudgeUsed: false,
+    // One shot. The gate is a safety net for the half-finished turn, not a
+    // negotiation: a model that answers the first ask with another summary
+    // will answer the second one the same way.
+    unaddressedTargetsRetryUsed: false,
     // Resumes spent on a reply the provider cut off at max_tokens. Bounded so
     // a model that only ever emits 8k of prose cannot spin the turn forever.
     truncationResumes: 0,
@@ -188,6 +294,12 @@ export function buildTurnOverlay(kind, data = {}) {
       + 'Do not restate the plan and do not announce what you are about to do — that is what stalled the last turn. Either call the tools that finish the next step right now, or, if a step cannot be done, say which one and why in one sentence. Mark each finished step with todo_write (or a <done:N> marker) so progress is actually recorded.',
     auto_continue: ({ attempt, max, pendingLines }) =>
       `You stopped, but the following steps from your initial plan are still incomplete (auto-continue ${attempt}/${max}):\n${pendingLines}\n\nContinue without asking for confirmation. Use tools, emit <done:N> markers as you complete each, and only stop when every item is done or you genuinely need user input.`,
+    unaddressed_targets: ({ targetList }) =>
+      `The request named ${targetList}, and nothing in this turn read, searched or changed `
+      + 'it — so whatever was asked for it has not been done. Either carry out the request on it now '
+      + '(locate it first if you do not know where it is), or, if it should genuinely be left alone — '
+      + 'it does not exist, the change does not apply to it, the user meant something else — say which '
+      + 'and why in one sentence. Do not repeat the summary you just gave.',
     repo_map_first: () =>
       'Before broad exploration, call repo_map first to build a high-level repository map. Then continue with targeted glob/grep/read calls only where needed.',
     invalid_tool_call: ({ streak, max }) =>
@@ -199,8 +311,25 @@ export function buildTurnOverlay(kind, data = {}) {
       + ` Continue from exactly where it stopped (resume ${attempt}/${max}), mid-sentence if that is where the cut fell.`
       + ' Do not restart, do not repeat what you already wrote, and do not summarize it. If the cut landed inside a tool call, issue that tool call again now as a proper native call.'
       + ' Keep the remainder shorter: finish the work in the tokens you have left.',
+    // "Tool use is now disabled for this recovery turn" read to the model like
+    // a temporary outage it could sit out, and models answered by promising to
+    // resume "as soon as tools are back" — which nothing ever triggers. The
+    // wording now states the part that was missing: there is no later.
     tool_loop_finalize: ({ reason }) =>
-      `Tool use is now disabled for this recovery turn because ${reason || 'the tool loop stopped making progress'}. Do not request or simulate more tool calls. Use the results and images already present in the conversation, answer the user directly, and clearly state any limitation or failed fetch.`,
+      `This is the last turn of this request and it runs without tools, because ${reason || 'the tool loop stopped making progress'}.`
+      + ' The tools are not coming back later in this turn, and nothing you postpone gets picked up automatically:'
+      + ' no further work happens unless the user sends a new message.'
+      + ' So do not announce next steps, do not promise to resume, and do not wait for anything to become available.'
+      + ' Answer now from the results already in this conversation — what you did, what you found —'
+      + ' and state plainly what stayed incomplete or failed, so the user can decide what to ask for next.'
+      + ' Do not request or simulate more tool calls.',
+    // Second line of defence for when the model defers anyway.
+    deliver_now: ({ quote }) =>
+      'Your last answer postponed the work instead of delivering it'
+      + (quote ? ` ("${quote}")` : '')
+      + '. Nothing resumes on its own: this turn has no tools, and there is no later turn unless the user writes again.'
+      + ' Replace that answer now with the real one — report what you actually did and found in this conversation,'
+      + ' name what is still incomplete, and stop there. No plans, no promises, no waiting.',
   };
   const template = templates[kind];
   if (!template) return '';

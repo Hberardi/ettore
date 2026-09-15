@@ -11,11 +11,29 @@ const BASE_PLAN = [
   'ask_user',
 ];
 
+// `glob`, `list_dir` and `file_info` were in BASE_PLAN but not here, so build
+// mode shipped a system prompt telling the model to "use glob/grep for
+// targeted drill-down" and to "prefer list_dir/file_info over bash for project
+// inspection" while routing away every one of those tools. The model was left
+// with `grep` and a rule it could not follow.
 const BASE_BUILD = [
   'repo_map',
   'repo_find_symbol',
   'read',
   'grep',
+  'glob',
+  // Delegating a search costs nothing when it is not used and saves the
+  // context that a search would otherwise fill, so it belongs in the base set
+  // rather than behind a keyword: the turns that need it are exactly the ones
+  // whose wording gives no hint that a long search is coming.
+  'explore',
+  // The universal escape hatch, and the one whose absence hurts most: it used
+  // to be gated on a shell-intent regex, so any turn phrased as a question
+  // rather than an order arrived unable to run a single command. The system
+  // prompt's "prefer list_dir/file_info/git_status over bash" is what keeps it
+  // from being over-used; routing it away only made the tasks that genuinely
+  // needed a shell impossible.
+  'bash',
   'git_status',
   'git_diff',
   'ask_user',
@@ -43,7 +61,52 @@ const VERIFY_TOOLS = ['run_checks', 'run_tests', 'bash', 'bash_session', 'read',
 const WEB_TOOLS = ['websearch', 'webfetch', 'web_image'];
 const DOCUMENT_TOOLS = ['read_pdf', 'read_doc'];
 const RUNTIME_TOOLS = ['dev_server', 'browser_app', 'desktop_app', 'browser_check', 'read_server_console'];
+// The read-only half, for plan mode: look at what is already running, start
+// nothing and drive nothing.
+const PLAN_RUNTIME_TOOLS = ['browser_check', 'read_server_console'];
 const DEPENDENCY_TOOLS = ['dep_inspect', 'bash'];
+
+// Tools that top up whatever slots the intent families leave free.
+//
+// Intent matching decides *priority*; it must not decide *availability* while
+// the request still has room. It used to do both, and the cost was a model
+// that could not do the job it was handed: "controlla se il progetto compila"
+// and "quanti test falliscono?" matched no family, so they reached the model
+// with no `bash`, no `run_checks` and no `run_tests` — nothing that can
+// compile or run anything — and the answer was improvised from reading source.
+// "il bottone non risponde" arrived without `browser_app`.
+//
+// Order is by how badly the absence hurts: not being able to run a command at
+// all comes first, driving a real app next, the network last. Tools with a
+// per-call price or a narrow pipeline (music video, video_describe, web_image,
+// desktop_app) are deliberately absent — those stay intent-gated.
+const BUILD_FILL = [
+  'run_checks',
+  'run_tests',
+  'list_dir',
+  'file_info',
+  'bash_session',
+  'read_server_console',
+  'dev_server',
+  'browser_app',
+  'websearch',
+  'webfetch',
+  'browser_check',
+  'dep_inspect',
+  'read_pdf',
+  'read_doc',
+];
+
+// Plan mode promises to read and not to write, so its fill is read-only.
+const PLAN_FILL = [
+  'read_server_console',
+  'browser_check',
+  'dep_inspect',
+  'websearch',
+  'webfetch',
+  'read_pdf',
+  'read_doc',
+];
 
 const EDIT_INTENT_RE = /\b(edit|modify|change|update|fix|create|write|implement|patch|refactor|build|add|remove|rename|modifica|cambia|aggiorna|correggi|crea|scrivi|implementa|sistema|aggiungi|rimuovi|rinomina)\b/i;
 // A recovery overlay demanding an edit is an edit request, whoever wrote it.
@@ -60,7 +123,13 @@ const VIDEO_INTENT_RE = /\b(youtube|youtu\.be|video|trascrivi|transcript)\b/i;
 // walked through a pipeline it had never been handed the tools to run.
 const MUSIC_VIDEO_TOOLS = ['audio_read', 'generate_scene_image', 'generate_scene_clip', 'lyrics_to_srt', 'assemble_music_video'];
 const MUSIC_VIDEO_INTENT_RE = /\b(music ?video|video ?musicale|videoclip|canzone|song|brano|mp3|wav|flac|lyrics|testo della canzone|storyboard)\b/i;
-const RUNTIME_INTENT_RE = /\b(server|browser|page|frontend|runtime|console|logs?|localhost|porta|errore.*avvio|app|apps?|webapp|desktop|gui|ui|window|finestra|schermata|screenshot|click|clicca|electron|tk|qt|gtk|prova(?:re|la|lo)?|test(?:are|a)?\s+l['’]?app)\b/i;
+// Bug reports about a running interface rarely name the runtime: what the user
+// writes is "il bottone non risponde quando ci clicco" or "il menu non si
+// vede". `click|clicca` matched neither "clicco" nor "cliccando", and no word
+// for the thing being clicked was listed at all, so the turn that most needed
+// to open the app and read its console was the one routed without the tools
+// that can.
+const RUNTIME_INTENT_RE = /\b(server|browser|page|frontend|runtime|console|logs?|localhost|porta|errore.*avvio|app|apps?|webapp|desktop|gui|ui|window|finestra|schermata|screenshot|clicc\w*|click\w*|bottone|bottoni|pulsante|pulsanti|button|menu|men[uù]|form|electron|tk|qt|gtk|prova(?:re|la|lo)?|test(?:are|a)?\s+l['’]?app)\b/i;
 const DEPENDENCY_INTENT_RE = /\b(dependenc|package|npm|pnpm|yarn|pip|cargo|vulnerab|audit|dipendenz|pacchett)\b/i;
 const SHELL_INTENT_RE = /\b(command|shell|terminal|bash|script|execute|run|comando|terminale|esegui)\b/i;
 
@@ -190,9 +259,12 @@ export function selectToolDefinitions(definitions = [], context = {}) {
   if (editIntent) {
     addMany(selected, EXEC_TOOLS);
   }
-  if (/verify|did not verify|quality checks?/i.test(overlay) || context.verificationNeeded) {
+  // Build only. VERIFY_TOOLS carries `bash`, `run_checks`, `run_tests` and
+  // `bash_session`, and this branch had no mode check — so a plan-mode turn
+  // whose prompt tripped the verification flag was handed a shell, in the one
+  // mode whose whole promise to the user is that it will not change anything.
+  if (mode === 'build' && (/verify|did not verify|quality checks?/i.test(overlay) || context.verificationNeeded)) {
     addMany(selected, VERIFY_TOOLS);
-    contextualPriority.push(...VERIFY_TOOLS);
   }
   if (/repo_map first/i.test(overlay)) selected.add('repo_map');
   if (WEB_INTENT_RE.test(prompt)) {
@@ -217,12 +289,19 @@ export function selectToolDefinitions(definitions = [], context = {}) {
     contextualPriority.unshift(...MUSIC_VIDEO_TOOLS);
   }
   if (RUNTIME_INTENT_RE.test(prompt)) {
-    addMany(selected, RUNTIME_TOOLS);
-    contextualPriority.push(...RUNTIME_TOOLS);
+    // Starting a dev server or driving a real app is not reading, so plan mode
+    // gets only the two that observe something already running — the same two
+    // its system prompt tells the model it has.
+    const runtime = mode === 'build' ? RUNTIME_TOOLS : PLAN_RUNTIME_TOOLS;
+    addMany(selected, runtime);
+    contextualPriority.push(...runtime);
   }
   if (DEPENDENCY_INTENT_RE.test(prompt)) {
-    addMany(selected, DEPENDENCY_TOOLS);
-    contextualPriority.push(...DEPENDENCY_TOOLS);
+    // `dep_inspect` reads; the `bash` beside it does not, and asking about npm
+    // packages is not consent to run them.
+    const dependency = mode === 'build' ? DEPENDENCY_TOOLS : ['dep_inspect'];
+    addMany(selected, dependency);
+    contextualPriority.push(...dependency);
   }
   if (mode === 'build' && SHELL_INTENT_RE.test(prompt)) {
     selected.add('bash');
@@ -232,6 +311,18 @@ export function selectToolDefinitions(definitions = [], context = {}) {
 
   const maxTools = Math.max(4, Number(context.maxTools) || 16);
   const byName = new Map(definitions.map(tool => [tool.function?.name, tool]));
+
+  // Top up the free slots. The intent families above answer "what does this
+  // prompt look like"; they are not an answer to "what might this turn need",
+  // and while slots are still free the second question has no reason to be
+  // decided by the first. See BUILD_FILL for what the old behaviour cost.
+  const fill = mode === 'plan' ? PLAN_FILL : BUILD_FILL;
+  for (const name of fill) {
+    if (selected.size >= maxTools) break;
+    if (selected.has(name) || !byName.has(name)) continue;
+    selected.add(name);
+  }
+
   const ordered = [];
   for (const tool of definitions) {
     if (selected.has(tool.function?.name)) ordered.push(tool);
@@ -268,19 +359,32 @@ export function selectToolDefinitions(definitions = [], context = {}) {
   const pluginRest = ranked.slice(pluginFloor);
 
   const priority = [
+    // Find the code, read it, change it — in that order, and ahead of anything
+    // a keyword match brought in. `glob` belongs with read/grep: they are the
+    // same job, locating the code the turn is about.
     'repo_map',
     'read',
     'grep',
+    'glob',
     'ask_user',
     // Ahead of the contextual families: losing the ability to write to make
     // room for, say, a web search is never the right trade in build mode.
     ...(mode === 'build' ? MUTATION_TOOLS : []),
+    // Then the three whose absence changes what the agent can do at all: run a
+    // command, record a finished step — the progress panel and the
+    // auto-continue both read what todo_write writes, and a turn with no way
+    // to mark a step reads to the loop exactly like a turn that finished none
+    // — and see what is already modified.
+    'bash',
+    'todo_write',
+    'git_status',
     // Prompt-relevant families outrank a generic plugin tool: they were chosen
     // because of what was asked, and the plugin share was not.
     ...contextualPriority,
     ...(editIntent ? EDIT_TOOLS : []),
     ...pluginGuaranteed,
     ...(mode === 'plan' ? BASE_PLAN : BASE_BUILD),
+    ...fill,
     ...pluginRest,
   ];
   const result = [];
