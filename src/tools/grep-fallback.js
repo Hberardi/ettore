@@ -37,11 +37,11 @@ function looksBinary(buffer) {
   return false;
 }
 
-function buildMatcher({ pattern, fixed = false, wholeWord = false }) {
+function buildMatcher({ pattern, fixed = false, wholeWord = false, ignoreCase = false }) {
   const source = fixed ? String(pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : String(pattern);
   const body = wholeWord ? `\\b(?:${source})\\b` : source;
   try {
-    return new RegExp(body);
+    return new RegExp(body, ignoreCase ? 'i' : '');
   } catch (err) {
     // An invalid regex is a user error worth reporting, not a crash.
     const error = new Error(`invalid search pattern: ${err.message}`);
@@ -59,6 +59,8 @@ function buildMatcher({ pattern, fixed = false, wholeWord = false }) {
  * @param {string} [opts.include]  glob limiting which files are read, e.g. "*.js"
  * @param {boolean} [opts.fixed]   treat `pattern` as a literal string
  * @param {boolean} [opts.wholeWord] wrap the pattern in word boundaries
+ * @param {boolean} [opts.ignoreCase] match regardless of case
+ * @param {boolean} [opts.filesOnly] report each matching file once, as a bare path
  * @param {number} [opts.maxMatches]
  * @param {AbortSignal} [opts.signal]
  * @returns {Promise<string>} `path:line:text` lines, newline separated
@@ -69,12 +71,14 @@ export async function searchFiles({
   include,
   fixed = false,
   wholeWord = false,
+  ignoreCase = false,
+  filesOnly = false,
   maxMatches = 200,
   signal = null,
   globFn = globby,
   readFileFn = readFile,
 } = {}) {
-  const matcher = buildMatcher({ pattern, fixed, wholeWord });
+  const matcher = buildMatcher({ pattern, fixed, wholeWord, ignoreCase });
   const root = path || process.cwd();
 
   // `include` is a bare filename glob ("*.js") in both grep's --include and
@@ -113,7 +117,12 @@ export async function searchFiles({
     for (let i = 0; i < fileLines.length; i++) {
       if (lines.length >= maxMatches) break;
       const line = fileLines[i].endsWith('\r') ? fileLines[i].slice(0, -1) : fileLines[i];
-      if (matcher.test(line)) lines.push(`${file}:${i + 1}:${line}`);
+      if (!matcher.test(line)) continue;
+      if (filesOnly) {
+        lines.push(file);
+        break;
+      }
+      lines.push(`${file}:${i + 1}:${line}`);
     }
   }
 

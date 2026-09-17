@@ -1066,6 +1066,25 @@ export async function startApp(options = {}) {
   // The turn ended with plan steps still open. Without this the run just stops
   // on whatever the model last said — usually an announcement of work it never
   // did — and the CLI looks like it froze.
+  // Release gate: the agent refused to end the turn on unverified or red code.
+  emitter.on('releaseGate', ({ status, attempt, max }) => {
+    const text = status === 'open'
+      ? '✓ Test verdi — modifiche verificate'
+      : status === 'exhausted'
+        ? '⚠ Test non verdi dopo tutti i tentativi — modifiche NON verificate'
+        : status === 'suite_failing'
+          ? `✗ Test rossi — rilascio bloccato, correzione ${attempt}/${max}`
+          : `▸ Modifiche non verificate — rilascio bloccato, verifica ${attempt}/${max}`;
+    tui.messages.push({ role: 'system', text, tools: [], id: Date.now() });
+    if (status !== 'open' && status !== 'exhausted' && tui.streaming) {
+      tui.streaming.text = '';
+      tui.streaming.reasoning = '';
+      tui.streaming.waitKind = 'model';
+      tui.streaming.lastActivityAt = Date.now();
+    }
+    tui.needsRender = true;
+  });
+
   emitter.on('autoContinueExhausted', ({ reason, remaining, attempts, pending = [] }) => {
     if (autoResumeCount >= MAX_AUTO_RESUMES) {
       const why = reason === 'no_progress'

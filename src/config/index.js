@@ -164,6 +164,9 @@ export async function loadConfig(options = {}) {
     // How many times the TUI silently re-prompts the model to finish an
     // unfinished task before handing control back to the user.
     maxAutoResumes: numFrom('maxAutoResumes'),
+    // Fix-and-rerun rounds a build turn gets when the test suite is red before
+    // it ends with an explicit "not verified" warning. See agents/release-gate.js.
+    maxReleaseGateRetries: numFrom('maxReleaseGateRetries'),
     // Dynamic routing reduces tool-schema tokens and malformed calls by only
     // exposing tools relevant to the current request.
     dynamicToolRouting: boolFrom('dynamicToolRouting', true),

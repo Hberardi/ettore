@@ -5,35 +5,56 @@ import { ContextCompressor, estimateTokens } from '../src/agents/compressor.js';
 import { normalizeMessagesForAnthropic } from '../src/llm/client.js';
 
 // ── Intervento A: tool output truncation tightened ─────────────────────────
-test('_summarizeToolOutputForContext truncates well below the old 14k cap', () => {
+test('_summarizeToolOutputForContext caps generic output around 6k', () => {
   const client = { turn: async () => ({ type: 'text', content: '' }) };
   const agent = new Agent(client, {
     provider: 'test', model: 'gpt-4o', modelCapability: 'full',
     workdir: process.cwd(), contextWindow: 128000, verifyAfterEdit: false,
   });
   const huge = 'a'.repeat(20_000);
-  const out = agent._summarizeToolOutputForContext('bash', { command: 'ls' }, huge);
-  // Old threshold was 14_000 — anything over 6000 now gets summarized.
-  assert.ok(out.length < huge.length, 'output must be shortened');
-  assert.ok(out.length < 6500, 'output must stay under the new ~6k cap');
+  const out = agent._summarizeToolOutputForContext('webfetch', { url: 'x' }, huge);
+  assert.ok(out.length < 6500, 'output must stay under the ~6k cap');
   assert.match(out, /\[TOOL OUTPUT SUMMARY\]/);
   assert.match(out, /\[BEGIN FIRST CHUNK\]/);
   assert.match(out, /\[BEGIN LAST CHUNK\]/);
-  // Sanity: original bytes are NOT all present (otherwise no elision happened).
   assert.ok(!out.includes('a'.repeat(10_000)));
 });
 
-test('_summarizeToolOutputForContext preserves read-file head/tail shape', () => {
+test('a failing test run keeps its tail, where the failures and summary are', () => {
   const client = { turn: async () => ({ type: 'text', content: '' }) };
   const agent = new Agent(client, {
     provider: 'test', model: 'gpt-4o', modelCapability: 'full',
     workdir: process.cwd(), contextWindow: 128000, verifyAfterEdit: false,
   });
-  const lines = Array.from({ length: 1500 }, (_, i) => `line ${i} payload ${'x'.repeat(20)}`).join('\n');
+  const run = `${'ok line\n'.repeat(3000)}not ok 812 - sum adds\n  expected: 5\n  actual: -1\n# fail 1`;
+  const out = agent._summarizeToolOutputForContext('bash', { command: 'npm test' }, run);
+  assert.ok(out.length < 13_000);
+  assert.match(out, /not ok 812 - sum adds/);
+  assert.match(out, /actual: -1/);
+});
+
+test('a large read is cut at the end, never in the middle, and says where to continue', () => {
+  const client = { turn: async () => ({ type: 'text', content: '' }) };
+  const agent = new Agent(client, {
+    provider: 'test', model: 'gpt-4o', modelCapability: 'full',
+    workdir: process.cwd(), contextWindow: 128000, verifyAfterEdit: false,
+  });
+  const lines = Array.from({ length: 1500 }, (_, i) => `${i + 1}\tline ${i} payload ${'x'.repeat(20)}`).join('\n');
   const out = agent._summarizeToolOutputForContext('read', { file_path: 'a.js' }, lines);
-  assert.match(out, /\[BEGIN FIRST 60 LINES\]/);
-  assert.match(out, /\[BEGIN LAST 30 LINES\]/);
-  assert.match(out, /file: a\.js/);
+  const shown = out.split('\n').filter(l => /^\d+\t/.test(l)).map(l => Number(l.split('\t')[0]));
+  shown.forEach((n, i) => assert.equal(n, i + 1, 'shown lines must be contiguous from the start'));
+  assert.match(out, new RegExp(`offset=${shown.length}\\b`));
+  assert.match(out, /file_path=a\.js/);
+});
+
+test('an ordinary 200-line read reaches the model whole', () => {
+  const client = { turn: async () => ({ type: 'text', content: '' }) };
+  const agent = new Agent(client, {
+    provider: 'test', model: 'gpt-4o', modelCapability: 'full',
+    workdir: process.cwd(), contextWindow: 128000, verifyAfterEdit: false,
+  });
+  const lines = Array.from({ length: 200 }, (_, i) => `${i + 1}\t    const value${i} = computeSomething(input, options); // note`).join('\n');
+  assert.equal(agent._summarizeToolOutputForContext('read', { file_path: 'a.js' }, lines), lines);
 });
 
 test('_summarizeToolOutputForContext returns short output verbatim', () => {

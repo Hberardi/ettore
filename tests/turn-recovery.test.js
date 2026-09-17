@@ -151,7 +151,7 @@ test('buildTurnOverlay renders known overlays and returns empty string for unkno
   assert.match(buildTurnOverlay('workspace_edit_retry'), /did not perform it/i);
   assert.match(
     buildTurnOverlay('verify_after_edit', { touchedCount: 2, touchedList: 'a.js, b.js' }),
-    /You modified 2 file\(s\) \(a\.js, b\.js\) but did not verify them\./
+    /You modified 2 file\(s\) \(a\.js, b\.js\) but did not verify them since your last edit\./
   );
   assert.match(
     buildTurnOverlay('auto_continue', { attempt: 1, max: 3, pendingLines: '2. B\n3. C' }),

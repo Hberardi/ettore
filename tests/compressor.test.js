@@ -105,3 +105,23 @@ test('an elided result with no matching call degrades to the plain stamp', () =>
     assert.match(message.content, /^\[elided \d+ chars — content no longer in context;/);
   }
 });
+
+test('lossyShrink keeps the latest read of files still being worked on, and the latest failure', () => {
+  const c = new ContextCompressor(null, {});
+  c.threshold = 8000;
+  const messages = [{ role: 'system', content: 'sys' }];
+  const call = (id, name, args, content) => {
+    messages.push({ role: 'assistant', content: '', tool_calls: [{ id, function: { name, arguments: JSON.stringify(args) } }] });
+    messages.push({ role: 'tool', tool_call_id: id, content });
+  };
+  call('r_old', 'read', { file_path: 'src/app.js' }, `1\told app ${'o'.repeat(4000)}`);
+  call('r_app', 'read', { file_path: 'src/app.js' }, `1\tcurrent app ${'a'.repeat(4000)}`);
+  call('t_fail', 'bash', { command: 'npm test' }, `not ok 3 - adds\n${'f'.repeat(4000)}\n[exit code: 1]`);
+  for (let i = 0; i < 8; i++) call(`g_${i}`, 'grep', { pattern: `p${i}` }, 'g'.repeat(4000));
+  const out = c.lossyShrink(messages, { keepLast: 4 });
+  const byId = id => out.find(m => m.tool_call_id === id);
+  assert.match(byId('r_app').content, /^1\tcurrent app/, 'the latest read of a working file stays whole');
+  assert.match(byId('t_fail').content, /^not ok 3/, 'the latest failing run stays whole');
+  assert.equal(byId('r_old').__lossyShrunk, true, 'an older copy of the same file is still elided');
+  assert.equal(byId('g_0').__lossyShrunk, true);
+});

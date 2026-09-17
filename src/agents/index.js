@@ -41,6 +41,16 @@ import { parseTextToolCalls } from './text-tool-calls.js';
 import { translateProviderError } from './error-translator.js';
 import { renderSystemPrompt, pruneToolGuidance } from './prompts.js';
 import {
+  classifyVerification,
+  createReleaseGateState,
+  detectProjectTestSuite,
+  evaluateReleaseGate,
+  failureExcerpt,
+  recordMutation,
+  recordVerification,
+  DEFAULT_MAX_RELEASE_GATE_RETRIES,
+} from './release-gate.js';
+import {
   buildTurnOverlay,
   createTurnRecoveryState,
   responseDefersWork,
@@ -141,6 +151,10 @@ const MAX_TEXT_TOOL_CALL_RECOVERIES = 4;
 // model already did its diligence.
 const VERIFIER_RE = /\b(?:node\s+(?:-c|--check|-e)|python3?\s+(?:-m\s+(?:py_compile|pyflakes|mypy|unittest|pytest)|-c)|tsc\b|--noEmit|eslint\b|prettier\s+(?:--check|-c)\b|ruff\s+(?:check|format)|pylint\b|pyflakes\b|flake8\b|mypy\b|black\s+--check|pytest\b|jest\b|vitest\b|mocha\b|cargo\s+(?:check|test|clippy|build)|rustc\b|go\s+(?:vet|test|build)|npm\s+(?:test|run\s+(?:test|lint|typecheck|build|check|format))|yarn\s+(?:test|lint|typecheck|build)|pnpm\s+(?:test|lint|typecheck|build)|rspec\b|phpstan\b|gcc\s+-fsyntax-only)\b/i;
 
+
+// Context room for one tool result. See `_summarizeToolOutputForContext`.
+const READ_CONTEXT_CHARS = 24_000;
+const RUN_CONTEXT_CHARS = 12_000;
 
 export function getToolTimeoutMs(name) {
   if (name === 'bash') return 300_000;
@@ -335,6 +349,9 @@ export class Agent {
     // lint / test) unless the model already ran a verifier. Opt-out via
     // config.verifyAfterEdit=false (tests use this).
     this.verifyAfterEdit = config.verifyAfterEdit !== false;
+    this.maxReleaseGateRetries = Number.isInteger(config.maxReleaseGateRetries)
+      ? config.maxReleaseGateRetries
+      : DEFAULT_MAX_RELEASE_GATE_RETRIES;
     this.cavemanLevel = config.cavemanLevel || null;
     this._pendingTurnOverlay = '';
 
@@ -778,12 +795,14 @@ export class Agent {
 
   _summarizeToolOutputForContext(name, args = {}, output = '') {
     const text = String(output ?? '');
-    // Tighter cap than before (was 14k) — the bulk of the session cost comes
-    // from accumulating tool results across many turns. Every tool result is
-    // sent back to the model on every subsequent turn, so trimming early has
-    // multiplicative savings. Trade-off: the agent may need to re-run a tool
-    // with a narrower query to see elided middle content.
-    const maxChars = 6_000;
+    // Every tool result is re-sent on every later turn, so large outputs are
+    // trimmed. Not uniformly, though: the two kinds of output a fix depends on
+    // get room. A `read` the model asked for is the code it is about to change,
+    // and a test run is the failure it has to fix — cutting either one leaves
+    // the model editing code it has not seen against an error it cannot read.
+    const isRead = name === 'read';
+    const isRun = name === 'bash' || name === 'bash_session' || name === 'run_tests' || name === 'run_checks';
+    const maxChars = isRead ? READ_CONTEXT_CHARS : isRun ? RUN_CONTEXT_CHARS : 6_000;
     if (text.length <= maxChars) return text;
 
     const lines = this._lineCount(text);
@@ -796,20 +815,23 @@ export class Agent {
       `sha1: ${hash}`,
     ];
 
-    if (name === 'read') {
-      header.push(`file: ${args.file_path || ''}`);
-      header.push(`range: offset ${Number(args.offset) || 0}, limit ${Number(args.limit) || 200}`);
+    if (isRead) {
+      // A contiguous prefix, never head+tail: a hole in the middle of a range
+      // is invisible — the numbering skips, the model does not notice, and it
+      // edits around code it believes it has read. A cut at the end instead
+      // says exactly where to pick up.
+      const kept = [];
+      let used = 0;
+      for (const line of text.split('\n')) {
+        if (used + line.length + 1 > maxChars) break;
+        kept.push(line);
+        used += line.length + 1;
+      }
+      const lastShown = /^(\d+)\t/.exec(kept[kept.length - 1] || '');
+      const next = lastShown ? Number(lastShown[1]) : (Number(args.offset) || 0) + kept.length;
       return [
-        ...header,
-        `note: output was large; preserved beginning and end. Re-read narrower ranges if exact middle lines are needed.`,
-        ``,
-        `[BEGIN FIRST 60 LINES]`,
-        this._firstLines(text, 60),
-        `[END FIRST 60 LINES]`,
-        ``,
-        `[BEGIN LAST 30 LINES]`,
-        this._lastLines(text, 30),
-        `[END LAST 30 LINES]`,
+        ...kept,
+        `[OUTPUT CUT: this read was too large for context. Lines after ${next} were NOT shown — continue with read file_path=${args.file_path || ''} offset=${next} before relying on them.]`,
       ].join('\n');
     }
 
@@ -824,17 +846,20 @@ export class Agent {
       ].join('\n');
     }
 
-    // Generic path: keep head + tail, smaller than before (was 9k+3k).
+    // Command output: test runners and compilers print the failures and the
+    // summary last, so the tail gets most of the room.
+    const headChars = isRun ? 2_500 : 4_000;
+    const tailChars = isRun ? maxChars - headChars - 400 : 1_500;
     return [
       ...header,
       `note: output was large; preserved first and last chunks.`,
       ``,
       `[BEGIN FIRST CHUNK]`,
-      text.slice(0, 4000),
+      text.slice(0, headChars),
       `[END FIRST CHUNK]`,
       ``,
       `[BEGIN LAST CHUNK]`,
-      text.slice(-1500),
+      text.slice(-tailChars),
       `[END LAST CHUNK]`,
     ].join('\n');
   }
@@ -1002,6 +1027,43 @@ export class Agent {
 
   _refreshActiveSystemPrompt() {
     this.messages[0] = { role: 'system', content: this._renderActiveSystemPrompt() };
+  }
+
+  /**
+   * Where the release gate stands, running the project's test suite itself
+   * when the model is about to finish without a green run on the latest edit.
+   *
+   * @returns {Promise<{status: string, ranBy?: 'model'|'harness'}>}
+   */
+  async _checkReleaseGate(state, emitter) {
+    if (!state.codeTouched) return { status: 'open' };
+    const workdir = this._workdir;
+    if (this._testSuiteCache?.workdir !== workdir) {
+      this._testSuiteCache = { workdir, runner: await detectProjectTestSuite(workdir) };
+    }
+    const suiteAvailable = Boolean(this._testSuiteCache.runner);
+    let status = evaluateReleaseGate(state, { suiteAvailable });
+    if (status !== 'run_suite') return { status, ranBy: 'model' };
+
+    // The model skipped the run, or edited after it. Running the suite here
+    // costs no model round trip, and a green result releases the turn at once.
+    const id = `release-gate-${state.mutationSeq}-${state.retries}`;
+    const args = { suite: 'auto', workdir };
+    emitter?.emit('toolStart', { id, name: 'run_tests', args });
+    let output;
+    try {
+      output = await toolHandlers.run_tests(args);
+    } catch (error) {
+      output = `Error: ${error?.message || error}`;
+    }
+    emitter?.emit('toolEnd', { id, name: 'run_tests', args, output });
+    recordVerification(state, classifyVerification('run_tests', args, output), output);
+    this._debugLog(emitter, 'turn.release_gate_suite', { passed: /Result:\s*PASS/.test(String(output)) });
+    status = evaluateReleaseGate(state, { suiteAvailable });
+    // A runner that could not even start is not a red suite; fall back to
+    // asking the model for a check it can run.
+    if (status === 'run_suite') status = 'needs_targeted_check';
+    return { status, ranBy: 'harness' };
   }
 
   _queueNamedTurnOverlay(kind, data = {}) {
@@ -1221,6 +1283,7 @@ export class Agent {
     let lastAutoContinueProgress = null;
     let autoContinueStallNudgeUsed = false;
     const touchedFiles = new Set();
+    const releaseGate = createReleaseGateState();
     // Every tool argument the turn issued, concatenated. Read by the
     // unaddressed-target gate to answer one question cheaply: did anything in
     // this turn go near the file the user named?
@@ -1822,7 +1885,7 @@ export class Agent {
         }
 
       if (result.type === 'text') {
-        const clean = stripMarkers(result.content);
+        let clean = stripMarkers(result.content);
 
         // Parse todo list from final result if not already parsed during streaming
         if (!todoEmitted) {
@@ -2046,27 +2109,51 @@ export class Agent {
           });
         }
 
-        // Force one extra turn to debug/verify when files were modified but
-        // no verifier ran. Catches the common stall where the model writes a
-        // file and immediately reports success without checking syntax/lint
-        // /tests. Capped at one retry per turn to avoid runaway loops.
+        // Release gate: code changed this turn is not handed back until the
+        // project's test suite is green on its final state (or, with no suite
+        // to run, a check has passed since the last edit). See release-gate.js.
+        let releaseWarning = '';
         if (
-          !turnRecoveryState.verifyRetryUsed &&
-          this.verifyAfterEdit &&
-          !this._isLite &&
-          this.mode === 'build' &&
-          mutationToolUsed &&
-          !verificationDone &&
-          touchedFiles.size > 0
+          this.verifyAfterEdit
+          && !this._isLite
+          && this.mode === 'build'
+          && !process.env.ETTORE_RELEASE_GATE
         ) {
-          this.messages.push({ role: 'assistant', content: result.content });
-          const touched = [...touchedFiles].slice(0, 6).join(', ');
-          this._queueNamedTurnOverlay('verify_after_edit', {
-            touchedCount: touchedFiles.size,
-            touchedList: touched,
-          });
-          turnRecoveryState.verifyRetryUsed = true;
-          continue;
+          const gate = await this._checkReleaseGate(releaseGate, emitter);
+          if (gate.status !== 'open') {
+            if (releaseGate.retries < this.maxReleaseGateRetries) {
+              releaseGate.retries++;
+              this.messages.push({ role: 'assistant', content: result.content });
+              if (gate.status === 'suite_failing') {
+                this._queueNamedTurnOverlay('release_gate_failing', {
+                  attempt: releaseGate.retries,
+                  max: this.maxReleaseGateRetries,
+                  excerpt: failureExcerpt(releaseGate.lastSuite?.output),
+                  ranBy: gate.ranBy,
+                });
+              } else {
+                this._queueNamedTurnOverlay('verify_after_edit', {
+                  touchedCount: touchedFiles.size,
+                  touchedList: [...touchedFiles].slice(0, 6).join(', '),
+                });
+              }
+              emitter?.emit('releaseGate', { status: gate.status, attempt: releaseGate.retries, max: this.maxReleaseGateRetries });
+              this._debugLog(emitter, 'turn.release_gate_blocked', { status: gate.status, attempt: releaseGate.retries });
+              continue;
+            }
+            // Out of attempts. Ending is right; ending as if all were well is not.
+            releaseWarning = gate.status === 'suite_failing'
+              ? `\n\n⚠️ Codice NON verificato: la suite di test è ancora rossa dopo ${this.maxReleaseGateRetries} tentativi di correzione. Non considerare queste modifiche pronte per il rilascio.`
+              : '\n\n⚠️ Codice NON verificato: nessun controllo è stato eseguito con successo dopo l\'ultima modifica.';
+            emitter?.emit('releaseGate', { status: 'exhausted', reason: gate.status });
+            this._debugLog(emitter, 'turn.release_gate_exhausted', { status: gate.status });
+          } else if (releaseGate.mutationSeq > 0) {
+            emitter?.emit('releaseGate', { status: 'open' });
+          }
+        }
+        if (releaseWarning) {
+          clean = `${clean}${releaseWarning}`;
+          result.content = `${result.content || ''}${releaseWarning}`;
         }
 
         this.messages.push({ role: 'assistant', content: result.content });
@@ -2453,12 +2540,14 @@ export class Agent {
         if (p.name === 'write' || p.name === 'edit' || p.name === 'apply_patch_structured') {
           mutationToolUsed = true;
           touchedFiles.add(p.args.file_path);
+          recordMutation(releaseGate, p.args.file_path, output);
           this._invalidateReadCacheForFile(p.args.file_path);
         }
         // Treat as verification only when a real checker/tester ran. A read of
         // the touched file is useful inspection, but it is not verification.
         // Skip outputs starting with "Error:" — a verifier that failed to
         // launch isn't a real check.
+        recordVerification(releaseGate, classifyVerification(p.name, p.args, output, VERIFIER_RE), output);
         const looksLikeError = String(output || '').startsWith('Error:');
         if (!looksLikeError) {
           if (p.name === 'run_checks' || p.name === 'run_tests') {

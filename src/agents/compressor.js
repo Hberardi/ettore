@@ -142,6 +142,66 @@ function toolCallOrigins(messages) {
   return origins;
 }
 
+// How much older tool output lossyShrink keeps whole because the model is
+// still working on it. Roughly 10k tokens.
+const WORKING_SET_CHARS = 40_000;
+const WORKING_SET_FILES = 5;
+const MUTATION_TOOL_NAMES = new Set(['write', 'edit', 'apply_patch_structured']);
+const RUN_TOOL_NAMES = new Set(['bash', 'bash_session', 'run_tests', 'run_checks']);
+
+// Tool results in `head` that must not be elided: the latest read of each
+// file the conversation has recently read or changed, and the latest command
+// output that reported a failure.
+//
+// Eliding by age alone threw away exactly what a fix needs. Debugging reads a
+// file, runs something, greps, runs again — and by the time the model writes
+// the edit, the read is more than ten messages back and has become a one-line
+// stump. Measured on real MiniMax sessions: half of all tool results were
+// stumps, and the model edited from memory, missed, and re-read.
+function workingSetToolIds(messages, head) {
+  const calls = new Map();
+  for (const message of messages) {
+    if (!Array.isArray(message?.tool_calls)) continue;
+    for (const call of message.tool_calls) {
+      if (!call?.id) continue;
+      let args = {};
+      try { args = JSON.parse(String(call.function?.arguments || '{}')) || {}; } catch {}
+      calls.set(call.id, { name: call.function?.name, file: args.file_path || '' });
+    }
+  }
+  const headIds = new Set(head.filter(m => m.role === 'tool').map(m => m.tool_call_id));
+  const keep = new Set();
+  const files = [];
+  const seenRead = new Set();
+  let failureKept = false;
+  let budget = WORKING_SET_CHARS;
+  // Newest first, so the budget goes to the most recent state of each file.
+  for (let i = messages.length - 1; i > 0; i--) {
+    const m = messages[i];
+    const call = m?.role === 'tool' ? calls.get(m.tool_call_id) : null;
+    if (!call) continue;
+    if (MUTATION_TOOL_NAMES.has(call.name) || call.name === 'read') {
+      if (call.file && !files.includes(call.file) && files.length < WORKING_SET_FILES) files.push(call.file);
+    }
+    const newestRead = call.name === 'read' && !seenRead.has(call.file);
+    if (call.name === 'read') seenRead.add(call.file);
+    // A read still in the recent tail is already whole; only older copies of
+    // it would be duplicates.
+    if (!headIds.has(m.tool_call_id)) continue;
+    const size = String(m.content || '').length;
+    if (size > budget) continue;
+    if (newestRead && files.includes(call.file)) {
+      keep.add(m.tool_call_id);
+      budget -= size;
+    } else if (!failureKept && RUN_TOOL_NAMES.has(call.name) && /Result: FAIL|\] FAIL\b|\[exit code:? [1-9]|Traceback|Error:/.test(String(m.content || ''))) {
+      failureKept = true;
+      keep.add(m.tool_call_id);
+      budget -= size;
+    }
+  }
+  return keep;
+}
+
 function serializeForCompression(messages) {
   return messages.map(m => {
     if (m.role === 'tool') {
@@ -268,10 +328,12 @@ export class ContextCompressor {
     }
 
     const origins = toolCallOrigins(messages);
+    const protectedIds = workingSetToolIds(messages, head);
     const shrunkenHead = head.map((m) => {
       if (m.role !== 'tool') return m;
       const text = String(m.content || '');
       if (text.length <= maxChars * 2) return m;
+      if (protectedIds.has(m.tool_call_id)) return m;
       const firstNL = text.indexOf('\n');
       const firstLine = firstNL >= 0 ? text.slice(0, firstNL) : text.slice(0, headTail);
       // Name the call and say what to do about it. An edit written against a

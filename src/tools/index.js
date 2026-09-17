@@ -11,7 +11,8 @@ import { uiBridge } from './bridge.js';
 import { runShellCommand } from './shell-run.js';
 import { detachOptions, killProcessTree, resolveBinary, resolvePython, shellInvocation } from '../utils/platform.js';
 import { searchFiles } from './grep-fallback.js';
-import { applyEol, detectEol, splitTolerant, toLf } from './line-endings.js';
+import { applyEol, detectEol, toLf } from './line-endings.js';
+import { editedSnippet, planEdit } from './edit-match.js';
 import { describeShell } from '../utils/platform.js';
 
 // Appended to the shell tool descriptions so the model writes commands for the
@@ -46,6 +47,7 @@ const MAX_READ_LIMIT = 1000;
 const DEFAULT_GLOB_RESULTS = 500;
 const MAX_GLOB_RESULTS = 5000;
 const DEFAULT_GREP_MATCHES = 500;
+const MAX_GREP_CONTEXT = 10;
 const MAX_GREP_MATCHES = 5000;
 const DEFAULT_SERVER_LOG_LINES = 300;
 const DEFAULT_SERVER_LOG_CHARS = 40000;
@@ -845,11 +847,15 @@ async function detectTestRunner(cwd) {
 async function detectCheckCommands(cwd) {
   const check = (name, bin, args) => ({ name, ...platformRunner(name, bin, args) });
   if (await fileExists(join(cwd, 'package.json'))) {
-    return [
-      check('lint', 'npm', ['run', 'lint']),
-      check('typecheck', 'npm', ['run', 'typecheck']),
-      check('test', 'npm', ['test', '--', '--silent']),
-    ];
+    // Only the scripts the project defines: `npm run lint` on a package with
+    // no lint script exits non-zero, and a gate that can never pass is no gate.
+    let scripts = {};
+    try { scripts = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf-8'))?.scripts || {}; } catch {}
+    const out = [];
+    if (scripts.lint) out.push(check('lint', 'npm', ['run', 'lint']));
+    if (scripts.typecheck) out.push(check('typecheck', 'npm', ['run', 'typecheck']));
+    if (scripts.test && !/no test specified/i.test(scripts.test)) out.push(check('test', 'npm', ['test', '--', '--silent']));
+    return out;
   }
   if (await fileExists(join(cwd, 'pyproject.toml')) || await fileExists(join(cwd, 'pytest.ini')) || await fileExists(join(cwd, 'requirements.txt'))) {
     return [
@@ -1898,6 +1904,7 @@ export const toolHandlers = {
         try {
           const { stdout, stderr } = await execFileAsync(c.cmd, c.args, {
             cwd,
+            env: { ...process.env, ETTORE_RELEASE_GATE: '1' },
             maxBuffer: 20 * 1024 * 1024,
             timeout,
             signal: getToolAbortSignal(timeout + 5000),
@@ -1964,6 +1971,9 @@ export const toolHandlers = {
       emitToolProgress('run_tests', { suite: selected }, `Running ${runner.kind} tests…`);
       const { stdout, stderr } = await execFileAsync(runner.cmd, runner.args, {
         cwd,
+        // A suite that itself drives ETTORE agents must not have their
+        // release gates start the same suite again, recursively.
+        env: { ...process.env, ETTORE_RELEASE_GATE: '1' },
         maxBuffer: 20 * 1024 * 1024,
         timeout: safeTimeout,
         signal: getToolAbortSignal(safeTimeout + 5000),
@@ -2365,26 +2375,24 @@ export const toolHandlers = {
     }
   },
 
-  async edit({ file_path, old_string, new_string }) {
+  async edit({ file_path, old_string, new_string, replace_all = false }) {
     try {
       const content = await readFile(file_path, 'utf-8');
       // A CRLF checkout (Git for Windows default) plus a model that writes \n
-      // used to fail every multi-line edit here. Match tolerantly, then put the
-      // file's own line ending back so the diff stays the size of the change.
+      // used to fail every multi-line edit here. The plan is made in LF, then
+      // the file's own line ending goes back on so the diff stays the size of
+      // the change.
       const eol = detectEol(content);
-      const match = splitTolerant(content, old_string);
-      const parts = match.parts;
-      if (match.count === 0) {
-        return `Error: old_string not found in ${file_path}`;
-      }
-      if (match.count > 1) {
-        return `Error: old_string matches ${match.count} locations in ${file_path}. Provide more surrounding context to make it unique.`;
-      }
+      const plan = planEdit(content, old_string, new_string, {
+        replaceAll: replace_all === true || replace_all === 'true',
+        filePath: file_path,
+      });
+      if (!plan.ok) return plan.error;
       const ok = await requestEditConfirmation({
         filePath: file_path,
-        oldString: old_string,
-        newString: new_string,
-        fileContent: content,
+        oldString: plan.matchedOld,
+        newString: plan.replacement,
+        fileContent: toLf(content),
         allowNonInteractive: false,
       });
       if (!ok.allowed) {
@@ -2393,15 +2401,19 @@ export const toolHandlers = {
         }
         return `Cancelled by user: refused to apply edit to ${file_path}.`;
       }
-      const oldLines = toLf(old_string).split('\n').length;
-      const newLines = toLf(new_string).split('\n').length;
+      const oldLines = plan.matchedOld.split('\n').length;
+      const newLines = plan.replacement.split('\n').length;
       const diff = newLines - oldLines;
-      // `parts` came back in LF when the match needed normalising, so the join
-      // is done in LF and the file's convention applied once, at the end.
-      const joined = parts.join(match.mode === 'normalized' ? toLf(new_string) : new_string);
-      await writeFile(file_path, applyEol(joined, eol), 'utf-8');
+      await writeFile(file_path, applyEol(plan.updated, eol), 'utf-8');
       uiBridge.emit('fileChanged', { type: 'edit', path: file_path, oldLines, newLines, diff });
-      return `✓ Edited ${file_path} (${oldLines} → ${newLines} lines, ${diff > 0 ? '+' : ''}${diff})`;
+      const notes = [];
+      if (plan.count > 1) notes.push(`${plan.count} occurrences replaced`);
+      if (plan.mode === 'whitespace') notes.push('matched ignoring whitespace differences');
+      // The edited lines as they now are, so checking the result does not take
+      // another `read` of the file.
+      return `✓ Edited ${file_path} (${oldLines} → ${newLines} lines, ${diff > 0 ? '+' : ''}${diff})`
+        + (notes.length ? ` — ${notes.join('; ')}` : '')
+        + `\n${editedSnippet(plan.updated, plan.firstLine, plan.lastLine)}`;
     } catch (error) {
       return `Error: ${error.message}`;
     }
@@ -2422,14 +2434,23 @@ export const toolHandlers = {
     }
   },
 
-  async grep({ pattern, path, include, max_matches = DEFAULT_GREP_MATCHES }) {
+  async grep({ pattern, path, include, max_matches = DEFAULT_GREP_MATCHES, ignore_case = false, context = 0, files_only = false }) {
     try {
       const searchPath = path || process.cwd();
       const safeLimit = Math.max(1, Math.min(Number(max_matches) || DEFAULT_GREP_MATCHES, MAX_GREP_MATCHES));
+      const caseless = ignore_case === true || ignore_case === 'true';
+      const filesOnly = files_only === true || files_only === 'true';
+      const around = filesOnly ? 0 : Math.max(0, Math.min(Number(context) || 0, MAX_GREP_CONTEXT));
 
       const tryRipgrep = async () => {
-        const args = ['--line-number', '--with-filename', '--no-heading', pattern, searchPath];
-        if (include) args.unshift('-g', include);
+        // Minified bundles put a whole program on one line; a match there
+        // would otherwise flood the context with a single result.
+        const args = ['--line-number', '--with-filename', '--no-heading', '--max-columns', '400', '--max-columns-preview'];
+        if (caseless) args.push('-i');
+        if (around) args.push('-C', String(around));
+        if (filesOnly) args.push('--files-with-matches');
+        if (include) args.push('-g', include);
+        args.push('-e', pattern, searchPath);
         const { stdout } = await execFileAsync('rg', args, {
           maxBuffer: 10 * 1024 * 1024,
           signal: getToolAbortSignal(),
@@ -2438,9 +2459,12 @@ export const toolHandlers = {
       };
 
       const tryGrep = async () => {
-        const args = ['-rn'];
+        const args = ['-rnE', '--exclude-dir=node_modules', '--exclude-dir=.git', '--exclude-dir=dist', '--exclude-dir=build'];
+        if (caseless) args.push('-i');
+        if (around) args.push('-C', String(around));
+        if (filesOnly) args.push('-l');
         if (include) args.push(`--include=${include}`);
-        args.push(pattern, searchPath);
+        args.push('-e', pattern, searchPath);
         const { stdout } = await execFileAsync('grep', args, {
           maxBuffer: 10 * 1024 * 1024,
           signal: getToolAbortSignal(),
@@ -2463,7 +2487,7 @@ export const toolHandlers = {
             // Fall back to the built-in searcher rather than failing the tool.
             else if (isMissingBinary(grepErr)) {
               output = await searchFiles({
-                pattern, path: searchPath, include,
+                pattern, path: searchPath, include, ignoreCase: caseless, filesOnly,
                 maxMatches: safeLimit, signal: getToolAbortSignal(),
               });
             } else if (grepErr?.code === 1) output = '';
@@ -2473,7 +2497,7 @@ export const toolHandlers = {
       }
 
       if (!output.trim()) return 'No matches';
-      return truncateLines(output.trimEnd(), safeLimit).text;
+      return truncateLines(output.trimEnd(), around ? safeLimit * (2 * around + 2) : safeLimit).text;
     } catch (error) {
       return error.stdout || `Error: ${error.message}`;
     }
@@ -3229,13 +3253,14 @@ export const toolDefinitions = [
     type: 'function',
     function: {
       name: 'edit',
-      description: 'Edit a file by replacing an exact string',
+      description: 'Replace text in a file. old_string must match the file exactly once (copy it from `read` output without the line-number prefix, with enough surrounding lines to be unique); a match differing only in indentation or trailing whitespace is accepted. Returns the edited lines with line numbers. On failure the error quotes the closest region of the file.',
       parameters: {
         type: 'object',
         properties: {
           file_path: { type: 'string', description: 'Absolute path to the file' },
-          old_string: { type: 'string', description: 'Exact string to replace' },
-          new_string: { type: 'string', description: 'Replacement string' }
+          old_string: { type: 'string', description: 'Exact text to replace (unique in the file unless replace_all is true)' },
+          new_string: { type: 'string', description: 'Replacement text' },
+          replace_all: { type: 'boolean', description: 'Replace every occurrence of old_string, e.g. to rename a variable. Default: false' }
         },
         required: ['file_path', 'old_string', 'new_string']
       }
@@ -3261,14 +3286,17 @@ export const toolDefinitions = [
     type: 'function',
     function: {
       name: 'grep',
-      description: 'Search for a pattern in files',
+      description: 'Search file contents for a regex (ripgrep syntax; respects .gitignore). Output is path:line:text. Use context to see the surrounding code without a separate read, files_only to find which files mention something.',
       parameters: {
         type: 'object',
         properties: {
           pattern: { type: 'string', description: 'Regex or string to search' },
           path: { type: 'string', description: 'Directory to search in' },
           include: { type: 'string', description: 'File pattern filter (e.g. *.js)' },
-          max_matches: { type: 'number', minimum: 1, maximum: 5000, description: 'Maximum matching lines to return, 1-5000. Default: 500' }
+          max_matches: { type: 'number', minimum: 1, maximum: 5000, description: 'Maximum matching lines to return, 1-5000. Default: 500' },
+          ignore_case: { type: 'boolean', description: 'Case-insensitive search. Default: false' },
+          context: { type: 'number', minimum: 0, maximum: 10, description: 'Lines of context to show before and after each match, 0-10. Default: 0' },
+          files_only: { type: 'boolean', description: 'Return only the paths of matching files, one per line. Default: false' }
         },
         required: ['pattern']
       }

@@ -135,7 +135,7 @@ test('Agent still forces a verify retry when the model only re-reads the touched
   }
 });
 
-test('Verify retry is capped at one — model that still skips verify still ends the turn', async () => {
+test('a model that never verifies is nudged up to the cap, then the answer carries a warning', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ettore-verify-'));
   try {
     const target = join(dir, 'hello.js');
@@ -147,18 +147,48 @@ test('Verify retry is capped at one — model that still skips verify still ends
           const tc = writeCall('w1', target, 'console.log(1)\n');
           return { type: 'tool_calls', tool_calls: [tc], message: { role: 'assistant', content: '', tool_calls: [tc] } };
         }
-        if (turns === 2) return { type: 'text', content: 'Fatto.' };
-        // After the verify nudge, model still ignores it — should end anyway.
-        return { type: 'text', content: 'Ancora fatto.' };
+        return { type: 'text', content: 'Fatto.' };
       },
     };
 
-    const agent = makeAgent(client, dir);
-    const emitter = new EventEmitter();
-    const result = await agent.run('crea hello.js', emitter);
-    // turn 1 (write) + turn 2 (text → triggers verify retry) + turn 3 (text → ends)
-    assert.equal(turns, 3);
-    assert.match(String(result), /Ancora fatto/);
+    const agent = new Agent(client, {
+      provider: 'test', model: 'gpt-4o', modelCapability: 'full', workdir: dir,
+      contextWindow: 128000, maxReleaseGateRetries: 2,
+    }, 'build');
+    const result = await agent.run('crea hello.js', new EventEmitter());
+    // write, then a text answer refused twice, then the third ends the turn.
+    assert.equal(turns, 4);
+    assert.match(String(result), /Codice NON verificato/);
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
+  }
+});
+
+test('a check that ran before the last edit does not verify it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ettore-verify-'));
+  try {
+    const target = join(dir, 'hello.js');
+    let turns = 0;
+    let nudged = false;
+    const client = {
+      async turn(messages) {
+        turns++;
+        if (turns === 1) {
+          const w = writeCall('w1', target, 'console.log(1)\n');
+          const b = bashCall('b1', `node --check ${target}`);
+          return { type: 'tool_calls', tool_calls: [w, b], message: { role: 'assistant', content: '', tool_calls: [w, b] } };
+        }
+        if (turns === 2) {
+          const w = writeCall('w2', join(dir, 'other.js'), 'console.log(2)\n');
+          return { type: 'tool_calls', tool_calls: [w], message: { role: 'assistant', content: '', tool_calls: [w] } };
+        }
+        if (turns === 3) return { type: 'text', content: 'Fatto.' };
+        if (/did not verify/i.test(String(promptSeen(messages)))) nudged = true;
+        return { type: 'text', content: 'Fatto davvero.' };
+      },
+    };
+    await makeAgent(client, dir).run('crea hello.js', new EventEmitter());
+    assert.equal(nudged, true);
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
   }
