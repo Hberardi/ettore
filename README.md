@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.5.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.6.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -13,6 +13,7 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 
 - 🤖 **32 providers** - OpenAI, Anthropic, your Claude subscription, Gemini, Ollama (local), NVIDIA, Groq, DeepSeek, MiniMax, Kimi, OpenRouter — and any OpenAI-compatible endpoint
 - 💻 **Tool Execution** - bash, read, write, edit, grep, glob, web search, web fetch, image inspection, delegated codebase search
+- ✅ **Done means the tests pass** - when the agent changes code it runs your project's full test suite before handing the work back; a red suite goes back to the agent to fix, and it never reports "done" over failing tests ([details](#done-means-the-tests-pass))
 - 🖱️ **Runs your apps** - opens web apps in a real browser (reads the browser console: errors, exceptions, failed requests) and launches desktop apps (captures stdout/stderr, screenshots, clicks and types) to reproduce bugs before fixing them
 - 🎨 **Native TUI** - Custom ANSI renderer (no React/Ink) with themes and a sidebar
 - 🖼️ **Vision** - Reads local images; agent can discover, download, and inspect public web images
@@ -370,6 +371,68 @@ again; and it is bounded at twelve iterations and eight minutes.
 You still see it working: the sub-agent's own `repo_map`, `grep` and `read`
 calls scroll past in the running-tool display like any others, while the
 `explore` call that started them stays open.
+
+## Done means the tests pass
+
+An agent that says "done" over a failing test suite is worse than one that does
+nothing: you find out later, somewhere else. So when a turn in build mode
+changes code, ETTORE does not let it end until the project's **full test suite
+passes on the final code**.
+
+1. The agent changes the code and is told to run the suite before finishing.
+2. If it tries to finish without a green run on its latest edit, ETTORE runs the
+   suite itself — you see `run_tests` in the running-tool display.
+3. If any test fails, the failures go back to the agent as work still to do:
+   find the cause, fix the code (not the test, unless the task changed that
+   behaviour on purpose), run the suite again.
+4. Only a green suite releases the answer: `✓ Test verdi`.
+
+It counts only what really verifies the current code:
+
+- **The whole suite.** A narrowed run — `pytest tests/test_x.py`, `-k`,
+  `--grep` — is useful while working but does not release the code, because it
+  cannot catch a regression somewhere else.
+- **After the last edit.** Any change after a green run needs a new run.
+- **The real result.** A failing run is a failure even when the exit code is
+  hidden by a pipe (`npm test | tail`): the output is read too.
+
+After five fix-and-rerun rounds the turn ends anyway, but the answer says so
+plainly — *⚠️ Codice NON verificato: la suite di test è ancora rossa* — instead of
+claiming success. Change the number of rounds in `.ettore/config.json`:
+
+```json
+{ "maxReleaseGateRetries": 8 }
+```
+
+| Project | What has to pass |
+|---|---|
+| `package.json` with a `test` script | `npm test` |
+| `pytest.ini`, `conftest.py`, or pytest in `pyproject.toml` | `pytest` |
+| `go.mod` | `go test ./...` |
+| `Cargo.toml` | `cargo test` |
+| No test suite | at least one check since the last edit — `node --check`, `py_compile`, running the program |
+| Only docs or images changed | nothing |
+
+If your suite is already red before the agent starts, every turn that changes
+code will end with the warning: fix or skip those tests first.
+
+### The agent sees the code it is fixing
+
+A fix is only as good as what the model can see. Three things make sure it
+sees it:
+
+- **Reads arrive whole.** A `read` of a normal-sized range reaches the model
+  complete. A very large one is cut only at the end, with the exact `offset` to
+  continue from — never with a silent hole in the middle.
+- **The working set is not forgotten.** In a long session, old tool output is
+  shortened to save tokens, but the latest read of each file being worked on and
+  the latest failing test output stay whole.
+- **Test failures keep their tail**, where runners print the failing test and
+  the summary.
+
+And `edit` helps when it misses: a block copied with the wrong indentation still
+applies, "not found" quotes the closest region of the file with line numbers,
+and a successful edit shows the changed lines.
 
 ## Plugins
 

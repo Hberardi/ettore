@@ -8,6 +8,105 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-09-17
+
+This release is about one complaint: the agent was not good at fixing code.
+Reading 1,139 saved sessions showed that most of the problem was not the model.
+ETTORE was hiding from it the code it was trying to fix, and it let a turn end
+over a red test suite.
+
+### Changed — code changes are not handed back until the test suite is green
+
+When a build turn changes code, the turn cannot end until the project's full
+test suite passes on the code as it finally stands. If the model tries to finish
+without running it, ETTORE runs the suite itself (`run_tests`, shown in the
+running-tool display). If the suite fails, the failures go back to the model as
+work still to do, and it gets up to five rounds to fix the cause — the code, not
+the test, unless the task deliberately changed the behaviour a test asserts. If
+the suite is still red after that, the answer ends with an explicit warning that
+the changes are **not** verified, instead of a confident "done".
+
+The old guard sent one "you did not verify" reminder and then let the turn end
+whatever happened next. It also counted any run of `run_tests` or `run_checks`
+as verification, a failing one included, and a check made before the last edit
+still counted after it. Now:
+
+- a run is evidence only for the code it ran against — any edit after a green
+  run needs a new one;
+- only the whole suite counts; `pytest tests/x.py`, `-k`, `--grep` and similar
+  narrowed runs are useful while working but do not release the code;
+- a piped run (`npm test | tail`) hides the exit code, so the result is also
+  read from the output (`# fail 2`, `not ok`, `FAILED`, `N failed`…);
+- a write that was refused or cancelled is not an edit.
+
+Projects with no test suite (no `test` script, or npm's "no test specified"
+placeholder; no pytest, `go.mod` or `Cargo.toml`) need at least one passing
+check since the last edit — `node --check`, `py_compile`, running the program.
+Documentation-only changes (`.md`, `.txt`, images) are not gated. The TUI shows
+where the gate stands: `✗ Test rossi — rilascio bloccato 1/5`, `✓ Test verdi`.
+
+Note: if a project's suite is already red before the agent starts, the turn
+will end with the warning every time. The number of rounds is configurable with
+`maxReleaseGateRetries`.
+
+### Fixed — a `read` reached the model with its middle missing
+
+Tool results over 6,000 characters were cut to their first 60 and last 30
+lines. An ordinary 200-line `read` is about 8,000 characters, so the model got
+lines 1–60 and 171–200 and never saw the 110 lines between — with no clear sign
+that anything was missing. It then edited code it believed it had read. Test and
+compiler output had the same cap, which often cut the failure details.
+
+A `read` now gets up to 24,000 characters, and when even that is not enough it
+is cut at the end, never in the middle, with the exact `offset` to continue
+from. Command and test output gets 12,000 characters, most of them at the end,
+where test runners print failures and their summary.
+
+### Fixed — the code being fixed was the first thing forgotten
+
+Past about half the compression threshold, every tool result older than the
+last ten messages was reduced to a one-line stub. Debugging reads a file, runs
+something, greps, runs again — and by the time the edit is written, the read is
+a stub. In the MiniMax sessions, half of all tool results had been stubbed; the
+model edited from memory, missed, and re-read.
+
+The latest read of each of the five files being worked on, and the latest
+failing command output, are now kept whole (up to about 10k tokens). Older
+copies of the same file are still elided.
+
+### Changed — `edit` helps the model when it misses
+
+- A block that differs from the file only in indentation or trailing whitespace
+  is matched and re-indented to the file, as long as the match is unique.
+- "old_string not found" now quotes the closest region of the file, with line
+  numbers, and names the first line that differs — instead of leaving the model
+  to guess again or rewrite the whole file with `write`.
+- An ambiguous match lists the lines it was found on.
+- New `replace_all` parameter, for renames.
+- A successful edit returns the edited lines, numbered, so checking it does not
+  cost another `read`.
+
+### Added — `grep` options
+
+`ignore_case`, `context` (lines around each match, up to 10) and `files_only`.
+Minified one-line files no longer flood the output, and the plain-`grep`
+fallback skips `node_modules`, `.git`, `dist` and `build`.
+
+### Changed — the system prompt has a method for working on code
+
+The build prompt described its tools at length and said almost nothing about how
+to change code. It now does: understand the code and its callers before
+changing it, find the root cause, follow the project's conventions, make the
+smallest change with `edit`, update every caller of what changed, run the full
+suite before calling it done, change approach after two failed attempts, and end
+with a short summary of what changed and how it was verified.
+
+### Fixed — `run_checks` failed on projects without a lint script
+
+It ran `npm run lint` and `npm run typecheck` whether or not `package.json`
+defined them, so the check failed on any project missing one — a gate that could
+never pass. It now runs only the scripts the project has.
+
 ## [1.5.1] — 2026-09-15
 
 ### Fixed — a shell command's stderr could come back empty
