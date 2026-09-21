@@ -1,0 +1,10 @@
+{
+  "name": "kali",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "main": "index.js",
+  "description": "Drive installed security tools (nmap, whatweb, nikto, gobuster, dnsrecon, sslscan) for AUTHORIZED testing only. Every target-taking tool refuses to run against a host that is not in the authorization scope. Wraps tools you install yourself; installs nothing.",
+  "author": "ettore",
+  "license": "MIT",
+  "permissions": ["shell:exec"]
+}
