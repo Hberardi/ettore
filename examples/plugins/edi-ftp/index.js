@@ -33,7 +33,7 @@ import {
   readdirSync, unlinkSync, statSync,
 } from 'node:fs';
 import { homedir, hostname, userInfo } from 'node:os';
-import { join, dirname, resolve as resolvePath, basename, isAbsolute } from 'node:path';
+import { join, dirname, resolve as resolvePath, relative as relativePath, basename, isAbsolute } from 'node:path';
 import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync, createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 
@@ -1812,7 +1812,14 @@ function resolveLayout(layoutArg, workspace) {
 function resolveLocal(pathLike, workspace, { mustExist = false } = {}) {
   const root = resolvePath(workspace || process.cwd());
   const candidate = isAbsolute(pathLike) ? resolvePath(pathLike) : resolvePath(root, pathLike);
-  if (candidate !== root && !candidate.startsWith(root + '/')) {
+  // Containment by `relative`, not by a string prefix with a hardcoded '/'.
+  // On Windows the separator is '\\', so the prefix test matched nothing and
+  // every legitimate path inside the workspace was rejected — the plugin could
+  // not open a local file at all there. This is the same check
+  // src/tools/workspace-policy.js uses, and it still refuses a sibling
+  // directory that merely shares the prefix.
+  const rel = relativePath(root, candidate);
+  if (rel !== '' && (rel.startsWith('..') || isAbsolute(rel))) {
     throw new Error(`path "${pathLike}" resolves outside the workspace (${root})`);
   }
   if (mustExist && !existsSync(candidate)) throw new Error(`file not found: ${candidate}`);

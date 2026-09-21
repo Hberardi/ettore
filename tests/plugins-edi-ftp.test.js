@@ -424,6 +424,12 @@ test('edi-ftp: local paths cannot escape the workspace', async () => {
     assert.throws(() => _internal.resolveLocal('/etc/passwd', dir), /outside the workspace/);
     // A remote name is server-controlled input: it must never become a path.
     assert.equal(_internal.resolveLocal(join('edi-in', 'x.edi'), dir), join(dir, 'edi-in', 'x.edi'));
+    // A sibling that merely shares the prefix is still outside. A string
+    // prefix test gets this right too; the point is that `relative` does not
+    // lose it while fixing the separator.
+    assert.throws(() => _internal.resolveLocal(`${dir}-evil/x.edi`, dir), /outside the workspace/);
+    // The workspace itself is inside itself.
+    assert.equal(_internal.resolveLocal('.', dir), dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -11,6 +11,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { glob as globby } from 'glob';
+import { resolve as resolvePath } from 'node:path';
 
 const DEFAULT_IGNORE = [
   '**/node_modules/**',
@@ -95,7 +96,10 @@ export async function searchFiles({
     follow: false,
     ignore: DEFAULT_IGNORE,
   });
-  files = files.sort((a, b) => a.localeCompare(b));
+  // glob joins the cwd and the match with '/', so on Windows an absolute
+  // result came back mixed — `C:\dir\sub/file.txt`. These paths are handed to
+  // the model and passed back to read/edit, so they have to be the platform's.
+  files = files.map(file => resolvePath(file)).sort((a, b) => a.localeCompare(b));
 
   const lines = [];
   for (const file of files) {

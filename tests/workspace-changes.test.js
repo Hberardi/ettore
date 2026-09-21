@@ -46,9 +46,9 @@ test('command write targets: redirects, tee and in-place edits, never /dev or fd
   const cwd = resolve(sep, 'w');
   assert.deepEqual(commandWriteTargets('echo x > out.js', cwd), [join(cwd, 'out.js')]);
   assert.deepEqual(commandWriteTargets("sed -i 's/a/b/' src/x.py", cwd), [join(cwd, 'src', 'x.py')]);
-  // An absolute POSIX path stays absolute on POSIX; on Windows it is not one,
-  // so it resolves against the cwd like any other relative target.
-  assert.deepEqual(commandWriteTargets('cat a | tee -a /abs/log.txt', cwd), [resolve(cwd, '/abs/log.txt')]);
+  // A leading slash is absolute on both platforms — on Windows it means "root
+  // of the current drive" — so the target is taken as given, not resolved.
+  assert.deepEqual(commandWriteTargets('cat a | tee -a /abs/log.txt', cwd), ['/abs/log.txt']);
   assert.deepEqual(commandWriteTargets('npm test 2>&1 > /dev/null', cwd), []);
   assert.deepEqual(commandWriteTargets('ls -la && grep foo bar.js', cwd), []);
 });

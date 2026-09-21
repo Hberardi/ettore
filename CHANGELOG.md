@@ -8,6 +8,25 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.8.5] — 2026-09-21
+
+### Fixed — Windows
+
+Two bugs that CI had been reporting since before this release, and that made
+real features unusable on Windows rather than merely failing a test:
+
+- **The edi-ftp plugin could not open any local file.** Its workspace
+  containment check compared with a hardcoded `'/'` separator, so on Windows
+  every legitimate path inside the workspace "resolved outside the workspace"
+  and was refused. It now uses the same `relative()` check as
+  `src/tools/workspace-policy.js`, which is correct on both platforms and still
+  refuses a sibling directory that merely shares the prefix.
+- **The built-in search returned mixed-separator paths.** When neither ripgrep
+  nor grep is installed — the normal case on Windows — the fallback searcher
+  reported `C:\dir\sub/file.txt`, because glob joins the cwd and the match with
+  `/`. Those paths go to the model and come back to read and edit, so they are
+  now normalised to the platform's separator.
+
 ## [1.8.4] — 2026-09-21
 
 ### Fixed
