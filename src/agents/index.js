@@ -16,25 +16,10 @@ import { setRetryNotifier, createCompressionClient } from '../llm/client.js';
 import { ContextCompressor, estimateTokens } from './compressor.js';
 import { isLiteModel, applyLitePrompt, isGarbageOutput, buildFallbackMessage } from './lite.js';
 import {
-  TODO_BLOCK_RE,
-  DONE_MARKER_RE,
-  TODO_CAPTURE_RE,
-  PLAN_BLOCK_RE,
-  PLAN_CAPTURE_RE,
-  DECISION_BLOCK_RE,
-  DECISION_CAPTURE_RE,
-  THINK_OPEN_RE,
-  THINK_CLOSE_RE,
-  PARTIAL_TAG_OPEN_RE,
-  PARTIAL_TAG_CLOSE_RE,
-  PARTIAL_TOOL_TAG_RE,
-  PARTIAL_FRAMING_RE,
-  filterToolCallStream,
   stripMarkers,
-  stripThinkTags,
   stripToolCallTags,
-  parseTodoBlock,
   extractMarkdownTodoList,
+  StreamMarkupParser,
 } from './stream-parser.js';
 import { shouldPlanExplicitly, extractPlan, PLANNING_REMINDER } from './planner.js';
 import { parseTextToolCalls } from './text-tool-calls.js';
@@ -1296,16 +1281,6 @@ export class Agent {
     // unaddressed-target gate to answer one question cheaply: did anything in
     // this turn go near the file the user named?
     let referencedInToolArgs = '';
-    // `parseBuffer` accumulates all text for <todo>/<done:N> parsing across chunks.
-    // `emitBuffer` holds text that is safe to display (i.e. past any partial marker).
-    let parseBuffer = '';
-    let emitBuffer = '';
-    // Set once the model starts printing tool-call protocol as visible text;
-    // suppresses the rest of the turn's display output. Reset per turn.
-    let inToolLeak = false;
-    // State for suppressing <think>...</think> blocks (DeepSeek R1, Qwen3, etc.)
-    let inThink = false;
-    let pendingThinkClose = '';
 
     // Sink that lets the todo_write tool update agent + UI state in lockstep.
     // Mirrors the same writes the <todo>/<done:N> parser would do, so the
@@ -1404,22 +1379,56 @@ export class Agent {
     };
     setSubagentRunner(subagentRunner);
 
-    // Emit as much of `emitBuffer` as is safe — we hold back only the
-    // incomplete control tags that this parser knows how to suppress.
-    const flushSafe = () => {
-      if (!emitBuffer) return;
-      // Keep the last few bytes only when they could still grow into a
-      // supported control tag (<think>, <todo>, <done:N>).
-      const holdBack = PARTIAL_TAG_OPEN_RE.test(emitBuffer)
-        || PARTIAL_TAG_CLOSE_RE.test(emitBuffer)
-        || PARTIAL_TOOL_TAG_RE.test(emitBuffer)
-        || PARTIAL_FRAMING_RE.test(emitBuffer);
-      if (holdBack) return;
-      // Emit everything else immediately
-      const chunk = emitBuffer;
-      emitBuffer = '';
-      if (chunk) emitter?.emit('token', chunk);
+    const recordDecision = (body) => {
+      const entry = { text: body.slice(0, 1000), at: new Date().toISOString() };
+      if (!Array.isArray(this.workingMemory.decisions)) this.workingMemory.decisions = [];
+      this.workingMemory.decisions.push(entry);
+      // Bounded across long sessions: beyond 32, drop the oldest.
+      if (this.workingMemory.decisions.length > 32) {
+        this.workingMemory.decisions.splice(0, this.workingMemory.decisions.length - 32);
+      }
+      emitter?.emit('decision', entry);
+      this._debugLog(emitter, 'turn.decision_logged', { preview: body.slice(0, 80) });
     };
+
+    // One parser per response, fed by onToken — or, for a response that did
+    // not stream, with the whole content at the end. It finds the markup; the
+    // hooks decide what each block means for the turn.
+    const markup = new StreamMarkupParser({
+      onVisible: chunk => emitter?.emit('token', chunk),
+      onThinkStart: () => emitter?.emit('thinkStart'),
+      onThinkToken: text => emitter?.emit('thinkToken', text),
+      onThinkEnd: () => emitter?.emit('thinkEnd'),
+      wantsTodo: () => !todoEmitted,
+      onTodo: (items) => {
+        this._todoList = items;
+        this._todoDoneIdx = new Set();
+        this._todoFromBlock = true;
+        this._todoFromMarkdown = false;
+        todoEmitted = true;
+        emitter?.emit('todoList', items);
+      },
+      wantsPlan: () => this._planningActive && !this._planEmitted,
+      onPlan: (block) => {
+        const plan = extractPlan(block);
+        if (!plan?.steps?.length) return;
+        this._plan = plan;
+        this._planEmitted = true;
+        this.workingMemory.plan = plan;
+        emitter?.emit('plan', plan);
+        this._debugLog(emitter, 'turn.plan_proposed', {
+          steps: plan.steps.length,
+          goal: plan.goal.slice(0, 80),
+        });
+        seedTodoFromPlan(plan);
+      },
+      onDecision: recordDecision,
+      onDone: (idx) => {
+        if (this._todoDoneIdx.has(idx)) return;
+        this._todoDoneIdx.add(idx);
+        emitter?.emit('todoDone', idx);
+      },
+    });
 
     // Emit current token count so the UI can show it
     emitter?.emit('tokenCount', estimateTokens(this.messages));
@@ -1554,191 +1563,7 @@ export class Agent {
 
         const signal = controller.signal;
 
-        const onToken = (text) => {
-          parseBuffer += text;
-          emitBuffer += text;
-          if (inThink && pendingThinkClose) {
-            emitBuffer = pendingThinkClose + emitBuffer;
-            pendingThinkClose = '';
-          }
-
-          // ── Think-tag filtering (DeepSeek R1, Qwen3, QwQ, MiniMax M2.7, etc.) ──
-          // Handles <think>, <thinking>, <reasoning> — all variants.
-          // Tag may be split across multiple streaming chunks.
-          // Emits thinkStart / thinkToken / thinkEnd events for UI indicator.
-          if (!inThink) {
-            const thinkOpenMatch = emitBuffer.match(THINK_OPEN_RE);
-            if (thinkOpenMatch) {
-              const openIdx = emitBuffer.indexOf(thinkOpenMatch[0]);
-              const before = emitBuffer.slice(0, openIdx);
-              const after  = emitBuffer.slice(openIdx + thinkOpenMatch[0].length);
-              inThink = true;
-              emitter?.emit('thinkStart');
-              // Check if close tag is in the same chunk (rare but possible)
-              const closeMatch = after.match(THINK_CLOSE_RE);
-              if (closeMatch) {
-                const closeEnd = after.indexOf(closeMatch[0]) + closeMatch[0].length;
-                emitBuffer = before + after.slice(closeEnd);
-                inThink = false;
-                emitter?.emit('thinkEnd');
-              } else {
-                const partialClose = after.match(PARTIAL_TAG_CLOSE_RE);
-                const holdFrom = partialClose?.index ?? after.length;
-                emitBuffer = before;
-                pendingThinkClose = after.slice(holdFrom);
-                const thinkContent = after.slice(0, holdFrom);
-                if (thinkContent) emitter?.emit('thinkToken', thinkContent);
-              }
-            }
-          } else {
-            const closeMatch = emitBuffer.match(THINK_CLOSE_RE);
-            if (closeMatch) {
-              const closeEnd = emitBuffer.indexOf(closeMatch[0]) + closeMatch[0].length;
-              // Emit thinking content before the closing tag
-              const thinkContent = emitBuffer.slice(0, emitBuffer.indexOf(closeMatch[0]));
-              if (thinkContent) emitter?.emit('thinkToken', thinkContent);
-              emitBuffer = emitBuffer.slice(closeEnd);
-              inThink = false;
-              emitter?.emit('thinkEnd');
-            } else {
-              // Preserve a trailing partial tag such as "<" or "</thi"
-              // until the next chunk. Consuming it as reasoning would make a
-              // split </think> impossible to recognize on the next token.
-              const partialClose = emitBuffer.match(PARTIAL_TAG_CLOSE_RE);
-              const holdFrom = partialClose?.index ?? emitBuffer.length;
-              const thinkContent = emitBuffer.slice(0, holdFrom);
-              if (thinkContent) emitter?.emit('thinkToken', thinkContent);
-              pendingThinkClose = emitBuffer.slice(holdFrom);
-              emitBuffer = '';
-            }
-          }
-          // ── End think-tag filtering ─────────────────────────────────────────
-
-          // Some providers emit a raw closing tag in visible content after
-          // sending reasoning through a dedicated reasoning_content field.
-          // Treat standalone reasoning tags as protocol markers, not text.
-          if (!inThink) {
-            emitBuffer = stripThinkTags(emitBuffer);
-            // Strip leaked tool-call protocol fragments (e.g. `<tool_call>`,
-            // `<invoke name="…">`, `<function_calls>`) that some models emit
-            // as raw text instead of structured tool_calls deltas. Without
-            // this, the user sees lines like `]<]minimax>[<tool_call>` mixed
-            // in with the real response.
-            //
-            // Stripping complete tags is not enough on its own: the blob's
-            // *inner* tags are the tool's own parameter names (`<command>`,
-            // `<file_path>`), which no fixed list can cover. So an unclosed
-            // opener also suppresses display until its closing tag arrives in
-            // a later chunk. The raw content still reaches parseTextToolCalls
-            // below, which turns the blob back into real tool calls.
-            const filtered = filterToolCallStream(emitBuffer, inToolLeak);
-            emitBuffer = filtered.text;
-            inToolLeak = filtered.inLeak;
-            parseBuffer = stripToolCallTags(parseBuffer);
-          }
-
-          // Parse <todo>...</todo> block from first response.
-          // Tolerant of whitespace, case, and self-closing variants.
-          if (!todoEmitted) {
-            const match = parseBuffer.match(TODO_CAPTURE_RE);
-            if (match) {
-              const items = parseTodoBlock(match[1]);
-              if (items.length) {
-                this._todoList = items;
-                this._todoDoneIdx = new Set();
-                this._todoFromBlock = true;
-                this._todoFromMarkdown = false;
-                todoEmitted = true;
-                emitter?.emit('todoList', items);
-              }
-              parseBuffer = parseBuffer.replace(TODO_BLOCK_RE, '');
-              emitBuffer  = emitBuffer.replace(TODO_BLOCK_RE, '');
-            }
-          }
-
-          // Parse <plan>...</plan> block from the first response. Same
-          // tolerance as the todo block, but the body is JSON or a numbered
-          // list, parsed by planner.extractPlan. The block itself is hidden
-          // from the visible stream (the UI shows the plan in a dedicated
-          // panel via the `plan` event), but only stripped once parsed —
-          // partial blocks are kept in parseBuffer until close.
-          if (this._planningActive && !this._planEmitted) {
-            const planMatch = parseBuffer.match(PLAN_CAPTURE_RE);
-            if (planMatch) {
-              // extractPlan matches the <plan>…</plan> block itself, so it
-            // needs the whole match. Handing it the captured body meant its
-            // very first regex never matched and it returned null every time:
-            // no plan was ever emitted, the UI panel never filled, and the
-            // planning reminder bought nothing but the tokens it cost.
-            const plan = extractPlan(planMatch[0]);
-              if (plan && plan.steps && plan.steps.length) {
-                this._plan = plan;
-                this._planEmitted = true;
-                this.workingMemory.plan = plan;
-                emitter?.emit('plan', plan);
-                this._debugLog(emitter, 'turn.plan_proposed', {
-                  steps: plan.steps.length,
-                  goal: plan.goal.slice(0, 80),
-                });
-                seedTodoFromPlan(plan);
-              }
-              // Strip the block from both buffers regardless of parse success
-              // so a malformed plan does not leak JSON scaffolding into the
-              // visible reply. The raw body is preserved in plan.raw if it
-              // parsed.
-              parseBuffer = parseBuffer.replace(PLAN_BLOCK_RE, '');
-              emitBuffer  = emitBuffer.replace(PLAN_BLOCK_RE, '');
-            }
-          }
-
-          // Parse <decision>...</decision> blocks — the model can emit
-          // these throughout a turn to flag important choices (e.g. "I went
-          // with X because Y, rejected Z because W"). Each block becomes
-          // a structured entry in workingMemory.decisions, capped at 32
-          // entries to keep memory bounded across long sessions. The block
-          // itself is stripped from the visible stream — the UI consumes
-          // the entries via the `decision` event.
-          const decisionMatches = [...parseBuffer.matchAll(DECISION_CAPTURE_RE)];
-          if (decisionMatches.length) {
-            for (const m of decisionMatches) {
-              const body = String(m[1] || '').trim();
-              if (!body) continue;
-              const entry = {
-                text: body.slice(0, 1000),
-                at: new Date().toISOString(),
-              };
-              if (!Array.isArray(this.workingMemory.decisions)) {
-                this.workingMemory.decisions = [];
-              }
-              this.workingMemory.decisions.push(entry);
-              // Cap at 32 — beyond that, drop the oldest.
-              if (this.workingMemory.decisions.length > 32) {
-                this.workingMemory.decisions.splice(0, this.workingMemory.decisions.length - 32);
-              }
-              emitter?.emit('decision', entry);
-              this._debugLog(emitter, 'turn.decision_logged', {
-                preview: body.slice(0, 80),
-              });
-            }
-            parseBuffer = parseBuffer.replace(DECISION_BLOCK_RE, '');
-            emitBuffer  = emitBuffer.replace(DECISION_BLOCK_RE, '');
-          }
-
-          // Parse <done:N> markers — tolerant of whitespace, case, and self-closing.
-          // Handles: <done:1>, <done : 1>, <DONE:1/>, <done:1 />
-          const doneMatches = [...parseBuffer.matchAll(DONE_MARKER_RE)];
-          if (doneMatches.length) {
-            for (const m of doneMatches) {
-              const n = parseInt(m[0].match(/\d+/)[0], 10);
-              this._todoDoneIdx.add(n - 1);
-              emitter?.emit('todoDone', n - 1);
-            }
-            parseBuffer = parseBuffer.replace(DONE_MARKER_RE, '');
-            emitBuffer  = emitBuffer.replace(DONE_MARKER_RE, '');
-          }
-
-          flushSafe();
-        };
+        const onToken = (text) => markup.push(text);
 
         let turnTimer = null;
         const turnTimeout = new Promise((_, reject) => {
@@ -1813,19 +1638,17 @@ export class Agent {
           emitter?.emit('tokenCount', estTokens);
         }
 
-        // Flush any remaining buffered content (stripped of markers) for next turn
-        if (emitBuffer) {
-          const finalChunk = inThink || inToolLeak
-            ? '' // discard unclosed think block / leaked tool-call protocol
-            : stripMarkers(stripToolCallTags(emitBuffer));
-          if (finalChunk) emitter?.emit('token', finalChunk);
-          emitBuffer = '';
+        // A response that arrived in one piece never went through onToken.
+        // It goes through the same parser, silently — the reply is shown by
+        // the completion path — so its blocks count exactly as streamed ones.
+        if (!markup.sawText) {
+          const rawContent = result.content || result.message?.content || '';
+          if (rawContent) {
+            markup.silent = true;
+            markup.push(rawContent);
+          }
         }
-        // Reset think state between turns (handles unclosed tags on abort / max_tokens)
-        inThink = false;
-        inToolLeak = false;
-        pendingThinkClose = '';
-        parseBuffer = '';
+        markup.finish();
 
         // A few providers ignore the empty tool list sent for the final
         // recovery turn and return another structured tool call anyway. Do
@@ -1895,92 +1718,7 @@ export class Agent {
       if (result.type === 'text') {
         let clean = stripMarkers(result.content);
 
-        // Parse todo list from final result if not already parsed during streaming
-        if (!todoEmitted) {
-          const todoMatch = result.content.match(TODO_CAPTURE_RE);
-          if (todoMatch) {
-            const items = parseTodoBlock(todoMatch[1]);
-            if (items.length) {
-              this._todoList = items;
-              this._todoDoneIdx = new Set();
-              this._todoFromBlock = true;
-              this._todoFromMarkdown = false;
-              todoEmitted = true;
-              emitter?.emit('todoList', items);
-            }
-          }
-        }
-
-        // Parse <plan> block from final result if streaming did not see it
-        // (e.g. the model emitted the whole block in a single non-streamed
-        // turn, or the block landed across a chunk boundary the parser could
-        // not stitch). Same emit contract as the streaming path.
-        if (this._planningActive && !this._planEmitted) {
-          const planMatch = result.content.match(PLAN_CAPTURE_RE);
-          if (planMatch) {
-            // extractPlan matches the <plan>…</plan> block itself, so it
-            // needs the whole match. Handing it the captured body meant its
-            // very first regex never matched and it returned null every time:
-            // no plan was ever emitted, the UI panel never filled, and the
-            // planning reminder bought nothing but the tokens it cost.
-            const plan = extractPlan(planMatch[0]);
-            if (plan && plan.steps && plan.steps.length) {
-              this._plan = plan;
-              this._planEmitted = true;
-              this.workingMemory.plan = plan;
-              emitter?.emit('plan', plan);
-              this._debugLog(emitter, 'turn.plan_proposed', {
-                steps: plan.steps.length,
-                goal: plan.goal.slice(0, 80),
-                source: 'final',
-              });
-              seedTodoFromPlan(plan);
-            }
-          }
-        }
-
-        // Pick up any <done:N> markers from the final content too — covers the
-        // non-streaming code path where onToken never fires. A markdown-derived
-        // plan counts here as well: auto-continue now acts on one, so the model
-        // has to be able to tick its steps off.
-        if (this._todoFromBlock || this._todoFromMarkdown) {
-          const doneMatches = [...String(result.content || '').matchAll(DONE_MARKER_RE)];
-          for (const m of doneMatches) {
-            const n = parseInt(m[0].match(/\d+/)[0], 10);
-            if (!this._todoDoneIdx.has(n - 1)) {
-              this._todoDoneIdx.add(n - 1);
-              emitter?.emit('todoDone', n - 1);
-            }
-          }
-        }
-
-        // Pick up <decision> blocks from the final content too — same
-        // rationale as the done-marker fallback above (covers non-streamed
-        // responses where onToken never fired). The streaming path already
-        // strips the block from emitBuffer; here we only need to populate
-        // workingMemory.decisions and emit the event for any block the
-        // streaming parser missed.
-        const finalDecisionMatches = [...String(result.content || '').matchAll(DECISION_CAPTURE_RE)];
-        if (finalDecisionMatches.length) {
-          if (!Array.isArray(this.workingMemory.decisions)) {
-            this.workingMemory.decisions = [];
-          }
-          for (const m of finalDecisionMatches) {
-            const body = String(m[1] || '').trim();
-            if (!body) continue;
-            const entry = { text: body.slice(0, 1000), at: new Date().toISOString() };
-            this.workingMemory.decisions.push(entry);
-            if (this.workingMemory.decisions.length > 32) {
-              this.workingMemory.decisions.splice(0, this.workingMemory.decisions.length - 32);
-            }
-            emitter?.emit('decision', entry);
-            this._debugLog(emitter, 'turn.decision_logged_final', {
-              preview: body.slice(0, 80),
-            });
-          }
-        }
-
-        // Fallback: detect a markdown numbered list when no <todo> tag was
+        // Fallback: detect a markdown numbered list        // Fallback: detect a markdown numbered list when no <todo> tag was
         // used. Tracked as a weaker source than a real <todo> block, because a
         // bare numbered list may just be an enumeration inside an answer —
         // auto-continue only trusts it once the turn has actually run tools.

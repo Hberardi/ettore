@@ -9,8 +9,8 @@
 //   <decision>...</decision> — important decision the model wants logged
 //                            (alternatives considered, reasoning, etc.)
 //
-// Regexes are compiled once at module load. Pure functions live here; the
-// streaming state machine itself stays in agents/index.js.
+// Regexes are compiled once at module load. StreamMarkupParser, at the end of
+// this file, is the streaming state machine the agent loop feeds chunks into.
 
 export const THINK_BLOCK_RE = /<\s*(think|thinking|reasoning)\s*>[\s\S]*?<\s*\/\s*(think|thinking|reasoning)\s*>/gi;
 export const TODO_BLOCK_RE  = /<\s*todo\s*>[\s\S]*?<\s*\/\s*todo\s*>\n?/gi;
@@ -37,6 +37,10 @@ export const PLAN_CAPTURE_RE  = /<\s*plan\s*>([\s\S]*?)<\s*\/\s*plan\s*>/i;
 // requires the global flag.
 export const DECISION_BLOCK_RE   = /<\s*decision\s*>[\s\S]*?<\s*\/\s*decision\s*>\n?/i;
 export const DECISION_CAPTURE_RE = /<\s*decision\s*>([\s\S]*?)<\s*\/\s*decision\s*>/gi;
+// Global twin of DECISION_BLOCK_RE, for stripping. Replacing with the
+// single-match regex left every block after the first in the text: visible in
+// the reply, and matched again by the next chunk's scan.
+export const DECISION_BLOCKS_RE  = /<\s*decision\s*>[\s\S]*?<\s*\/\s*decision\s*>\n?/gi;
 
 // Invisible characters that some providers (notably MiniMax M2.7) insert
 // between `<` and the tag name. JavaScript's `\s` does NOT include U+200D
@@ -261,7 +265,7 @@ export function stripMarkers(text) {
     .replace(TODO_BLOCK_RE, '')
     .replace(DONE_MARKER_RE, '')
     .replace(PLAN_BLOCK_RE, '')
-    .replace(DECISION_BLOCK_RE, '');
+    .replace(DECISION_BLOCKS_RE, '');
 }
 
 // Remove just the <plan>...</plan> block, leaving every other marker alone.
@@ -335,4 +339,219 @@ export function extractMarkdownTodoList(content) {
     }
   }
   return items.length >= 3 ? items.map(s => s.slice(0, 120)) : null;
+}
+
+// Openers of the blocks the parser consumes whole. While one is unclosed the
+// buffer has to keep it; otherwise only a short tail can still matter.
+const OPEN_TODO_RE = /<\s*todo\s*>/i;
+const OPEN_PLAN_RE = /<\s*plan\s*>/i;
+const OPEN_DECISION_RE = /<\s*decision\s*>/i;
+// Long enough for any partial marker (`<  decision  >`, `<done : 12 />`).
+const PARSE_TAIL_CHARS = 48;
+
+/**
+ * The streaming state machine for one provider response.
+ *
+ * Fed raw chunks, it separates what the user should see from the control
+ * markup around it: reasoning goes to the think hooks, protocol leaks are
+ * suppressed, and each complete <todo>, <plan>, <decision> or <done:N> is
+ * reported exactly once and removed from the visible text. The agent owns what
+ * those blocks mean; this class only finds them.
+ *
+ * A response that arrived in one piece (no streaming) goes through `push` as
+ * well, with `silent` set, so both paths share one parser and cannot drift.
+ *
+ * hooks: onVisible(text), onThinkStart(), onThinkToken(text), onThinkEnd(),
+ *   wantsTodo() → bool, onTodo(items), wantsPlan() → bool, onPlan(blockText),
+ *   onDecision(body), onDone(index)   — every hook is optional.
+ */
+export class StreamMarkupParser {
+  constructor(hooks = {}) {
+    this.hooks = hooks;
+    this.reset();
+  }
+
+  reset() {
+    // Text scanned for control blocks. Consumed blocks are removed and the
+    // rest is trimmed after each chunk, so the scan stays proportional to
+    // what can still form a block rather than to the whole response.
+    this.parseBuffer = '';
+    // Text that is safe to show once no partial tag is pending at its end.
+    this.emitBuffer = '';
+    this.inThink = false;
+    this.pendingThinkClose = '';
+    // Set once the model starts printing tool-call protocol as visible text.
+    this.inToolLeak = false;
+    this.silent = false;
+    this.sawText = false;
+  }
+
+  _call(name, ...args) {
+    if (this.silent && (name === 'onVisible' || name.startsWith('onThink'))) return undefined;
+    return this.hooks[name]?.(...args);
+  }
+
+  push(text) {
+    if (!text) return;
+    this.sawText = true;
+    this.parseBuffer += text;
+    this.emitBuffer += text;
+    if (this.inThink && this.pendingThinkClose) {
+      this.emitBuffer = this.pendingThinkClose + this.emitBuffer;
+      this.pendingThinkClose = '';
+    }
+    this._filterThink();
+    if (!this.inThink) {
+      // Some providers emit a raw closing tag in visible content after
+      // sending reasoning through a dedicated reasoning_content field.
+      this.emitBuffer = stripThinkTags(this.emitBuffer);
+      // Stripping complete tool-call tags is not enough: the blob's inner
+      // tags are the tool's own parameter names, which no fixed list covers,
+      // so an unclosed opener suppresses display until its close arrives.
+      // The raw content still reaches parseTextToolCalls in the agent.
+      const filtered = filterToolCallStream(this.emitBuffer, this.inToolLeak);
+      this.emitBuffer = filtered.text;
+      this.inToolLeak = filtered.inLeak;
+      this.parseBuffer = stripToolCallTags(this.parseBuffer);
+    }
+    this._consumeBlocks();
+    this._compactParseBuffer();
+    this._flushSafe();
+  }
+
+  /** End of the response: emit what is left, minus unclosed markup. */
+  finish() {
+    if (this.emitBuffer) {
+      const finalChunk = this.inThink || this.inToolLeak
+        ? '' // discard an unclosed think block / leaked tool-call protocol
+        : stripMarkers(stripToolCallTags(this.emitBuffer));
+      if (finalChunk) this._call('onVisible', finalChunk);
+    }
+    this.reset();
+  }
+
+  _filterThink() {
+    // Handles <think>, <thinking>, <reasoning>; a tag may be split across
+    // chunks, so a trailing partial close is held until the next one.
+    if (!this.inThink) {
+      const openMatch = this.emitBuffer.match(THINK_OPEN_RE);
+      if (!openMatch) return;
+      const openIdx = openMatch.index;
+      const before = this.emitBuffer.slice(0, openIdx);
+      const after = this.emitBuffer.slice(openIdx + openMatch[0].length);
+      this.inThink = true;
+      this._call('onThinkStart');
+      const closeMatch = after.match(THINK_CLOSE_RE);
+      if (closeMatch) {
+        this.emitBuffer = before + after.slice(closeMatch.index + closeMatch[0].length);
+        this.inThink = false;
+        this._call('onThinkEnd');
+      } else {
+        const holdFrom = after.match(PARTIAL_TAG_CLOSE_RE)?.index ?? after.length;
+        this.emitBuffer = before;
+        this.pendingThinkClose = after.slice(holdFrom);
+        const thinkContent = after.slice(0, holdFrom);
+        if (thinkContent) this._call('onThinkToken', thinkContent);
+      }
+      return;
+    }
+    const closeMatch = this.emitBuffer.match(THINK_CLOSE_RE);
+    if (closeMatch) {
+      const thinkContent = this.emitBuffer.slice(0, closeMatch.index);
+      if (thinkContent) this._call('onThinkToken', thinkContent);
+      this.emitBuffer = this.emitBuffer.slice(closeMatch.index + closeMatch[0].length);
+      this.inThink = false;
+      this._call('onThinkEnd');
+    } else {
+      // Consuming a trailing "</thi" as reasoning would make the split close
+      // tag impossible to recognize on the next chunk.
+      const holdFrom = this.emitBuffer.match(PARTIAL_TAG_CLOSE_RE)?.index ?? this.emitBuffer.length;
+      const thinkContent = this.emitBuffer.slice(0, holdFrom);
+      if (thinkContent) this._call('onThinkToken', thinkContent);
+      this.pendingThinkClose = this.emitBuffer.slice(holdFrom);
+      this.emitBuffer = '';
+    }
+  }
+
+  _strip(re) {
+    this.parseBuffer = this.parseBuffer.replace(re, '');
+    this.emitBuffer = this.emitBuffer.replace(re, '');
+  }
+
+  _consumeBlocks() {
+    if (this.hooks.wantsTodo?.() !== false) {
+      const match = this.parseBuffer.match(TODO_CAPTURE_RE);
+      if (match) {
+        const items = parseTodoBlock(match[1]);
+        if (items.length) this._call('onTodo', items);
+        this._strip(TODO_BLOCK_RE);
+      }
+    }
+    if (this.hooks.wantsPlan?.()) {
+      const match = this.parseBuffer.match(PLAN_CAPTURE_RE);
+      if (match) {
+        this._call('onPlan', match[0]);
+        // Stripped whether or not it parsed, so a malformed plan does not
+        // leak its JSON scaffolding into the reply.
+        this._strip(PLAN_BLOCK_RE);
+      }
+    }
+    // A block nobody wants any more is still markup, not reply: the final
+    // text drops it through stripMarkers, so the stream has to as well.
+    this.emitBuffer = this.emitBuffer.replace(TODO_BLOCK_RE, '').replace(PLAN_BLOCK_RE, '');
+    const decisions = [...this.parseBuffer.matchAll(DECISION_CAPTURE_RE)];
+    if (decisions.length) {
+      for (const m of decisions) {
+        const body = String(m[1] || '').trim();
+        if (body) this._call('onDecision', body);
+      }
+      this._strip(DECISION_BLOCKS_RE);
+    }
+    const doneMarkers = [...this.parseBuffer.matchAll(DONE_MARKER_RE)];
+    if (doneMarkers.length) {
+      for (const m of doneMarkers) this._call('onDone', parseInt(m[0].match(/\d+/)[0], 10) - 1);
+      this._strip(DONE_MARKER_RE);
+    }
+  }
+
+  _compactParseBuffer() {
+    const openers = [OPEN_DECISION_RE];
+    if (this.hooks.wantsTodo?.() !== false) openers.push(OPEN_TODO_RE);
+    if (this.hooks.wantsPlan?.()) openers.push(OPEN_PLAN_RE);
+    let keepFrom = Math.max(0, this.parseBuffer.length - PARSE_TAIL_CHARS);
+    for (const re of openers) {
+      const match = this.parseBuffer.match(re);
+      if (match && match.index < keepFrom) keepFrom = match.index;
+    }
+    if (keepFrom > 0) this.parseBuffer = this.parseBuffer.slice(keepFrom);
+  }
+
+  _flushSafe() {
+    if (!this.emitBuffer) return;
+    // Complete blocks are gone from emitBuffer by now, so an opener still in
+    // it has not closed yet. Show what precedes it and hold the rest: with
+    // token-by-token streaming nearly every block spans chunks, and flushing
+    // past the opener put `<todo>1. …` into the reply.
+    let openAt = -1;
+    for (const re of [OPEN_TODO_RE, OPEN_PLAN_RE, OPEN_DECISION_RE]) {
+      const match = this.emitBuffer.match(re);
+      if (match && (openAt < 0 || match.index < openAt)) openAt = match.index;
+    }
+    if (openAt >= 0) {
+      const before = this.emitBuffer.slice(0, openAt);
+      this.emitBuffer = this.emitBuffer.slice(openAt);
+      if (before) this._call('onVisible', before);
+      return;
+    }
+    // Hold the last bytes only while they could still grow into a control
+    // tag this parser suppresses.
+    const holdBack = PARTIAL_TAG_OPEN_RE.test(this.emitBuffer)
+      || PARTIAL_TAG_CLOSE_RE.test(this.emitBuffer)
+      || PARTIAL_TOOL_TAG_RE.test(this.emitBuffer)
+      || PARTIAL_FRAMING_RE.test(this.emitBuffer);
+    if (holdBack) return;
+    const chunk = this.emitBuffer;
+    this.emitBuffer = '';
+    this._call('onVisible', chunk);
+  }
 }
