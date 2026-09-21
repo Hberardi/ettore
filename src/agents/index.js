@@ -77,6 +77,7 @@ import { SkillSystem } from '../skills/index.js';
 import { executeToolHandler } from './tool-executor.js';
 import { guardToolCall, parseToolCall } from './tool-call-guard.js';
 import { ReleaseGateCoordinator } from './release-gate-coordinator.js';
+import { commandWriteTargets, diffSnapshots, snapshotWorkspace } from './workspace-changes.js';
 
 // Increase default max listeners to avoid AbortSignal warnings
 EventEmitter.setMaxListeners(20);
@@ -736,16 +737,23 @@ export class Agent {
       await this._rememberFileSeen(args.file_path, args, output);
     }
     if (name === 'write' || name === 'edit' || name === 'apply_patch_structured') {
-      wm.workspaceRevision++;
-      wm.filesSeen[args.file_path] = {
-        changed: true,
-        updatedAt: new Date().toISOString(),
-        summary: `${name} modified this file`,
-      };
-      wm.nextAction = 'verify the edited file and run focused checks';
+      this._recordWorkspaceChange([args.file_path], name);
     }
     wm.cacheEntries = this.toolCache.size;
     wm.updatedAt = new Date().toISOString();
+  }
+
+  _recordWorkspaceChange(files, via) {
+    const wm = this.workingMemory;
+    wm.workspaceRevision++;
+    for (const file of files) {
+      wm.filesSeen[file] = {
+        changed: true,
+        updatedAt: new Date().toISOString(),
+        summary: `${via} modified this file`,
+      };
+    }
+    wm.nextAction = 'verify the edited file and run focused checks';
   }
 
   getWorkingMemorySnapshot() {
@@ -2512,6 +2520,9 @@ export class Agent {
         // Emit a synthetic "Avvio…" so the TUI shows immediate feedback even
         // for tools that do not publish their own progress.
         emitter?.emit('toolProgress', { name: p.name, key: '', message: 'Avvio…' });
+        const isShell = p.name === 'bash' || p.name === 'bash_session';
+        const shellCwd = isShell ? (p.args.workdir || this._workdir) : null;
+        const snapshotBefore = isShell ? await snapshotWorkspace(shellCwd) : null;
         const execution = await executeToolHandler({
           name: p.name,
           args: p.args,
@@ -2552,6 +2563,26 @@ export class Agent {
           touchedFiles.add(p.args.file_path);
           recordMutation(releaseGate, p.args.file_path, output);
           this._invalidateReadCacheForFile(p.args.file_path);
+        }
+        // A shell command names no file, so what it changed is read off the
+        // workspace itself. Recorded before the verification below: in
+        // `sed -i … && npm test` the tests ran on the edited state.
+        if (isShell) {
+          const changedFiles = snapshotBefore
+            ? diffSnapshots(snapshotBefore, await snapshotWorkspace(shellCwd))
+            : commandWriteTargets(p.args.command, shellCwd);
+          if (changedFiles.length) {
+            mutationToolUsed = true;
+            for (const file of changedFiles) {
+              touchedFiles.add(file);
+              // The change is observed on disk, so a non-zero exit does not
+              // undo it the way a refused write does.
+              recordMutation(releaseGate, file, '');
+              this._invalidateReadCacheForFile(file);
+            }
+            this._recordWorkspaceChange(changedFiles, p.name);
+            this._debugLog(emitter, 'tool.shell_mutation', { name: p.name, files: changedFiles.slice(0, 20) });
+          }
         }
         // Treat as verification only when a real checker/tester ran. A read of
         // the touched file is useful inspection, but it is not verification.
