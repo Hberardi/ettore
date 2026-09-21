@@ -8,6 +8,9 @@ and reports every visual alignment/overflow issue.
 import os, pty, select, subprocess, sys, re, time, struct, fcntl, termios, signal, textwrap, tempfile
 
 TEST_CONFIG_DIR = os.path.join(tempfile.gettempdir(), 'ettore-display-test-config')
+# Every spawn is a real CLI launch; without this it saved into the user's own
+# session history.
+TEST_SESSIONS_DIR = os.path.join(tempfile.gettempdir(), 'ettore-display-test-sessions')
 
 # The repo root, taken from this file's own location. It used to be one
 # developer's absolute path, which only ever worked on that machine — CI
@@ -29,7 +32,7 @@ def spawn(cols, rows, extra_wait=0.0):
     os.makedirs(TEST_CONFIG_DIR, exist_ok=True)
     env.update(TERM='xterm-256color', COLUMNS=str(cols), LINES=str(rows),
                FORCE_COLOR='1', NO_COLOR='', ETTORE_CONFIG_DIR=TEST_CONFIG_DIR,
-               NODE_NO_WARNINGS='1')
+               ETTORE_SESSIONS_DIR=TEST_SESSIONS_DIR, NODE_NO_WARNINGS='1')
 
     proc = subprocess.Popen(
         ['node', 'bin/cli.js'],
@@ -283,7 +286,7 @@ console.log(rendered);
     result = subprocess.run(
         ['node', '--input-type=module', '-e', script],
         cwd=REPO_ROOT,
-        env={**os.environ, 'ETTORE_CONFIG_DIR': TEST_CONFIG_DIR, 'NODE_NO_WARNINGS': '1'},
+        env={**os.environ, 'ETTORE_CONFIG_DIR': TEST_CONFIG_DIR, 'ETTORE_SESSIONS_DIR': TEST_SESSIONS_DIR, 'NODE_NO_WARNINGS': '1'},
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

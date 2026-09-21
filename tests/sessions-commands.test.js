@@ -252,3 +252,25 @@ test('a new session forgets the conversation but not the agent', async () => {
   assert.deepEqual(agent.messages, [{ role: 'system', content: 'prompt' }]);
   assert.equal(tui.messages.length, 0);
 });
+
+// ── empty sessions ────────────────────────────────────────────────────────
+
+test('a session nobody typed into is never written', async () => {
+  const { readdirSync } = await import('node:fs');
+  const session = await createSession('google', 'unknown');
+  assert.deepEqual(readdirSync(dir), [], 'starting the CLI must not leave a file behind');
+  session.messages = [{ role: 'system', content: 'prompt' }];
+  assert.equal(await saveSession(session), false);
+  assert.deepEqual(readdirSync(dir), []);
+});
+
+test('empty files from older versions are neither listed nor resumed', async () => {
+  const real = await seed({ turns: 2 });
+  writeFileSync(join(dir, 'vuota1.json'), JSON.stringify({
+    id: 'vuota1', provider: 'google', model: 'unknown', messages: [], created: Date.now(), updated: Date.now() + 60_000,
+  }));
+  const listed = await listSessions();
+  assert.deepEqual(listed.map(s => s.id), [real.id]);
+  const result = await builtinCommands.resume.handler('', { sessionId: 'altra' });
+  assert.equal(result.session.id, real.id, '/resume must not pick the newer, empty file');
+});

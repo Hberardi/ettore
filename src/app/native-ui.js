@@ -6,7 +6,7 @@ import { PROVIDER_REGISTRY } from '../providers/registry.js';
 import { loadConfig, getConfig } from '../config/index.js';
 import { createClient } from '../llm/client.js';
 import { Agent } from '../agents/index.js';
-import { createSession, saveSession } from '../sessions/index.js';
+import { createSession, saveSession, sessionHasContent } from '../sessions/index.js';
 import { uiBridge } from '../tools/bridge.js';
 import { listInstallSessionApprovals, setAutoApprove } from '../tools/index.js';
 import { builtinCommands } from '../commands/index.js';
@@ -456,6 +456,10 @@ export async function startApp(options = {}) {
       // Errors are surfaced via the 'error' event; nothing to do here.
     }
     session.messages = agent.messages;
+    // The model can change mid-session (/model), and at startup it may not
+    // have been resolved yet; record the one that actually answered.
+    session.provider = connectionManager.activeProvider || session.provider;
+    session.model = connectionManager.activeModel || session.model;
     await saveSession(session).catch(() => {});
   }
 
@@ -1630,14 +1634,16 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
         return;
       }
       if (result && typeof result === 'object' && result.action === 'newSession') {
-        const previous = session.id;
+        const previous = sessionHasContent(session) ? session.id : null;
         session = await createSession(
           connectionManager.activeProvider || 'unknown',
           connectionManager.activeModel || 'unknown',
         );
         tui.sessionId = session.id;
         clearConversation({ tui, agent });
-        showCommandOutput(cmdName, `New session ${session.id}. The previous one is saved — /resume ${previous} returns to it.`);
+        showCommandOutput(cmdName, previous
+          ? `New session ${session.id}. The previous one is saved — /resume ${previous} returns to it.`
+          : `New session ${session.id}.`);
         tui.needsRender = true;
         return;
       }
