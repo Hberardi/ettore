@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.6.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.7.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -25,6 +25,7 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 - ⚡ **Fast on every provider** - requests are shaped so the provider can reuse its prompt cache, context summaries are written by a fast model of the same provider, and `--verbose-tokens` reports time-to-first-token and cached tokens per call
 - 🔍 **Delegated search** - `explore` answers one question about the codebase in a separate read-only context and returns a short report with `file:line` references; the greps and full-file reads behind it never enter the main conversation
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn, and its steps drive the progress panel and the auto-continue, so a plan left half-done is resumed instead of dropped
+- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev judges each finished turn (did the model announce work without doing it? is the request really carried out?), lets a turn continue without a declared plan, and routes codebase-wide searches to the `explore` sub-agent; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
 - 🧩 **Eight plugins included** - PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts — installed with `/plugins install`, and you can write your own
 
 ## Installation
@@ -434,86 +435,116 @@ And `edit` helps when it misses: a block copied with the wrong indentation still
 applies, "not found" quotes the closest region of the file with line numbers,
 and a successful edit shows the changed lines.
 
-## Jev: a second opinion on when a turn is done
+## Jev — an optional judgment layer (TypeSafe)
 
-Every turn in build mode ends with a judgment: did the model *announce* work
-without doing it, hand it back to you, show code instead of writing it — or is
-the request genuinely finished? ETTORE answers that with regex over Italian and
-English phrasing. It works, but wording is a proxy for meaning: a false yes
-re-prompts a model that was already done, a false no ends a turn with the job
-half finished.
+[Jev](https://docs.typesafe.ai/introduction) is TypeSafe's System One model. It
+does not generate text: it evaluates typed questions against a state and returns
+structured answers with calibrated probabilities — a yes/no with its
+probability, a choice from a list you define, a score on a rubric you define.
 
-[Jev](https://docs.typesafe.ai/introduction), TypeSafe's System One model, can
-answer the same questions from meaning instead of wording. It does not generate
-text — it evaluates typed questions against a state and returns structured
-answers with calibrated probabilities. ETTORE asks all four questions in a
-single request, evaluated in parallel.
+ETTORE uses it for the judgments the harness has to make about a turn, which
+until now were regexes over Italian and English phrasing. Wording is a proxy for
+meaning, and both errors cost: a false yes re-prompts a model that was already
+finished, a false no ends a turn with the job half done.
+
+**Jev is off unless you turn it on, and nothing about ETTORE changes while it is
+off.** You need a TypeSafe API key; it is a paid service, billed per input token.
+
+### Turning it on and off
+
+| Command | What it does |
+| --- | --- |
+| `/jev active <api key>` | Turns Jev on and saves the key, encrypted. Get a key at [console.typesafe.ai/keys](https://console.typesafe.ai/keys). |
+| `/jev active` | Turns it back on with the key already saved — no need to retype it. |
+| `/jev out` | Turns it off. The key stays saved. |
+| `/jev out forget` | Turns it off **and** deletes the saved key. |
+| `/jev status` | Whether it is on, which model, and the traffic so far this session. |
+| `/jev test` | Makes one real call and reports the round trip. |
+
+`/typesafe` is an alias for the same command.
+
+The key can also come from the environment, which is what a script, a sandbox,
+or an already-running session needs:
 
 ```bash
-/jev active <api key>      # turn it on (key from https://console.typesafe.ai/keys)
-/jev status                # what is on, and which model
-/jev test                  # check the key and the connection
-/jev out                   # turn it off; add "forget" to delete the key
+export TYPESAFE_API_KEY=your-key
 ```
 
-If you cannot reach the command — a script, a sandbox, or a CLI session that
-was already running when Jev was installed — exporting the key is enough on its
-own:
+Exporting it is enough on its own — no command required. An explicit `/jev out`
+still wins over the variable, so turning Jev off never means hunting down where
+the export lives.
 
-```bash
-export TYPESAFE_API_KEY=sk-...
+While Jev is on, the sidebar carries a `jev on` row with the last call's
+latency.
+
+### What it does
+
+**1. It judges every finished build turn.** Four yes/no questions, asked in a
+single request and evaluated in parallel: did the model announce work without
+doing it, hand the remaining work back to you, show code instead of writing it
+to a file — and was the request actually carried out? Each answer either
+confirms or overrides the regex ETTORE would have used alone. When a judgment
+is decisive you see it:
+
+```
+◆ Jev (814ms) — lavoro annunciato ma non fatto: sì
 ```
 
-An explicit `/jev out` still wins over the variable, so turning the feature off
-never means hunting down where the export lives.
+**2. It lets a turn continue without a declared plan.** Auto-continue normally
+needs a `<todo>` list, and a model that writes "task completo" suppresses it, so
+restarting a half-finished turn fell to you. Measured on real sessions, 56% of
+the prompts sent were restarts rather than requests — the same sentence typed 28
+times. When Jev is sure the request has not been carried out and the turn
+actually ran tools, ETTORE continues by itself: at most three rounds, stopping
+the moment a round changes nothing. A turn that ran no tools is never pushed —
+answering a question is not unfinished work.
 
-With Jev on, one thing behaves differently rather than just more accurately:
-**a turn can continue on its own without a declared plan.** Auto-continue
-normally needs a `<todo>` list, and a model that writes "task completo"
-suppresses it — so the work of restarting fell to you. Measured on real
-sessions, 56% of the prompts sent were restarts rather than requests, the same
-sentence typed 28 times. When Jev is sure the request has not been carried out,
-and the turn actually ran tools, ETTORE continues by itself: at most three
-rounds, and it stops the moment a round changes nothing.
-
-Jev also routes the investigation. ETTORE has a read-only sub-agent — the
-`explore` tool — that answers a question about the codebase in a context of its
-own and hands back a short report, so the searching never fills the main
-conversation. It is offered on every build turn and models still grep by hand.
-When Jev is confident a request needs a codebase-wide search, the turn starts
-with a nudge to delegate it. That costs one call before the first token, so it
-is asked only for a fresh, non-trivial build request — never for a
+**3. It routes searching to the sub-agent.** ETTORE has a read-only sub-agent
+(the `explore` tool) that answers one question about the codebase in a context
+of its own and returns a short report, so the greps and reads behind it never
+fill the main conversation. It is offered on every build turn and models still
+search by hand. When Jev is confident a request needs a codebase-wide search,
+the turn opens with a nudge to delegate it. This one is asked *before* the first
+token, so it runs only for a fresh, non-trivial build request — never for a
 continuation, a short message, or a lite model.
 
-Without Jev neither branch exists. It is reached only through a decisive
-verdict, and there is no verdict when Jev is off, unreachable or unsure, so
-every user who never turns it on keeps exactly today's behaviour.
+Items 2 and 3 exist only with Jev on. They are reached through a decisive
+verdict, and there is no verdict when Jev is off, unreachable or unsure.
 
-Three properties make it safe to leave on:
+### Checking it is really working
+
+A label in the sidebar proves nothing, so `/jev status` reports the traffic:
+
+```
+Jev: on — model jev-latest, key apik...d2ed.
+
+Calls this session: 3 ok, 0 failed.
+Answered by: jev-1.13.0 (reported by the server, not by ETTORE).
+Last call: 814ms at 11:28:44.
+Tokens billed: 1184 in, 62 out.
+```
+
+The model id and the token counts come back from the API — ETTORE cannot print
+them without having made the call. You asked for `jev-latest`, an alias; the
+server answered with the version it resolved to. For a check that does not rely
+on ETTORE at all, watch the request counter in the TypeSafe console.
+
+Asking the agent whether Jev is on does not work, and that is deliberate: Jev is
+part of the harness, not the model's context. A model told it is being judged on
+whether it announced work without doing it can learn to word its way around the
+check instead of doing the work.
+
+### Why it is safe to leave on
 
 - **Jev decides, it never writes.** No text of its own ever reaches you or the
-  transcript. It only answers yes/no questions about a turn that already
-  happened.
-- **It only overrides when it is sure.** A Noul answer near the middle — the
-  model's way of saying "could go either way" — is discarded and the existing
-  check stands. Jev can only change an outcome it is confident about.
-- **Failure changes nothing.** No key, no network, a rate limit, a timeout:
-  the turn proceeds on exactly the checks it used before, and you see one line
-  saying Jev was unreachable.
-
-To check it is really calling the API rather than showing a label, `/jev status`
-reports the traffic: how many calls succeeded and failed this session, the
-round-trip time, the tokens billed, and **which model answered** — that id
-(`jev-1.13.0`) and the token counts come back from the server, so ETTORE cannot
-print them without having made the call. `/jev test` does one call on demand
-and reports the same.
-
-When Jev does decide something, you see it: `◆ Jev (240ms) — lavoro annunciato
-ma non fatto: sì`. An invisible decision layer would be worse than none.
-
-The key is stored with the same encrypted store used for provider keys, and is
-never written to disk in plaintext or echoed back in full. `/jev out` keeps the
-key so you can switch it back on without retyping; `/jev out forget` deletes it.
+  transcript. It only answers questions about a turn that already happened.
+- **It only acts when it is sure.** An answer near the middle — the model saying
+  "could go either way" — is discarded, and the check ETTORE already had stands.
+- **Failure changes nothing.** No key, no network, a rate limit, a timeout: the
+  turn proceeds on exactly the checks it used before, and one line tells you Jev
+  was unreachable.
+- **The key is stored like a provider key** — encrypted in the config directory,
+  never written in plaintext and never echoed back in full.
 
 ## Plugins
 

@@ -8,6 +8,81 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-09-21
+
+An optional judgment layer, and a round of fixes found by reading saved
+sessions rather than the code.
+
+### Added — Jev, an optional judgment layer (off by default)
+
+[Jev](https://docs.typesafe.ai/introduction) is TypeSafe's System One model: it
+generates no text, and instead answers typed questions about a state with
+calibrated probabilities. ETTORE can use it for the judgments the harness makes
+about a turn, which were regexes over Italian and English phrasing — a false yes
+re-prompts a model that was already finished, a false no ends a turn with the
+job half done.
+
+- `/jev active <api key>` turns it on and saves the key encrypted; `/jev out`
+  turns it off and keeps the key, `/jev out forget` deletes it. `/jev status`
+  reports the session's traffic and `/jev test` makes one call on demand.
+  `TYPESAFE_API_KEY` in the environment is enough on its own, and an explicit
+  `/jev out` still wins over it.
+- It judges each finished build turn on four questions in one parallel request,
+  and either confirms or overrides the existing check.
+- A turn can now continue without a declared plan. Auto-continue needed a
+  `<todo>` list, and a model writing "task completo" suppressed it, so
+  restarting fell to the user: in the saved sessions 45 of 81 prompts were
+  restarts rather than requests. Capped at three rounds and stopped by the first
+  round that changes nothing.
+- A request that needs a codebase-wide search is pointed at the `explore`
+  sub-agent before the turn starts.
+
+Jev only acts on a decisive answer, so an uncertain, unreachable or disabled Jev
+leaves every decision exactly where it was. **Users who do not turn it on get no
+behaviour change at all**, which the tests assert.
+
+### Fixed — things the saved sessions showed
+
+- **Code changed through the shell reaches the release gate.** Only `write`,
+  `edit` and `apply_patch_structured` counted as mutations, so a fix applied
+  with `sed -i`, `cat > file` or `git apply` left the gate open and the turn
+  could end as done without a test ever running.
+- **Empty sessions are no longer written.** A session file was created at every
+  launch, before the first prompt: one real directory held 844 of them out of
+  1187, and `/resume` with no id could land on one. A session is now written on
+  the first save that holds a user message, old empty files are not offered, and
+  each save records the model that actually answered.
+- **The summarizer's reasoning is out of the compressed context.** Six of eight
+  recent sessions opened their compressed context with the summarizing model's
+  own `<think>` block, re-sent on every later request and re-summarized into the
+  next compression. A summary left empty now falls back instead of replacing the
+  conversation with nothing.
+- **Stream markup is parsed once.** `<decision>` blocks were logged two or three
+  times, `stripMarkers` left every block after the first in the reply, and a
+  block spanning chunks — nearly every block, streaming token by token — was
+  shown from its opening tag on.
+- **The turn timeout measures silence, not duration.** It ran from the start of
+  the call while claiming "no progress", so a slow model still writing after
+  five minutes was cut off.
+- **A dead shell reports its last output.** `bash_session` settled on the
+  process's `exit` event, which says nothing about whether its output had been
+  read; under load a command's entire stderr came back empty beside a correct
+  exit code.
+- **Two more leaked tool-call shapes are recovered** rather than losing the turn,
+  both seen in real MiniMax sessions.
+- **A failed write no longer counts as a change**, and `ask_user` is validated
+  like every other tool.
+- **`ETTORE_CONFIG_DIR` now covers settings too**, not only secrets, so a
+  redirected run cannot write into the user's real configuration.
+
+### Changed
+
+- `run()` gave up about 500 lines to `tool-executor`, `tool-call-guard`,
+  `release-gate-coordinator`, `workspace-changes` and `StreamMarkupParser`.
+- The test suite runs with provider credentials stripped and its own config and
+  session directories, so it can never reach a live account.
+
+
 ## [1.6.0] — 2026-09-17
 
 This release is about one complaint: the agent was not good at fixing code.
