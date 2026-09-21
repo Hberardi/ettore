@@ -21,13 +21,22 @@ import { killProcessTree, resolveShell } from '../utils/platform.js';
 
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
-// How long to keep waiting for the stderr sentinel once stdout's has arrived.
-// It is a fallback, not the mechanism: normally both are already in hand. It
-// exists for the command that makes its counterpart unreachable — `exec 2>&-`
-// closes the session's stderr, `exec 2>/dev/null` redirects it — where waiting
-// for a sentinel that can never come would otherwise hold the call for the
-// full command timeout.
-const STDERR_SENTINEL_GRACE_MS = 250;
+// How long stderr may stay SILENT, after stdout's sentinel has arrived, before
+// we stop waiting for its counterpart.
+//
+// It is the last resort, not the mechanism. A command that makes stderr
+// unreachable — `exec 2>&-` closes it, `exec 2>/dev/null` redirects it —
+// normally closes the pipe, and that close is what tells us no sentinel is
+// coming: a fact from the data rather than a bet on the clock. This window
+// only covers the case where the pipe somehow stays open with nothing on it.
+//
+// It resets on every byte of stderr, because a pipe preserves order: data
+// still arriving proves the sentinel is queued behind it. The window used to
+// be a flat 250ms from the stdout sentinel, and under load — a full test suite,
+// a busy machine — it expired while `boom` was still in flight, and the
+// command's entire error output was reported as empty next to a correct exit
+// code. That is precisely the failure the stderr sentinel exists to prevent.
+const STDERR_SILENCE_GRACE_MS = 2000;
 
 let _sharedSession = null;
 
@@ -121,7 +130,9 @@ export function sessionDialect(options = {}) {
   return { name, file, ...SHELL_DIALECTS[name] };
 }
 
-class BashSession {
+// Exported for tests: the stdout/stderr framing has a race that only appears
+// under load, and a fake process is the only way to drive it deterministically.
+export class BashSession {
   constructor(workdir = process.cwd(), options = {}) {
     this.workdir = resolve(workdir);
     this.process = null;
@@ -193,6 +204,22 @@ class BashSession {
       let framedStdout = '';
       let framedExitCode = 0;
       let graceTimer = null;
+      // Set when we stop waiting for a sentinel that never came: the error
+      // output may be incomplete, and a caller must not present it as whole.
+      let stderrTruncated = false;
+
+      // Restart the silence window. Called whenever stderr proves it is alive.
+      const armGrace = () => {
+        if (stdoutSentinelSeen && !stderrSentinelSeen && !settled) {
+          if (graceTimer) clearTimeout(graceTimer);
+          graceTimer = setTimeout(() => {
+            stderrTruncated = true;
+            stderrSentinelSeen = true;
+            settleIfFramed();
+          }, STDERR_SILENCE_GRACE_MS);
+          graceTimer.unref?.();
+        }
+      };
 
       const heartbeat = onProgress ? setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
@@ -208,6 +235,7 @@ class BashSession {
         if (graceTimer) clearTimeout(graceTimer);
         this.process?.stdout?.off('data', onStdout);
         this.process?.stderr?.off('data', onStderr);
+        this.process?.stderr?.off('end', onStderrEnd);
         this.process?.off('exit', onExit);
         signal?.removeEventListener?.('abort', onAbort);
         resolve(value);
@@ -221,6 +249,7 @@ class BashSession {
           stderr: stderrBuf.replace(/\r?\n+$/, ''),
           exitCode: framedExitCode,
           bufferOverflow,
+          stderrTruncated,
         });
       };
 
@@ -238,21 +267,33 @@ class BashSession {
           const codeMatch = after.match(/EXIT:(-?\d+)/);
           framedExitCode = codeMatch ? parseInt(codeMatch[1], 10) : 0;
           if (!stderrSentinelSeen) {
-            // Its counterpart was written first, so it is on its way; give the
-            // pipe the time it needs rather than a single event-loop turn. The
-            // timer only fires for a command that made it unreachable.
-            graceTimer = setTimeout(() => {
+            // Its counterpart was written first, so it is on its way. If the
+            // pipe has already closed, nothing is coming and there is nothing
+            // to wait for; otherwise wait for as long as stderr stays silent.
+            if (this._stderrEnded) {
               stderrSentinelSeen = true;
-              settleIfFramed();
-            }, STDERR_SENTINEL_GRACE_MS);
-            graceTimer.unref?.();
+            } else {
+              armGrace();
+            }
           }
+          settleIfFramed();
+        }
+      };
+
+      // The pipe closed: the command redirected or closed stderr, so its
+      // sentinel can never arrive. Whatever is buffered is all there is.
+      const onStderrEnd = () => {
+        this._stderrEnded = true;
+        if (!stderrSentinelSeen) {
+          stderrSentinelSeen = true;
           settleIfFramed();
         }
       };
 
       const onStderr = (data) => {
         stderrBuf += data.toString();
+        // Proof the pipe is alive and ordered: the sentinel is behind this.
+        armGrace();
         if (stderrBuf.length > MAX_BUFFER_BYTES) {
           bufferOverflow = true;
           stderrBuf = stderrBuf.slice(-MAX_BUFFER_BYTES);
@@ -301,7 +342,11 @@ class BashSession {
 
       this.process.stdout.on('data', onStdout);
       this.process.stderr.on('data', onStderr);
+      this.process.stderr.on('end', onStderrEnd);
       this.process.on('exit', onExit);
+      // A pipe that closed during an earlier command stays closed: nothing
+      // will ever arrive on it again, so do not wait on it at all.
+      if (this._stderrEnded) stderrSentinelSeen = true;
       if (signal) {
         if (signal.aborted) { onAbort(); return; }
         signal.addEventListener?.('abort', onAbort, { once: true });

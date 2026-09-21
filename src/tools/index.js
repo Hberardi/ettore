@@ -2136,6 +2136,11 @@ export const toolHandlers = {
       if (result.bufferOverflow) {
         parts.push('[output truncated — exceeded 10MB buffer; pipe through head/grep for narrower output]');
       }
+      if (result.stderrTruncated) {
+        // Silence on stderr that outlasted the wait. Say so rather than let
+        // partial (or missing) error output read as the whole of it.
+        parts.push('[stderr may be incomplete — the command\'s error output did not arrive in time]');
+      }
       return parts.length ? parts.join('\n') : '(no output)';
     } catch (error) {
       return `Error: ${error.message}`;
