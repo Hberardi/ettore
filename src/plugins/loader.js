@@ -134,6 +134,7 @@ export async function installBundledPlugin(name, { pluginsDir = null, force = fa
   }
   await mkdir(dirname(target), { recursive: true });
   await cp(bundled.dir, target, { recursive: true, force: true });
+  await ensureModuleType(join(target, 'index.js'));
   return { name, dir: target, version: bundled.version };
 }
 
@@ -250,8 +251,24 @@ export async function resolveEntryPoint(manifest) {
 // Import a plugin module and validate its exports. The dynamic import uses
 // a `file://` URL so it works on Windows where `import()` from a plain
 // path is finicky for paths with spaces or non-ASCII characters.
+// Plugins are ES modules but ship only a `plugin.json`, not a `package.json`,
+// so Node cannot tell the module type up front: it warns
+// (MODULE_TYPELESS_PACKAGE_JSON) and reparses the file on every load. A tiny
+// `package.json` with `"type": "module"` next to the entry point settles it.
+// Written only when absent, so a plugin that ships its own is left alone, and
+// best-effort — a read-only install still runs, just with the warning.
+async function ensureModuleType(entryAbs) {
+  const pkgPath = join(dirname(entryAbs), 'package.json');
+  if (existsSync(pkgPath)) return;
+  try {
+    const { writeFile } = await import('fs/promises');
+    await writeFile(pkgPath, `${JSON.stringify({ type: 'module' }, null, 2)}\n`, { flag: 'wx' });
+  } catch { /* already there, or the directory is read-only — the warning is harmless */ }
+}
+
 export async function importPlugin(manifest) {
   const entryAbs = await resolveEntryPoint(manifest);
+  await ensureModuleType(entryAbs);
   const url = pathToFileURL(entryAbs).href;
   let mod;
   try {

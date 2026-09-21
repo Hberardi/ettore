@@ -8,6 +8,28 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.8.8] — 2026-09-21
+
+### Fixed
+
+- **Plugins no longer trigger a Node reparse on every load.** Bundled plugins
+  are ES modules but ship only `plugin.json`, so Node could not tell the module
+  type and warned (`MODULE_TYPELESS_PACKAGE_JSON`), reparsing the file each
+  load. The loader now writes a tiny `{"type":"module"}` package.json beside the
+  entry point when one is absent — at install and at import, so plugins already
+  installed are covered without reinstalling — and leaves a plugin that ships
+  its own alone.
+
+### Added
+
+- **A `kali` example plugin** wrapping installed security tools (nmap, whatweb,
+  nikto, gobuster, dnsrecon, sslscan) for authorised testing. Every
+  target-taking tool refuses a host outside an explicit, session-only
+  authorisation scope, and refuses to run before one is set; every tool runs
+  through execFile with an argument array built from a typed schema, never a
+  shell string. It installs nothing and ships no exploits.
+
+
 ## [1.8.7] — 2026-09-21
 
 ### Fixed — a turn could end without telling anyone

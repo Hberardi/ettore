@@ -329,3 +329,45 @@ export const _captured = () => captured;
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('importPlugin stamps a type:module package.json so Node does not reparse', async () => {
+  const { existsSync, readFileSync } = await import('node:fs');
+  const dir = await makeTmpDir();
+  const pdir = join(dir, 'esm-plugin');
+  await mkdir(pdir, { recursive: true });
+  await writeFile(join(pdir, 'plugin.json'), JSON.stringify({
+    name: 'esm-plugin', version: '1.0.0', apiVersion: '1', main: 'index.js',
+  }));
+  // An ES-module plugin with no package.json — the shape every bundled plugin
+  // ships, and the one that triggers MODULE_TYPELESS_PACKAGE_JSON.
+  await writeFile(join(pdir, 'index.js'), 'export const tools = {};\nexport const commands = {};\n');
+  assert.ok(!existsSync(join(pdir, 'package.json')), 'starts without one');
+
+  const manifest = await readManifest(pdir);
+  await importPlugin(manifest);
+
+  const pkgPath = join(pdir, 'package.json');
+  assert.ok(existsSync(pkgPath), 'importPlugin writes the marker');
+  assert.equal(JSON.parse(readFileSync(pkgPath, 'utf-8')).type, 'module');
+
+  // discoverPlugins keys off plugin.json, so the new package.json must not be
+  // mistaken for a second plugin.
+  const found = await discoverPlugins(dir);
+  assert.deepEqual(found.map(p => p.name), ['esm-plugin']);
+});
+
+test('importPlugin leaves an existing package.json untouched', async () => {
+  const { readFileSync } = await import('node:fs');
+  const dir = await makeTmpDir();
+  const pdir = join(dir, 'has-pkg');
+  await mkdir(pdir, { recursive: true });
+  await writeFile(join(pdir, 'plugin.json'), JSON.stringify({
+    name: 'has-pkg', version: '1.0.0', apiVersion: '1', main: 'index.js',
+  }));
+  await writeFile(join(pdir, 'index.js'), 'export const tools = {};\nexport const commands = {};\n');
+  await writeFile(join(pdir, 'package.json'), JSON.stringify({ type: 'module', name: 'mine', custom: true }));
+
+  await importPlugin(await readManifest(pdir));
+  const pkg = JSON.parse(readFileSync(join(pdir, 'package.json'), 'utf-8'));
+  assert.equal(pkg.custom, true, 'a plugin that ships its own package.json keeps it');
+});
