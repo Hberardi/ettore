@@ -43,11 +43,11 @@ test('Agent: a model that keeps calling tools past the budget is stopped with a 
       return {
         type: 'tool_calls',
         tool_calls: [
-          { id: 'c1', function: { name: 'read', arguments: '{}' } },
-          { id: 'c2', function: { name: 'read', arguments: '{}' } },
-          { id: 'c3', function: { name: 'read', arguments: '{}' } },
-          { id: 'c4', function: { name: 'read', arguments: '{}' } },
-          { id: 'c5', function: { name: 'read', arguments: '{}' } },
+          { id: 'c1', function: { name: 'bash', arguments: '{"command":"echo 1"}' } },
+          { id: 'c2', function: { name: 'bash', arguments: '{"command":"echo 2"}' } },
+          { id: 'c3', function: { name: 'bash', arguments: '{"command":"echo 3"}' } },
+          { id: 'c4', function: { name: 'bash', arguments: '{"command":"echo 4"}' } },
+          { id: 'c5', function: { name: 'bash', arguments: '{"command":"echo 5"}' } },
         ],
         message: { role: 'assistant', content: '', tool_calls: [] },
       };
@@ -104,11 +104,11 @@ test('Agent: exhausting the tool-call budget lands the turn instead of losing th
         return {
           type: 'tool_calls',
           tool_calls: [
-            { id: 'c1', function: { name: 'read', arguments: '{}' } },
-            { id: 'c2', function: { name: 'read', arguments: '{}' } },
-            { id: 'c3', function: { name: 'read', arguments: '{}' } },
-            { id: 'c4', function: { name: 'read', arguments: '{}' } },
-            { id: 'c5', function: { name: 'read', arguments: '{}' } },
+            { id: 'c1', function: { name: 'bash', arguments: '{"command":"echo 1"}' } },
+            { id: 'c2', function: { name: 'bash', arguments: '{"command":"echo 2"}' } },
+            { id: 'c3', function: { name: 'bash', arguments: '{"command":"echo 3"}' } },
+            { id: 'c4', function: { name: 'bash', arguments: '{"command":"echo 4"}' } },
+            { id: 'c5', function: { name: 'bash', arguments: '{"command":"echo 5"}' } },
           ],
           message: { role: 'assistant', content: '', tool_calls: [] },
         };
@@ -139,6 +139,36 @@ test('Agent: exhausting the tool-call budget lands the turn instead of losing th
   assert.deepEqual(errors, []);
   assert.ok(recoveries.some((r) => r.reason === 'tool_call_limit'));
   assert.ok(!states.some((s) => s && s.state === 'failed'));
+});
+
+test('Agent: identical reads in one batch run once and do not exhaust the tool budget', async () => {
+  let reads = 0;
+  let turns = 0;
+  const calls = Array.from({ length: 6 }, (_, index) => ({
+    id: `read-${index}`,
+    function: { name: 'read', arguments: JSON.stringify({ file_path: '/tmp/repeated.js', offset: 0, limit: 20 }) },
+  }));
+  const client = {
+    async turn(messages) {
+      turns++;
+      if (turns === 1) {
+        return { type: 'tool_calls', tool_calls: calls, message: { role: 'assistant', content: '', tool_calls: calls } };
+      }
+      const toolMessages = messages.filter(message => message.role === 'tool');
+      assert.equal(toolMessages.length, 6, 'every provider tool call must still receive a result');
+      assert.equal(toolMessages.filter(message => /Skipped duplicate read call/.test(String(message.content))).length, 5);
+      return { type: 'text', content: 'done' };
+    },
+  };
+  const agent = agentWithClient(client, { maxToolCallsPerTurn: 1, verifyAfterEdit: false });
+  agent._getAllToolHandlers = () => ({ read: async () => { reads++; return 'file contents'; } });
+
+  const errors = [];
+  const emitter = new EventEmitter();
+  emitter.on('error', error => errors.push(error));
+  assert.equal(await agent.run('read the file', emitter), 'done');
+  assert.equal(reads, 1);
+  assert.deepEqual(errors, []);
 });
 
 // Agent with a client of our own — the helper above always answers in prose,
@@ -198,5 +228,6 @@ test('Agent: the hard stop names the repeated command instead of advising a bigg
   assert.equal(errors.length, 1);
   assert.match(errors[0], /The same call ran \d+ times: bash \(npm test\)/);
   assert.match(errors[0], /a bigger budget would only make it longer/);
+  assert.match(errors[0], /Il lavoro già eseguito è conservato/);
   assert.doesNotMatch(errors[0], /maxToolCallsPerTurn/, 'raising the limit is the wrong advice for a loop');
 });

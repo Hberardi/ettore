@@ -43,8 +43,6 @@ import { renderSystemPrompt, pruneToolGuidance } from './prompts.js';
 import {
   classifyVerification,
   createReleaseGateState,
-  detectProjectTestSuite,
-  evaluateReleaseGate,
   failureExcerpt,
   recordMutation,
   recordVerification,
@@ -76,6 +74,9 @@ import { authorizeToolAccess, normalizeToolArgsForWorkspace } from '../tools/wor
 import { buildVisionContent } from '../utils/images.js';
 import { isWebImageResult } from '../tools/web-image.js';
 import { SkillSystem } from '../skills/index.js';
+import { executeToolHandler } from './tool-executor.js';
+import { guardToolCall, parseToolCall } from './tool-call-guard.js';
+import { ReleaseGateCoordinator } from './release-gate-coordinator.js';
 
 // Increase default max listeners to avoid AbortSignal warnings
 EventEmitter.setMaxListeners(20);
@@ -100,6 +101,11 @@ const LOOP_GUARDED_TOOLS = new Set(['repo_map', 'glob', 'grep', 'list_dir', 'fil
 // work), and it resets whenever a write moves the workspace revision, which
 // is what keeps re-running a test suite after an edit perfectly fine.
 const REPEAT_BUDGET_TOOLS = { read: 2, bash: 3, bash_session: 3 };
+// Read-only calls are safe to collapse when a provider emits the exact same
+// request more than once in one response. Mutation and stateful tools are
+// deliberately excluded: two identical writes or shell commands can still
+// have distinct intended side effects.
+const BATCH_DEDUPE_TOOLS = new Set(['read', ...LOOP_GUARDED_TOOLS]);
 
 // Tools that actually mutate state and therefore trigger the post-
 // execution self-critique check. Read-only tools are intentionally
@@ -375,6 +381,11 @@ export class Agent {
     });
     this._systemPromptBase = this._systemTemplate;
     this._workdir = workdir;
+    this.releaseGateCoordinator = new ReleaseGateCoordinator({
+      // Resolve the handler at call time so tests and plugins can replace it
+      // without rebuilding the Agent instance.
+      runTests: args => toolHandlers.run_tests(args),
+    });
     this.skillSystem = config.skillSystem || new SkillSystem();
     this._activeSkills = [];
     this._activeSkillPrompt = '';
@@ -583,6 +594,32 @@ export class Agent {
 
   _toolCallKey(name, args = {}) {
     return `${name}:${this._shortHash(this._stableStringify(args || {}))}`;
+  }
+
+  _batchDedupeKey(toolCall) {
+    const name = String(toolCall?.function?.name || '');
+    if (!BATCH_DEDUPE_TOOLS.has(name)) return null;
+    try {
+      const args = JSON.parse(String(toolCall?.function?.arguments || ''));
+      if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+      return this._toolCallKey(name, args);
+    } catch {
+      // Malformed calls follow the normal invalid-call path; collapsing them
+      // here would hide a schema error from the provider and the user.
+      return null;
+    }
+  }
+
+  _effectiveBatchToolCallCount(toolCalls = []) {
+    const seen = new Set();
+    let count = 0;
+    for (const toolCall of toolCalls) {
+      const key = this._batchDedupeKey(toolCall);
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      count++;
+    }
+    return count;
   }
 
   /**
@@ -1027,43 +1064,6 @@ export class Agent {
 
   _refreshActiveSystemPrompt() {
     this.messages[0] = { role: 'system', content: this._renderActiveSystemPrompt() };
-  }
-
-  /**
-   * Where the release gate stands, running the project's test suite itself
-   * when the model is about to finish without a green run on the latest edit.
-   *
-   * @returns {Promise<{status: string, ranBy?: 'model'|'harness'}>}
-   */
-  async _checkReleaseGate(state, emitter) {
-    if (!state.codeTouched) return { status: 'open' };
-    const workdir = this._workdir;
-    if (this._testSuiteCache?.workdir !== workdir) {
-      this._testSuiteCache = { workdir, runner: await detectProjectTestSuite(workdir) };
-    }
-    const suiteAvailable = Boolean(this._testSuiteCache.runner);
-    let status = evaluateReleaseGate(state, { suiteAvailable });
-    if (status !== 'run_suite') return { status, ranBy: 'model' };
-
-    // The model skipped the run, or edited after it. Running the suite here
-    // costs no model round trip, and a green result releases the turn at once.
-    const id = `release-gate-${state.mutationSeq}-${state.retries}`;
-    const args = { suite: 'auto', workdir };
-    emitter?.emit('toolStart', { id, name: 'run_tests', args });
-    let output;
-    try {
-      output = await toolHandlers.run_tests(args);
-    } catch (error) {
-      output = `Error: ${error?.message || error}`;
-    }
-    emitter?.emit('toolEnd', { id, name: 'run_tests', args, output });
-    recordVerification(state, classifyVerification('run_tests', args, output), output);
-    this._debugLog(emitter, 'turn.release_gate_suite', { passed: /Result:\s*PASS/.test(String(output)) });
-    status = evaluateReleaseGate(state, { suiteAvailable });
-    // A runner that could not even start is not a red suite; fall back to
-    // asking the model for a check it can run.
-    if (status === 'run_suite') status = 'needs_targeted_check';
-    return { status, ranBy: 'harness' };
   }
 
   _queueNamedTurnOverlay(kind, data = {}) {
@@ -2119,7 +2119,16 @@ export class Agent {
           && this.mode === 'build'
           && !process.env.ETTORE_RELEASE_GATE
         ) {
-          const gate = await this._checkReleaseGate(releaseGate, emitter);
+          const gate = await this.releaseGateCoordinator.check({
+            state: releaseGate,
+            workdir: this._workdir,
+            emitter,
+          });
+          if (gate.ranBy === 'harness') {
+            this._debugLog(emitter, 'turn.release_gate_suite', {
+              passed: /Result:\s*PASS/.test(String(gate.output || '')),
+            });
+          }
           if (gate.status !== 'open') {
             if (releaseGate.retries < this.maxReleaseGateRetries) {
               releaseGate.retries++;
@@ -2310,9 +2319,10 @@ export class Agent {
         this._debugLog(emitter, 'turn.repo_map_nudge', { callNames });
         continue;
       }
-      if (toolCallCount + result.tool_calls.length > this.maxToolCallsPerTurn) {
+      const effectiveBatchToolCallCount = this._effectiveBatchToolCallCount(result.tool_calls);
+      if (toolCallCount + effectiveBatchToolCallCount > this.maxToolCallsPerTurn) {
         const limit = this.maxToolCallsPerTurn;
-        const attempted = toolCallCount + result.tool_calls.length;
+        const attempted = toolCallCount + effectiveBatchToolCallCount;
         const callSummary = callNames.join(', ');
         // First breach: land the turn instead of losing it. Every other loop
         // brake in this file (duplicate batches, read-only streaks, invalid
@@ -2338,8 +2348,15 @@ export class Agent {
         // as long on twice the budget, while a genuinely large task wants room.
         const repeated = this._mostRepeatedToolCall();
         const looping = repeated && repeated.count >= 3;
+        const touched = [...touchedFiles].slice(0, 6);
+        const completedToolCount = Object.values(this.workingMemory.toolStats || {})
+          .reduce((total, count) => total + Number(count || 0), 0);
+        const progress = completedToolCount > 0
+          ? ` Il lavoro già eseguito è conservato (${completedToolCount} tool completati${touched.length ? `; file toccati: ${touched.join(', ')}` : ''}).`
+          : ' Nessun tool di questo batch è stato eseguito.';
         emitter?.emit('error',
           `Tool-call limit reached for this turn (${limit}). The model tried to issue ${attempted} tool-calls in a single turn: [${callSummary}]. ` +
+          progress +
           (looping
             ? `The same call ran ${repeated.count} times: ${repeated.name}${repeated.preview ? ` (${repeated.preview})` : ''}. `
               + `That is a loop, and a bigger budget would only make it longer — rephrase the request, or run that command yourself and paste the result.`
@@ -2355,7 +2372,7 @@ export class Agent {
         });
         return;
       }
-      toolCallCount += result.tool_calls.length;
+      toolCallCount += effectiveBatchToolCallCount;
       emitTurnState('tool_call', { tools: callNames });
       this._debugLog(emitter, 'turn.tool_calls', {
         batchSize: result.tool_calls.length,
@@ -2408,31 +2425,39 @@ export class Agent {
       }
 
       // No ask_user in this batch - execute all tools in parallel
-      const parsePromises = result.tool_calls.map(async (tc) => {
-        const toolName = tc.function.name;
-        let args;
-        try {
-          const raw = tc.function.arguments;
-          if (typeof raw !== 'string' || raw.length === 0) throw new Error('empty arguments');
-          if (raw.length > 50_000) throw new Error(`arguments too long: ${raw.length} bytes`);
-          args = JSON.parse(raw);
-          if (typeof args !== 'object' || args === null || Array.isArray(args)) throw new Error('unexpected type');
-          // Models routinely get the JSON scalar type wrong while getting the
-          // value right — MiniMax sends {"offset":"5020"} for a number field.
-          // Fix the type here rather than rejecting an otherwise valid call.
-          args = coerceToolArgsToSchema(toolName, args);
-          args = normalizeToolArgsForWorkspace(toolName, args, workspacePolicy);
-        } catch (jsonErr) {
-          const safeRaw = String(tc.function.arguments ?? '').slice(0, 200);
-          const output = `Skipped: malformed JSON — ${jsonErr.message}`;
-          emitter?.emit('toolEnd', { id: tc.id, name: toolName, args: {}, output, plugin: this._pluginForTool(toolName) });
-          return { id: tc.id, name: toolName, args: {}, output: `Error: malformed tool call JSON (${jsonErr.message}). Raw: ${safeRaw}`, parseError: true };
+      const parsed = result.tool_calls.map(tc => {
+        const parsedCall = parseToolCall(tc, {
+          coerceArgs: coerceToolArgsToSchema,
+          normalizeArgs: (name, args) => normalizeToolArgsForWorkspace(name, args, workspacePolicy),
+        });
+        if (parsedCall.parseError) {
+          emitter?.emit('toolEnd', {
+            id: parsedCall.id,
+            name: parsedCall.name,
+            args: {},
+            output: parsedCall.displayError,
+            plugin: this._pluginForTool(parsedCall.name),
+          });
         }
-        return { id: tc.id, name: toolName, args, parseError: false };
+        return parsedCall;
       });
-
-      const parsed = await Promise.all(parsePromises);
       const validTools = parsed.filter(p => !p.parseError);
+      // Providers occasionally repeat an identical read in one response.
+      // Deduplicate before scheduling: otherwise all sibling promises inspect
+      // the pre-batch memory at once and race past the normal repeat budget.
+      const batchPrimaryByKey = new Map();
+      const batchDuplicates = new Map();
+      const executableTools = validTools.filter(p => {
+        if (!BATCH_DEDUPE_TOOLS.has(p.name)) return true;
+        const key = this._toolCallKey(p.name, p.args);
+        const primary = batchPrimaryByKey.get(key);
+        if (primary) {
+          batchDuplicates.set(p.id, primary.id);
+          return false;
+        }
+        batchPrimaryByKey.set(key, p);
+        return true;
+      });
 
       // Fire toolStart for all valid tools immediately
       validTools.forEach(p => emitter?.emit('toolStart', { id: p.id, name: p.name, args: p.args, plugin: this._pluginForTool(p.name) }));
@@ -2444,18 +2469,23 @@ export class Agent {
         // missing/empty required args (seen with MiniMax M2.7 calling
         // read/write/edit with input={}). Returns an actionable error so the
         // model can recover instead of receiving a cryptic Node.js stack.
-        const validation = validateToolArgs(p.name, p.args);
-        if (!validation.valid) {
-          const output = validation.error;
+        const admission = await guardToolCall({
+          name: p.name,
+          args: p.args,
+          validate: validateToolArgs,
+          authorize: (name, args) => authorizeToolAccess(name, args, workspacePolicy),
+        });
+        if (!admission.allowed) {
+          const output = admission.output;
           await this._recordToolExecution(p.name, p.args, output, { skipped: true });
-          return { ...p, output, contextOutput: output, skipped: true, invalid: true };
-        }
-
-        const access = await authorizeToolAccess(p.name, p.args, workspacePolicy);
-        if (!access.allowed) {
-          const output = `Error: ${access.error}`;
-          await this._recordToolExecution(p.name, p.args, output, { skipped: true });
-          return { ...p, output, contextOutput: output, skipped: true, policyDenied: true };
+          return {
+            ...p,
+            output,
+            contextOutput: output,
+            skipped: true,
+            invalid: admission.reason === 'invalid',
+            policyDenied: admission.reason === 'policy',
+          };
         }
 
         const duplicate = await this._shouldSkipDuplicateTool(p.name, p.args);
@@ -2479,41 +2509,21 @@ export class Agent {
 
         let output;
         let imageAttachment = null;
-        let retries = 0;
-        if (handler) {
-          // Emit a synthetic "Avvio…" so the TUI shows immediate feedback even
-          // for tools that don't emit their own progress (read, write, edit,
-          // grep, glob, git_*, list_dir, file_info, …). Tools that emit their
-          // own progress overwrite this within a few ms, so it's a no-op for
-          // them but a critical heartbeat for the silent ones.
-          emitter?.emit('toolProgress', {
-            name: p.name,
-            key: '',
-            message: 'Avvio…',
-          });
-          try {
-            output = await executeToolWithTimeout(p.name, (signal) => handler(p.args, { signal }), controller.signal);
-            if (isTransientToolError(output)) {
-              const maxRetries = 2;
-              for (let attempt = 1; attempt <= maxRetries; attempt++) {
-                retries = attempt;
-                const backoffMs = Math.min(3000, 700 * (2 ** (attempt - 1)));
-                emitter?.emit('toolProgress', {
-                  name: p.name,
-                  key: p.args?.file_path || p.args?.command || '',
-                  message: `Transient error, retry ${attempt}/${maxRetries} in ${Math.round(backoffMs / 1000)}s`,
-                });
-                await waitMs(backoffMs, controller.signal);
-                output = await executeToolWithTimeout(p.name, (signal) => handler(p.args, { signal }), controller.signal);
-                if (!isTransientToolError(output)) break;
-              }
-            }
-          } catch (e) {
-            output = `Error: ${e.message}`;
-          }
-        } else {
-          output = `Unknown tool: ${p.name}`;
-        }
+        // Emit a synthetic "Avvio…" so the TUI shows immediate feedback even
+        // for tools that do not publish their own progress.
+        emitter?.emit('toolProgress', { name: p.name, key: '', message: 'Avvio…' });
+        const execution = await executeToolHandler({
+          name: p.name,
+          args: p.args,
+          handler,
+          signal: controller.signal,
+          executeWithTimeout: executeToolWithTimeout,
+          isTransientError: isTransientToolError,
+          wait: waitMs,
+          onProgress: event => emitter?.emit('toolProgress', event),
+        });
+        output = execution.output;
+        const retries = execution.retries;
         if (isWebImageResult(output)) {
           imageAttachment = { ...output.attachment, sourceUrl: output.sourceUrl };
           output = output.message;
@@ -2596,7 +2606,7 @@ export class Agent {
       // Execute each dependency wave concurrently. The legacy boolean helper
       // remains available for callers/tests, while groups let repo_map run
       // first and the independent exploration calls run together afterward.
-      const executionGroups = toolBatchExecutionGroups(validTools);
+      const executionGroups = toolBatchExecutionGroups(executableTools);
       const results = [];
       for (const [groupIndex, group] of executionGroups.entries()) {
         emitter?.emit('toolWaveStart', {
@@ -2609,6 +2619,18 @@ export class Agent {
           index: groupIndex,
           total: executionGroups.length,
           tools: group.map(tool => ({ id: tool.id, name: tool.name })),
+        });
+      }
+
+      for (const duplicate of validTools.filter(p => batchDuplicates.has(p.id))) {
+        const primaryId = batchDuplicates.get(duplicate.id);
+        const output = `Skipped duplicate ${duplicate.name} call in this batch; identical request ${primaryId} already executed. Use that result instead of repeating it.`;
+        results.push({
+          ...duplicate,
+          output,
+          contextOutput: output,
+          duplicate: true,
+          batchDuplicate: true,
         });
       }
 

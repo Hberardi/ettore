@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { Agent } from '../src/agents/index.js';
-import { setAutoApprove } from '../src/tools/index.js';
+import { setAutoApprove, toolHandlers } from '../src/tools/index.js';
 import { promptSeen } from './helpers/prompt-seen.js';
 import {
   classifyVerification,
@@ -75,13 +75,23 @@ function writeCall(id, path, content) {
   return { id, type: 'function', function: { name: 'write', arguments: JSON.stringify({ file_path: path, content }) } };
 }
 
-test('the harness runs the suite itself and refuses to finish until it is green', { skip: Boolean(process.env.ETTORE_RELEASE_GATE) }, async () => {
+test('the harness returns a failing suite to the model and refuses to finish until it is green', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ettore-gate-'));
   setAutoApprove({ edits: true });
+  const originalRunTests = toolHandlers.run_tests;
+  let suiteRuns = 0;
   try {
-    // The suite passes only when sum.cjs really adds.
+    // The test runner is simulated here: this is an Agent/release-gate
+    // contract test, so it must also work where spawning a child process is
+    // prohibited (for example in a restricted CI sandbox).
     await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'g', private: true, scripts: { test: 'node check.cjs' } }));
-    await writeFile(join(dir, 'check.cjs'), "const s = require('./sum.cjs'); if (s(2, 3) !== 5) { console.log('not ok 1 - sum(2,3) should be 5'); process.exit(1); } console.log('ok 1');\n");
+    toolHandlers.run_tests = async ({ workdir }) => {
+      assert.equal(workdir, dir);
+      suiteRuns++;
+      return suiteRuns === 1
+        ? 'Runner: npm\nResult: FAIL\nnot ok 1 - sum(2,3) should be 5\n'
+        : 'Runner: npm\nResult: PASS\nok 1 - sum(2,3)\n';
+    };
     const target = join(dir, 'sum.cjs');
     let turns = 0;
     let sawBlocked = false;
@@ -114,9 +124,24 @@ test('the harness runs the suite itself and refuses to finish until it is green'
     assert.match(String(result), /test verdi/);
     assert.doesNotMatch(String(result), /NON verificato/);
     assert.deepEqual(gates, ['suite_failing', 'open']);
+    assert.equal(suiteRuns, 2);
     assert.equal(await readFile(target, 'utf-8'), 'module.exports = (a, b) => a + b;\n');
   } finally {
+    toolHandlers.run_tests = originalRunTests;
     setAutoApprove({ edits: false });
+    await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
+  }
+});
+
+test('integration: run_tests executes an npm suite', { skip: !process.env.ETTORE_INTEGRATION_TESTS }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ettore-gate-integration-'));
+  try {
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'g', private: true, scripts: { test: 'node check.cjs' } }));
+    await writeFile(join(dir, 'check.cjs'), "console.log('ok 1 - integration runner');\n");
+    const output = await toolHandlers.run_tests({ workdir: dir });
+    assert.match(output, /Runner: npm\nResult: PASS/);
+    assert.match(output, /ok 1 - integration runner/);
+  } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
   }
 });
