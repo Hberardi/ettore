@@ -276,6 +276,22 @@ export function stripPlanBlock(text) {
   return String(text).replace(PLAN_BLOCK_RE, '');
 }
 
+// Remove model reasoning from a finished text, content included: complete
+// blocks, an unclosed opener and everything after it (reasoning cut off by the
+// token limit), and everything before an orphan close tag (providers that send
+// the opener out of band). For text that is kept and re-sent — a compression
+// summary carried the summarizer's own <think> into every later request, and
+// each re-compression stacked another one on top.
+export function stripReasoning(text) {
+  if (!text) return text;
+  let out = String(text).replace(THINK_BLOCK_RE, '');
+  const orphanClose = [...out.matchAll(new RegExp(THINK_CLOSE_RE.source, 'gi'))].pop();
+  if (orphanClose) out = out.slice(orphanClose.index + orphanClose[0].length);
+  const unclosedOpen = out.match(THINK_OPEN_RE);
+  if (unclosedOpen) out = out.slice(0, unclosedOpen.index);
+  return out.trim();
+}
+
 export function stripThinkTags(text) {
   if (!text) return text;
   return String(text).replace(THINK_TAG_RE, '');

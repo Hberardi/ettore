@@ -141,3 +141,11 @@ test('Agent: a response that did not stream still has its markup read', async ()
   assert.deepEqual(tokens, [], 'a non-streamed reply is not replayed as tokens');
   assert.match(String(result), /Answer/);
 });
+
+test('stripReasoning: blocks, an orphan close, and reasoning cut off mid-way', async () => {
+  const { stripReasoning } = await import('../src/agents/stream-parser.js');
+  assert.equal(stripReasoning('<think>a</think>\nBody <thinking>b</thinking>end'), 'Body end');
+  assert.equal(stripReasoning('reasoning sent without opener</think>\nBody'), 'Body');
+  assert.equal(stripReasoning('Body\n<think>truncated reasoning'), 'Body');
+  assert.equal(stripReasoning('<think>only reasoning'), '');
+});

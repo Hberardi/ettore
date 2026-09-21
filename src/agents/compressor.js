@@ -1,5 +1,6 @@
 import { getConfig, saveConfig } from '../config/index.js';
 import { safeHistoryKeepStart } from './message-ledger.js';
+import { stripReasoning } from './stream-parser.js';
 
 const DEFAULT_THRESHOLD = 8000;
 const DEFAULT_KEEP_LAST = 10;
@@ -503,7 +504,9 @@ export class ContextCompressor {
     } finally {
       clearTimeout(timer);
     }
-    return summary;
+    // The streamed fallback carries reasoning in <think> tags, and some models
+    // (MiniMax) put it in the content itself. It is not part of the summary.
+    return stripReasoning(summary);
   }
 
   /**
@@ -528,7 +531,12 @@ export class ContextCompressor {
       }
     }
     try {
-      return { summary: await this._callSummary(this.client, prompt, signal), degraded: null };
+      const summary = await this._callSummary(this.client, prompt, signal);
+      // An empty summary would replace the conversation with nothing; a model
+      // that spent its whole budget reasoning leaves exactly that behind once
+      // the reasoning is stripped. The fallback below at least keeps the tail.
+      if (!String(summary || '').trim()) throw new Error('the model returned an empty summary');
+      return { summary, degraded: null };
     } catch (e) {
       return {
         summary: toCompress

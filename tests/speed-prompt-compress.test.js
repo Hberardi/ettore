@@ -238,3 +238,21 @@ test('a full batch is elided in one go', () => {
   assert.equal(out.filter(m => m.__lossyShrunk).length, 4);
   assert.equal(out[out.length - 2].content, 'T'.repeat(3000), 'the tail is untouched');
 });
+
+test('the summarizer’s reasoning is not kept in the summary', async () => {
+  const main = fakeClient('<think>The user wants a dense summary, let me plan it.</think>\n## PROJECT\n- Node app');
+  const out = await compressor(main, null).compress(transcript(20), null);
+  const summary = String(out[1].content);
+  assert.doesNotMatch(summary, /think|let me plan/i);
+  assert.match(summary, /## PROJECT/);
+});
+
+test('a summary that is all reasoning falls back instead of erasing the conversation', async () => {
+  const main = fakeClient('<think>Let me analyze this carefully and then');
+  const c = compressor(main, null);
+  const reasons = [];
+  const emitter = { emit: (name, payload) => { if (name === 'compressionFallback') reasons.push(payload.reason); } };
+  const out = await c.compress(transcript(20), emitter);
+  assert.equal(reasons.length, 1);
+  assert.match(String(out[1].content), /question \d+/, 'the fallback keeps the latest exchanges');
+});
