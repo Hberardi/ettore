@@ -2442,6 +2442,24 @@ export class Agent {
 
       // Fire toolStart for all valid tools immediately
       validTools.forEach(p => emitter?.emit('toolStart', { id: p.id, name: p.name, args: p.args, plugin: this._pluginForTool(p.name) }));
+      // Every start needs an end, including on the paths that unwind before
+      // the results are emitted — an abort, a cancelled sub-agent, a throw.
+      // A UI that matches ends to starts by id otherwise shows a tool running
+      // for the rest of the session.
+      const announced = new Set(validTools.map(tool => tool.id));
+      const closeAnnounced = (reason) => {
+        for (const tool of validTools) {
+          if (!announced.has(tool.id)) continue;
+          announced.delete(tool.id);
+          emitter?.emit('toolEnd', {
+            id: tool.id,
+            name: tool.name,
+            args: tool.args,
+            output: `Error: ${reason}`,
+            plugin: this._pluginForTool(tool.name),
+          });
+        }
+      };
 
       const executeParsedTool = async (p) => {
         const handler = this._getAllToolHandlers()[p.name];
@@ -2607,23 +2625,33 @@ export class Agent {
       };
 
       const workspaceRevisionBeforeBatch = this.workingMemory.workspaceRevision;
+      // Anything still announced once the batch unwinds never produced a
+      // result the loop could emit.
+      const closeOnUnwind = () => closeAnnounced('the turn ended before this tool reported a result');
       // Execute each dependency wave concurrently. The legacy boolean helper
       // remains available for callers/tests, while groups let repo_map run
       // first and the independent exploration calls run together afterward.
       const executionGroups = toolBatchExecutionGroups(executableTools);
       const results = [];
-      for (const [groupIndex, group] of executionGroups.entries()) {
-        emitter?.emit('toolWaveStart', {
-          index: groupIndex,
-          total: executionGroups.length,
-          tools: group.map(tool => ({ id: tool.id, name: tool.name })),
-        });
-        results.push(...await Promise.all(group.map(executeParsedTool)));
-        emitter?.emit('toolWaveEnd', {
-          index: groupIndex,
-          total: executionGroups.length,
-          tools: group.map(tool => ({ id: tool.id, name: tool.name })),
-        });
+      try {
+        for (const [groupIndex, group] of executionGroups.entries()) {
+          emitter?.emit('toolWaveStart', {
+            index: groupIndex,
+            total: executionGroups.length,
+            tools: group.map(tool => ({ id: tool.id, name: tool.name })),
+          });
+          results.push(...await Promise.all(group.map(executeParsedTool)));
+          emitter?.emit('toolWaveEnd', {
+            index: groupIndex,
+            total: executionGroups.length,
+            tools: group.map(tool => ({ id: tool.id, name: tool.name })),
+          });
+        }
+      } catch (batchError) {
+        // An abort or a throw out of a wave leaves the rest of the batch
+        // without results, and their starts already announced.
+        closeOnUnwind();
+        throw batchError;
       }
 
       for (const duplicate of validTools.filter(p => batchDuplicates.has(p.id))) {
@@ -2651,6 +2679,7 @@ export class Agent {
         }
         const r = resultById.get(tc.id);
         if (!r) continue;
+        announced.delete(r.id);
         emitter?.emit('toolEnd', { id: r.id, name: r.name, args: r.args, output: r.output, plugin: this._pluginForTool(r.name) });
         this.messages.push({ role: 'tool', tool_call_id: r.id, content: String(r.contextOutput ?? r.output) });
       }

@@ -8,6 +8,24 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.8.3] — 2026-09-21
+
+### Fixed — a tool could be shown running for the rest of the session
+
+`toolEnd` is matched to `toolStart` by id, and a start whose end never arrived
+left that tool marked `running` forever: the display kept counting seconds on a
+`file_info` that its own 20-second timeout had killed long before, and the wait
+kind stayed `tool` with it. Seen on a real session at 36 seconds, with the
+sub-agent active — a sub-agent cancelled mid-tool is one way the event goes
+missing.
+
+Both ends are now closed. The agent guarantees an end for every start,
+including when a batch unwinds through an abort or a throw before its results
+are emitted; and the TUI sweeps any tool still marked running when a turn
+completes, is cancelled or fails, so a lost event cannot strand one on screen
+whatever the cause.
+
+
 ## [1.8.2] — 2026-09-21
 
 ### Fixed — a turn stuck on a tool could stay stuck forever

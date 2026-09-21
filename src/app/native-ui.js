@@ -884,7 +884,27 @@ export async function startApp(options = {}) {
     tui.currentPlan = [];
   };
 
+  // A tool the UI saw start but never saw end.
+  //
+  // toolEnd is matched by id, so a missing event leaves its tool 'running'
+  // for the rest of the session: the display kept counting seconds on a
+  // `file_info` that its own 20s timeout had killed long before, and — until
+  // the watchdog was fixed — `waitKind` stayed 'tool' with it. A sub-agent
+  // cancelled mid-tool is one way to lose the event; this makes any other way
+  // harmless too, because the sweep does not care why it went missing.
+  const closeDanglingTools = (label) => {
+    const tools = tui.streaming?.tools;
+    if (!tools?.length) return;
+    for (const tool of tools) {
+      if (tool.status !== 'running') continue;
+      tool.status = 'done';
+      tool.durationMs = Date.now() - tool.startMs;
+      tool.output = tool.output || `(nessun esito ricevuto — turno ${label})`;
+    }
+  };
+
   emitter.on('complete', (content) => {
+    closeDanglingTools('completato');
     mission.endTurn();
     syncMission();
     tui.isRunning = false;
@@ -987,6 +1007,7 @@ export async function startApp(options = {}) {
   });
 
   emitter.on('cancelled', () => {
+    closeDanglingTools('annullato');
     const loopWasActive = loops.getLoopStatus().active;
     if (loopWasActive) {
       loops.stopLoopRuntime();
@@ -1012,6 +1033,7 @@ export async function startApp(options = {}) {
   });
 
   emitter.on('error', (msg) => {
+    closeDanglingTools('interrotto da un errore');
     const loopWasActive = loops.getLoopStatus().active;
     if (loopWasActive) {
       loops.stopLoopRuntime();
