@@ -14,19 +14,33 @@ import { getModelCapability } from '../providers/model_capability.js';
 // wrote `jevEnabled`, `compressionPrivacyWarned` and the rest into the user's
 // real settings. Passing `cwd` closes the gap. Users who do not set the
 // variable keep the exact path they have today.
-const CONFIG_DIR_OVERRIDE = process.env.ETTORE_CONFIG_DIR || null;
+const CONF_DEFAULTS = {
+  model: 'gpt-4-turbo',
+  stream: true,
+  workdir: homedir(),
+  activeProvider: 'openai',
+  activeModel: 'gpt-4-turbo'
+};
 
-const store = new Conf({
-  projectName: 'ettore-cli',
-  ...(CONFIG_DIR_OVERRIDE ? { cwd: CONFIG_DIR_OVERRIDE } : {}),
-  defaults: {
-    model: 'gpt-4-turbo',
-    stream: true,
-    workdir: homedir(),
-    activeProvider: 'openai',
-    activeModel: 'gpt-4-turbo'
+// Resolved on use, not at module load. Reading it once meant a test that set
+// the variable in a `beforeEach` was already too late — the module had been
+// imported while the suite was collected, so the store was still pointed at
+// the user's real settings and the test wrote straight into them.
+let _store = null;
+let _storeDir;
+
+function store() {
+  const dir = process.env.ETTORE_CONFIG_DIR || null;
+  if (!_store || dir !== _storeDir) {
+    _storeDir = dir;
+    _store = new Conf({
+      projectName: 'ettore-cli',
+      ...(dir ? { cwd: dir } : {}),
+      defaults: CONF_DEFAULTS,
+    });
   }
-});
+  return _store;
+}
 
 // Markers per rilevare la root del progetto
 const PROJECT_MARKERS = ['.git', 'package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod', '.ettore'];
@@ -128,15 +142,15 @@ export async function loadConfig(options = {}) {
   // LLM model parameters (opzionali, provider-agnostici). undefined = omesso dalla request.
   // Precedenza: options (CLI) > localConfig (.ettore/config.json) > store (Conf globale).
   const numFrom = (key) => {
-    const v = options[key] ?? localConfig[key] ?? store.get(key);
+    const v = options[key] ?? localConfig[key] ?? store().get(key);
     return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
   };
   const boolFrom = (key, fallback) => {
-    const value = options[key] ?? localConfig[key] ?? store.get(key);
+    const value = options[key] ?? localConfig[key] ?? store().get(key);
     return typeof value === 'boolean' ? value : fallback;
   };
   const stringFrom = (key, fallback) => {
-    const value = options[key] ?? localConfig[key] ?? store.get(key);
+    const value = options[key] ?? localConfig[key] ?? store().get(key);
     return typeof value === 'string' && value.trim() ? value.trim() : fallback;
   };
 
@@ -149,14 +163,14 @@ export async function loadConfig(options = {}) {
   let model = options.model
     || localConfig.activeModel
     || connectionManager.activeModel
-    || store.get('activeModel')
+    || store().get('activeModel')
     || 'gpt-4o';
 
   const config = {
     model,
     stream: options.stream !== undefined
       ? options.stream
-      : (localConfig.stream ?? store.get('stream')),
+      : (localConfig.stream ?? store().get('stream')),
     workdir: options.context || process.cwd(),
     provider,
     apiKey: connectionManager.isConnected(provider)
@@ -200,9 +214,9 @@ export async function loadConfig(options = {}) {
     _sources: {
       local: localConfig,
       global: {
-        model: store.get('activeModel'),
-        stream: store.get('stream'),
-        provider: store.get('activeProvider')
+        model: store().get('activeModel'),
+        stream: store().get('stream'),
+        provider: store().get('activeProvider')
       }
     }
   };
@@ -229,7 +243,7 @@ export async function loadConfig(options = {}) {
  * @param {*} value - Valore da salvare
  */
 export function saveConfig(key, value) {
-  store.set(key, value);
+  store().set(key, value);
 }
 
 /**
@@ -239,7 +253,7 @@ export function saveConfig(key, value) {
  * @returns {*} Valore della configurazione
  */
 export function getConfig(key) {
-  return store.get(key);
+  return store().get(key);
 }
 
 // =============================================================================
@@ -258,7 +272,7 @@ export async function saveConfigAsync(key, value, opts = {}) {
   if (opts.local) {
     await saveLocalConfig(key, value);
   } else {
-    store.set(key, value);
+    store().set(key, value);
   }
 }
 
@@ -274,7 +288,7 @@ export async function getConfigAsync(key, opts = {}) {
     const localConfig = await loadLocalConfig();
     return localConfig[key];
   }
-  return store.get(key);
+  return store().get(key);
 }
 
 /**
@@ -285,7 +299,7 @@ export async function getConfigAsync(key, opts = {}) {
  */
 export async function getEffectiveConfigValue(key) {
   const localConfig = await loadLocalConfig();
-  return localConfig[key] ?? store.get(key);
+  return localConfig[key] ?? store().get(key);
 }
 
 /**
@@ -305,15 +319,15 @@ export async function getEffectiveConfig() {
 // =============================================================================
 
 export function setActiveModel(model) {
-  store.set('activeModel', model);
+  store().set('activeModel', model);
 }
 
 export function setActiveProvider(provider) {
-  store.set('activeProvider', provider);
+  store().set('activeProvider', provider);
 }
 
 export function resetConfig() {
-  store.clear();
+  store().clear();
 }
 
 /**

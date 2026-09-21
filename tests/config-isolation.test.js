@@ -53,3 +53,27 @@ test('without the variable the store keeps the path it has always used', () => {
   `], { cwd: repoRoot, encoding: 'utf-8' }).trim();
   assert.match(out, /ettore-cli-nodejs[/\\]config\.json$/);
 });
+
+test('the redirect is honoured even when set after the module was imported', async () => {
+  // The real shape of the hazard: a test suite imports everything while
+  // collecting, then each test redirects the config dir in a hook. Resolving
+  // the path at import time made that redirect arrive too late, and the write
+  // landed in the user's settings.
+  const { saveConfig, getConfig } = await import('../src/config/index.js');
+  const dir = mkdtempSync(join(tmpdir(), 'ettore-cfg-late-'));
+  const previous = process.env.ETTORE_CONFIG_DIR;
+  process.env.ETTORE_CONFIG_DIR = dir;
+  try {
+    saveConfig('__isolationProbe', 'written-after-import');
+    assert.equal(getConfig('__isolationProbe'), 'written-after-import');
+    assert.match(readFileSync(join(dir, 'config.json'), 'utf-8'), /__isolationProbe/);
+  } finally {
+    if (previous === undefined) delete process.env.ETTORE_CONFIG_DIR;
+    else process.env.ETTORE_CONFIG_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // And the probe must not exist in whatever store is active now.
+  const { getConfig: getAgain } = await import('../src/config/index.js');
+  assert.equal(getAgain('__isolationProbe'), undefined, 'the write must not have leaked out of the temp dir');
+});
