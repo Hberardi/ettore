@@ -27,8 +27,8 @@ What changed in each release is in the [changelog](https://github.com/Hberardi/e
 - ⚡ **Fast on every provider** - requests are shaped so the provider can reuse its prompt cache, context summaries are written by a fast model of the same provider, and `--verbose-tokens` reports time-to-first-token and cached tokens per call
 - 🔍 **Delegated search** - `explore` answers one question about the codebase in a separate read-only context and returns a short report with `file:line` references; the greps and full-file reads behind it never enter the main conversation
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn, and its steps drive the progress panel and the auto-continue, so a plan left half-done is resumed instead of dropped
-- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev judges each finished turn (did the model announce work without doing it? is the request really carried out?), lets a turn continue without a declared plan, and picks the skills that apply, and routes codebase-wide searches to the `explore` sub-agent; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
-- 🧩 **Eight plugins included** - PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts — installed with `/plugins install`, and you can write your own
+- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev judges each finished turn (did the model announce work without doing it? is the request really carried out?), lets a turn continue without a declared plan, picks the skills that apply, and routes codebase-wide searches to the `explore` sub-agent; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
+- 🧩 **Nine plugins included** - PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts, and a security-tool wrapper for authorised testing (`kali`) — installed with `/plugins install`, and you can write your own
 
 ## Installation
 
@@ -565,7 +565,7 @@ check instead of doing the work.
 
 ## Plugins
 
-ETTORE ships eight plugins and can load your own. A plugin adds **tools** the
+ETTORE ships nine plugins and can load your own. A plugin adds **tools** the
 agent can call and **slash commands** you can type — they merge with the
 built-in set rather than replacing it.
 
@@ -591,6 +591,7 @@ built-in set rather than replacing it.
 | **bash-monitor** | Times every shell command, warns on slow ones, keeps a queryable history | — |
 | **command-palette-shortcuts** | `/last-bash`, `/kill-bash`, `/replay-last`, `/where` | — |
 | **hello-world** | The minimal shape of a plugin, to copy from | — |
+| **kali** | Drives installed security tools (nmap, whatweb, nikto, gobuster, dnsrecon, sslscan) for **authorised testing only** — every scan is refused against a host outside an explicit, session-only authorisation scope. Installs nothing; wraps tools you install yourself | the tools themselves, installed separately |
 
 The dependencies are declared as `optionalDependencies`, so a normal
 `npm install` brings them and a plugin whose dependency is missing says which
