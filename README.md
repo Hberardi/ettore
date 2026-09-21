@@ -9,6 +9,8 @@
 
 ETTORE is an advanced AI CLI assistant that helps with software engineering tasks. It's like having a smart assistant in your terminal.
 
+What changed in each release is in the [changelog](https://github.com/Hberardi/ettore/blob/main/CHANGELOG.md), which ships with the package as `CHANGELOG.md`.
+
 ## Features
 
 - 🤖 **32 providers** - OpenAI, Anthropic, your Claude subscription, Gemini, Ollama (local), NVIDIA, Groq, DeepSeek, MiniMax, Kimi, OpenRouter — and any OpenAI-compatible endpoint

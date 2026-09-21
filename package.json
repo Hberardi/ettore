@@ -38,7 +38,8 @@
     "bin",
     "src",
     "examples/plugins",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "repository": {
     "type": "git",
