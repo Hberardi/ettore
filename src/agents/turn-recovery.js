@@ -305,6 +305,11 @@ export function buildTurnOverlay(kind, data = {}) {
       + ' Carry out the remaining part now with tool calls.'
       + ' If the rest genuinely cannot be done — it needs a decision only the user can make, a credential, a machine you cannot reach —'
       + ' say which part and why in one sentence, and stop.',
+    // Only reachable with Jev on, like jev_unfinished above.
+    explore_first: () =>
+      'Before searching by hand, delegate this one to `explore`. It answers a question about the codebase in a separate read-only context and returns a short report with file:line references, so the repo_map, glob, grep and read output it needs never enters this conversation — which is what keeps the context for the actual work.'
+      + ' Ask it one self-contained question naming the symbols, files or behaviour you are after, since it sees none of this conversation.'
+      + ' Go straight to the tools yourself only if you already know the exact paths to read.',
     unaddressed_targets: ({ targetList }) =>
       `The request named ${targetList}, and nothing in this turn read, searched or changed `
       + 'it — so whatever was asked for it has not been done. Either carry out the request on it now '

@@ -11,7 +11,7 @@
 // question costs almost nothing; asking one compound question would cost
 // accuracy.
 
-import { readNoul } from './index.js';
+import { readChoice, readNoul } from './index.js';
 
 // Written as statements, not questions: a Noul reports the probability that
 // the statement is true.
@@ -101,4 +101,47 @@ export function resolveVerdict(heuristic, verdict) {
   if (!verdict || !verdict.decisive) return { value: Boolean(heuristic), source: 'heuristic' };
   const value = Boolean(verdict.yes);
   return { value, source: value === Boolean(heuristic) ? 'agreed' : 'jev' };
+}
+
+// ── routing the investigation, before the turn starts ──────────────────────
+//
+// ETTORE has a read-only sub-agent (the `explore` tool) that answers a
+// question about the codebase in a context of its own and returns a short
+// report, so the greps and reads it needed never enter the main conversation.
+// It is in the routed tool set of every build turn, and models still reach for
+// glob/grep/read by hand — which is exactly the case it was built for.
+//
+// This is the docs' intent-routing pattern: classify the request first, then
+// let code pick the handler. A Choice, because the answer is one of a few
+// named approaches, and Choice reports confidence.
+export const APPROACH_QUESTION = {
+  approach: {
+    type: 'choice',
+    instructions: 'How should this request be investigated, before anything is changed? Judge the request itself, not any codebase you cannot see.',
+    criteria: {
+      direct: 'The files to look at are named or obvious. A couple of reads settle it.',
+      explore: 'Answering needs a search across the codebase first — where something lives, how a flow works end to end, which files a change would touch — and the raw search output is not worth keeping afterwards.',
+      none: 'No code needs looking at: a question about a concept, a chat message, or a task the request already specifies in full.',
+    },
+  },
+};
+
+/**
+ * Which approach the request calls for, or `{ decisive: false }` when Jev is
+ * off, unreachable, or not confident enough to be worth acting on.
+ *
+ * @returns {Promise<{choice: string|null, confidence: number|null, decisive: boolean, error: string|null}>}
+ */
+export async function judgeApproach(client, prompt, { signal = null } = {}) {
+  if (!client) return { choice: null, confidence: null, decisive: false, error: null };
+  try {
+    const { answers } = await client.evaluate({
+      state: { user_request: String(prompt || '').slice(0, 8000) },
+      questions: APPROACH_QUESTION,
+      signal,
+    });
+    return { ...readChoice(answers?.approach), error: null };
+  } catch (error) {
+    return { choice: null, confidence: null, decisive: false, error: error?.message || String(error) };
+  }
 }

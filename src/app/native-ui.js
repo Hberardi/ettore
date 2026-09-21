@@ -1237,6 +1237,20 @@ export async function startApp(options = {}) {
     tui.needsRender = true;
   });
 
+  // The pre-turn routing decision. Shown only when it actually redirects the
+  // turn: "Jev thought about it and changed nothing" is not worth a line.
+  emitter.on('jevRoute', ({ choice, confidence, decisive, ms }) => {
+    if (!decisive || choice !== 'explore') return;
+    tui.jevActive = true;
+    tui.messages.push({
+      role: 'system',
+      text: `◆ Jev (${ms}ms) — ricerca estesa: delego a explore (confidenza ${Number(confidence).toFixed(2)})`,
+      tools: [],
+      id: Date.now(),
+    });
+    tui.needsRender = true;
+  });
+
   emitter.on('jevError', ({ error }) => {
     tui.messages.push({
       role: 'system',

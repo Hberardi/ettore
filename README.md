@@ -476,7 +476,16 @@ sentence typed 28 times. When Jev is sure the request has not been carried out,
 and the turn actually ran tools, ETTORE continues by itself: at most three
 rounds, and it stops the moment a round changes nothing.
 
-Without Jev that branch does not exist. It is reached only through a decisive
+Jev also routes the investigation. ETTORE has a read-only sub-agent — the
+`explore` tool — that answers a question about the codebase in a context of its
+own and hands back a short report, so the searching never fills the main
+conversation. It is offered on every build turn and models still grep by hand.
+When Jev is confident a request needs a codebase-wide search, the turn starts
+with a nudge to delegate it. That costs one call before the first token, so it
+is asked only for a fresh, non-trivial build request — never for a
+continuation, a short message, or a lite model.
+
+Without Jev neither branch exists. It is reached only through a decisive
 verdict, and there is no verdict when Jev is off, unreachable or unsure, so
 every user who never turns it on keeps exactly today's behaviour.
 

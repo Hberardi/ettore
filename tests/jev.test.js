@@ -591,3 +591,123 @@ test('a turn that ran no tools is never pushed, however sure Jev is', async () =
     globalThis.fetch = originalFetch;
   }
 });
+
+// ── routing the investigation, before the turn ────────────────────────────
+
+function jevRouting(choice, confidence) {
+  return async () => jsonResponse({
+    model: 'jev-1.13.0',
+    answers: { approach: { type: 'choice', choice, confidence, probabilities: { [choice]: confidence } } },
+    usage: {},
+  });
+}
+
+test('a request that needs a codebase-wide search is pointed at explore', async () => {
+  const { activateJev } = await import('../src/jev/index.js');
+  activateJev('sk-test-key-value');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = jevRouting('explore', 0.88);
+  try {
+    let promptSeenByModel = '';
+    const emitter = new EventEmitter();
+    const routes = [];
+    emitter.on('jevRoute', r => routes.push(r));
+    await agentInBuild({
+      async turn(messages) {
+        promptSeenByModel = messages.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n');
+        return { type: 'text', content: 'Ecco come funziona il flusso.' };
+      },
+    }).run('come funziona il flusso di autenticazione da cima a fondo?', emitter);
+
+    assert.equal(routes.length, 1);
+    assert.equal(routes[0].choice, 'explore');
+    assert.equal(routes[0].decisive, true);
+    assert.match(promptSeenByModel, /delegate this one to `explore`/i, 'the turn must carry the nudge');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('a confident "direct" leaves the turn exactly as it was', async () => {
+  const { activateJev } = await import('../src/jev/index.js');
+  activateJev('sk-test-key-value');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = jevRouting('direct', 0.91);
+  try {
+    let promptSeenByModel = '';
+    await agentInBuild({
+      async turn(messages) {
+        promptSeenByModel = messages.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n');
+        return { type: 'text', content: 'Fatto.' };
+      },
+    }).run('aggiungi una riga di log in src/app/native-ui.js', new EventEmitter());
+    assert.doesNotMatch(promptSeenByModel, /delegate this one to `explore`/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('an unconfident routing verdict changes nothing', async () => {
+  const { activateJev } = await import('../src/jev/index.js');
+  activateJev('sk-test-key-value');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = jevRouting('explore', 0.42);   // below the confidence floor
+  try {
+    let promptSeenByModel = '';
+    await agentInBuild({
+      async turn(messages) {
+        promptSeenByModel = messages.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n');
+        return { type: 'text', content: 'Fatto.' };
+      },
+    }).run('dove sta la logica che decide il routing degli strumenti?', new EventEmitter());
+    assert.doesNotMatch(promptSeenByModel, /delegate this one to `explore`/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('with Jev off no routing call is made and no nudge appears', async () => {
+  let fetched = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { fetched++; return jsonResponse({}); };
+  try {
+    let promptSeenByModel = '';
+    const emitter = new EventEmitter();
+    const routes = [];
+    emitter.on('jevRoute', r => routes.push(r));
+    await agentInBuild({
+      async turn(messages) {
+        promptSeenByModel = messages.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n');
+        return { type: 'text', content: 'Fatto.' };
+      },
+    }).run('come funziona il flusso di autenticazione da cima a fondo?', emitter);
+    assert.equal(fetched, 0);
+    assert.deepEqual(routes, []);
+    assert.doesNotMatch(promptSeenByModel, /delegate this one to `explore`/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('short messages and continuations do not pay for a routing call', async () => {
+  const { activateJev } = await import('../src/jev/index.js');
+  activateJev('sk-test-key-value');
+  // The end-of-turn judgment is a different call and still happens; only the
+  // routing one — the one that asks `approach` — is what this test counts.
+  let routingCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    if (JSON.parse(init.body).questions.approach) routingCalls++;
+    return jevRouting('explore', 0.9)();
+  };
+  try {
+    const client = { async turn() { return { type: 'text', content: 'Ok.' }; } };
+    await agentInBuild(client).run('ciao', new EventEmitter());
+    assert.equal(routingCalls, 0, 'a two-word message is not worth a round trip');
+
+    await agentInBuild(client).run('continua', new EventEmitter());
+    assert.equal(routingCalls, 0, 'a continuation already carries the previous intent');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

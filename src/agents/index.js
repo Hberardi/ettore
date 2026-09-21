@@ -65,7 +65,7 @@ import { guardToolCall, parseToolCall } from './tool-call-guard.js';
 import { ReleaseGateCoordinator } from './release-gate-coordinator.js';
 import { commandWriteTargets, diffSnapshots, snapshotWorkspace } from './workspace-changes.js';
 import { getJevClient } from '../jev/index.js';
-import { judgeTurn, resolveVerdict } from '../jev/turn-judge.js';
+import { judgeApproach, judgeTurn, resolveVerdict } from '../jev/turn-judge.js';
 
 // Increase default max listeners to avoid AbortSignal warnings
 EventEmitter.setMaxListeners(20);
@@ -1096,6 +1096,42 @@ export class Agent {
     return verdicts;
   }
 
+  /**
+   * Route the investigation before the turn starts: when Jev is sure the
+   * request needs a codebase-wide search, point the model at the `explore`
+   * sub-agent instead of letting it grep by hand into the main context.
+   *
+   * Costs one Jev call before the first token, so it is asked only for the
+   * turns where the answer could change anything. Returns nothing useful
+   * unless Jev is on and confident — every other case leaves the turn alone.
+   */
+  async _routeInvestigation(promptText, emitter, signal) {
+    const client = getJevClient();
+    if (!client) return null;
+    const started = Date.now();
+    const verdict = await judgeApproach(client, promptText, { signal });
+    if (verdict.error) {
+      this._debugLog(emitter, 'jev.route_unavailable', { error: verdict.error });
+      return null;
+    }
+    emitter?.emit('jevRoute', {
+      choice: verdict.choice,
+      confidence: verdict.confidence,
+      decisive: verdict.decisive,
+      ms: Date.now() - started,
+    });
+    this._debugLog(emitter, 'jev.routed', {
+      choice: verdict.choice,
+      confidence: verdict.confidence,
+      ms: Date.now() - started,
+    });
+    if (verdict.decisive && verdict.choice === 'explore') {
+      this._queueNamedTurnOverlay('explore_first');
+      return 'explore';
+    }
+    return verdict.choice;
+  }
+
   _createTurnRecoveryState() {
     return createTurnRecoveryState();
   }
@@ -1464,6 +1500,19 @@ export class Agent {
 
     // Emit current token count so the UI can show it
     emitter?.emit('tokenCount', estimateTokens(this.messages));
+
+    // Asked once, before the first model call, and only where the answer can
+    // change something: a continuation already carries the previous turn's
+    // intent, a lite model has no sub-agent to delegate to, and a two-word
+    // message is not worth the round trip.
+    if (
+      this.mode === 'build'
+      && !this._isLite
+      && !continuation
+      && promptText.trim().length >= 15
+    ) {
+      await this._routeInvestigation(promptText, emitter, controller.signal);
+    }
 
     try {
       while (iterations < this.maxIterations) {
