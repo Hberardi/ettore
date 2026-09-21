@@ -90,3 +90,33 @@ export function buildVisionContent(text, images = []) {
   }
   return blocks;
 }
+
+// Models known to read images. The list is deliberately an allowlist of
+// families rather than a blocklist: a new text-only model appearing is the
+// common case, and treating the unknown as "cannot see" would be wrong for
+// every model released after this line was written.
+//
+// So the answer has three states, and the caller says "may not" for `unknown`.
+// ETTORE attaches a base64 image to whatever model is active, and a model that
+// cannot read it either errors after a long wait or — worse — answers around
+// it without saying the image was ignored.
+const VISION_MODEL_PATTERNS = [
+  /gpt-4o/i, /gpt-4\.1/i, /gpt-4-turbo/i, /gpt-5/i, /\bo[134]\b/i,
+  /claude/i,
+  /gemini/i,
+  /llava/i, /bakllava/i, /moondream/i, /minicpm-v/i,
+  /vision/i, /-vl\b/i, /\bvl-/i,
+  /pixtral/i,
+  /step-1v/i,
+  /grok.*vision/i,
+  /internvl/i,
+];
+
+/**
+ * @returns {'yes'|'unknown'} whether the model is known to accept images.
+ */
+export function modelVisionSupport(model) {
+  const name = String(model || '');
+  if (!name) return 'unknown';
+  return VISION_MODEL_PATTERNS.some(re => re.test(name)) ? 'yes' : 'unknown';
+}

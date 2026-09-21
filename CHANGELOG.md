@@ -8,6 +8,28 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-09-21
+
+### Fixed
+
+- **A turn has a ceiling again.** 1.8.0 changed the provider-call timeout from
+  "300s since the call started" to "300s since the last chunk", which was right
+  for a slow model still writing — but it left no absolute bound, and reasoning
+  tokens are chunks too. A model that produces output without converging, or a
+  stream whose last chunks die in flight, could hold a turn open indefinitely.
+  There is now a ceiling that does not move (15 minutes, `turnHardLimitMs`),
+  alongside the silence window, and it can never be set below it.
+
+### Added
+
+- **A warning before sending an image to a model that may not read it.**
+  Attachments went to whatever model was active, as base64 inside the request,
+  with no check that it could see them: a model that cannot either errors after
+  a long wait or answers around the image without saying it was ignored. ETTORE
+  now says so before sending. Vision support is an allowlist of families, so a
+  model it does not recognise is reported as unknown rather than blind.
+
+
 ## [1.8.0] — 2026-09-21
 
 ### Added — Jev picks the skills, and both pre-turn decisions share one call

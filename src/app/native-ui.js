@@ -8,6 +8,7 @@ import { createClient } from '../llm/client.js';
 import { Agent } from '../agents/index.js';
 import { createSession, saveSession, sessionHasContent } from '../sessions/index.js';
 import { isJevEnabled } from '../jev/index.js';
+import { modelVisionSupport } from '../utils/images.js';
 import { uiBridge } from '../tools/bridge.js';
 import { listInstallSessionApprovals, setAutoApprove } from '../tools/index.js';
 import { builtinCommands } from '../commands/index.js';
@@ -448,6 +449,20 @@ export async function startApp(options = {}) {
   // continuation), so the two flows stay in lockstep.
   async function runAgent(text, imageAttachments = [], displayText = text, { continuation = false } = {}) {
     if (!agent || tui.isRunning) return;
+    // An image goes to whatever model is active, as base64 inside the request.
+    // A model that cannot read it either errors after a long wait or answers
+    // around it without saying the image was ignored — and the user, watching
+    // a counter climb, has no way to tell which. Say so before sending.
+    if (imageAttachments.length && modelVisionSupport(connectionManager.activeModel) === 'unknown') {
+      tui.messages.push({
+        role: 'system',
+        text: `⚠ ${imageAttachments.length === 1 ? "L'immagine allegata viene inviata" : 'Le immagini allegate vengono inviate'} a ${connectionManager.activeModel || 'il modello attivo'}, che non risulta fra i modelli con visione.`
+          + ' Se non la legge puoi ricevere un errore dopo una lunga attesa, o una risposta che la ignora senza dirlo.'
+          + ' Per sicurezza passa a un modello con visione con /use, oppure incolla il testo.',
+        tools: [],
+        id: Date.now(),
+      });
+    }
     mission.startTurn(text, { continuation });
     syncMission();
     tui.messages.push({ role: 'user', text: displayText, tools: [], id: Date.now() });

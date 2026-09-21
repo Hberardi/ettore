@@ -135,6 +135,14 @@ const SUBAGENT_REPORT_MAX_CHARS = 6000;
 const SUBAGENT_TIMEOUT_MS = 480_000;
 
 const AGENT_TURN_TIMEOUT_MS = 300_000;
+// A ceiling on the whole provider call, on top of the silence timeout.
+//
+// The silence timeout is the right measure for a model that is working: every
+// chunk pushes it back, so a slow answer is not cut off mid-sentence. But
+// reasoning tokens are chunks too, and a model that reasons without converging
+// — or a stream that dies while its last chunks are still in flight — can hold
+// a turn open indefinitely on that rule alone. This one does not move.
+const AGENT_TURN_HARD_LIMIT_MS = 900_000;
 // How many times per user turn a text-leaked tool-call blob may be converted
 // back into real tool calls before the loop stops covering for the model.
 const MAX_TEXT_TOOL_CALL_RECOVERIES = 4;
@@ -296,6 +304,12 @@ export class Agent {
     this.maxToolCallsPerTurn = Number(config.maxToolCallsPerTurn) || 80;
     // How long a provider call may go without sending anything.
     this.turnIdleTimeoutMs = Number(config.turnIdleTimeoutMs) || AGENT_TURN_TIMEOUT_MS;
+    // The ceiling regardless of progress. Never below the silence window: a
+    // ceiling under it would make the silence rule unreachable.
+    this.turnHardLimitMs = Math.max(
+      this.turnIdleTimeoutMs,
+      Number(config.turnHardLimitMs) || AGENT_TURN_HARD_LIMIT_MS,
+    );
     // 16 of 37 tools left the route permanently short: the base build set
     // alone is 15, so the intent families were competing for one free slot and
     // a prompt that matched none reached the model with no way to run, test or
@@ -1692,20 +1706,32 @@ export class Agent {
 
         let turnTimer = null;
         const idleLimitMs = this.turnIdleTimeoutMs;
+        const hardDeadline = Date.now() + this.turnHardLimitMs;
         const turnTimeout = new Promise((_, reject) => {
-          const check = () => {
-            const idle = Date.now() - lastProgressAt;
-            if (idle < idleLimitMs) {
-              turnTimer = setTimeout(check, idleLimitMs - idle);
-              return;
-            }
-            const error = new Error(`Agent turn timeout — no progress for ${Math.round(idleLimitMs / 1000)}s`);
+          const give = (message) => {
+            const error = new Error(message);
             try {
               if (!controller.signal.aborted) controller.abort(error);
             } catch {}
             reject(error);
           };
-          turnTimer = setTimeout(check, idleLimitMs);
+          const check = () => {
+            const now = Date.now();
+            if (now >= hardDeadline) {
+              // Reached only when chunks kept arriving the whole time, so the
+              // message says what actually happened rather than blaming
+              // silence the user never saw.
+              give(`Agent turn ceiling — the model was still producing output after ${Math.round(this.turnHardLimitMs / 60000)} minutes without finishing`);
+              return;
+            }
+            const idle = now - lastProgressAt;
+            if (idle < idleLimitMs) {
+              turnTimer = setTimeout(check, Math.min(idleLimitMs - idle, hardDeadline - now));
+              return;
+            }
+            give(`Agent turn timeout — no progress for ${Math.round(idleLimitMs / 1000)}s`);
+          };
+          turnTimer = setTimeout(check, Math.min(idleLimitMs, this.turnHardLimitMs));
         });
         let result;
         const providerStartedAt = Date.now();
