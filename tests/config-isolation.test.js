@@ -77,3 +77,25 @@ test('the redirect is honoured even when set after the module was imported', asy
   const { getConfig: getAgain } = await import('../src/config/index.js');
   assert.equal(getAgain('__isolationProbe'), undefined, 'the write must not have leaked out of the temp dir');
 });
+
+test('the suite runs with no live provider credentials in the environment', () => {
+  // The guard in tests/helpers/test-setup.mjs. If this fails, the suite is
+  // talking to somebody's real account: Jev turns itself on from
+  // TYPESAFE_API_KEY, so an exported key silently changed what the agent's
+  // recovery gates decided and billed the owner for the test run.
+  for (const name of ['TYPESAFE_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'MINIMAX_API_KEY']) {
+    assert.equal(process.env[name], undefined, `${name} must not be visible to tests`);
+  }
+});
+
+test('the suite reads its own config and sessions, never the real ones', async () => {
+  const { homedir } = await import('node:os');
+  const realConfig = join(homedir(), '.config', 'ettore-cli-nodejs');
+  assert.ok(process.env.ETTORE_CONFIG_DIR, 'the run must have a scratch config dir');
+  assert.notEqual(process.env.ETTORE_CONFIG_DIR, realConfig);
+  // The switch that would turn Jev on lives in settings, and the key beside
+  // it in the encrypted store. Reading the developer's own would put the live
+  // API in the middle of every agent test.
+  const { isJevEnabled } = await import('../src/jev/index.js');
+  assert.equal(isJevEnabled(), false, 'no test may run with Jev live');
+});

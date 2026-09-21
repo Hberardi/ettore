@@ -7,6 +7,7 @@ import { loadConfig, getConfig } from '../config/index.js';
 import { createClient } from '../llm/client.js';
 import { Agent } from '../agents/index.js';
 import { createSession, saveSession, sessionHasContent } from '../sessions/index.js';
+import { isJevEnabled } from '../jev/index.js';
 import { uiBridge } from '../tools/bridge.js';
 import { listInstallSessionApprovals, setAutoApprove } from '../tools/index.js';
 import { builtinCommands } from '../commands/index.js';
@@ -361,6 +362,12 @@ export async function startApp(options = {}) {
   tui.sessionId = session.id;
   tui.provider  = p;
   tui.model     = m;
+  // Jev is on from the moment the CLI starts if it was activated earlier or
+  // the key is in the environment; the sidebar says so without being asked.
+  const syncJevIndicator = () => {
+    try { tui.jevActive = isJevEnabled(); } catch { tui.jevActive = false; }
+  };
+  syncJevIndicator();
 
   // Plugin runtime: one process-wide registry+runtime pair shared with the
   // command dispatcher. boot() is best-effort: a broken plugin is logged
@@ -1209,6 +1216,8 @@ export async function startApp(options = {}) {
   // a line on every turn would be noise, and a silent decision layer would be
   // worse — the user has to be able to see why a turn was pushed on.
   emitter.on('jevJudgment', ({ verdicts, ms }) => {
+    tui.jevActive = true;
+    tui.jevLastMs = ms;
     const decisive = Object.entries(verdicts || {})
       .filter(([, value]) => typeof value === 'number' && Math.abs(value - 0.5) >= 0.25);
     if (!decisive.length) return;
@@ -1651,6 +1660,7 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
     try {
       const result = await cmd.handler(cmdArgs, context);
       syncMission();
+      if (cmdName === 'jev' || cmdName === 'typesafe') syncJevIndicator();
       if (CONNECTION_COMMANDS.has(cmdName)) {
         tui.provider = connectionManager.activeProvider || tui.provider;
         tui.model = connectionManager.activeModel || tui.model;

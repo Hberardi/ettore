@@ -188,6 +188,10 @@ class TUI {
     this.activeSkills = [];
     this.skillsAvailable = 0;
     this.dynamicToolRouting = true;
+    // Jev (TypeSafe) judging each finished turn, and how long its last call
+    // took. Set by the UI from the saved activation state.
+    this.jevActive = false;
+    this.jevLastMs = 0;
     this.routedToolCount = 0;
     this.routedToolNames = [];
     
@@ -1297,6 +1301,12 @@ class TUI {
       ? `${this.routedToolCount || 0} dynamic`
       : 'all tools';
     lines.push(`${C.dim}↗ route${C.reset} ${C.text}${routeText}${C.reset}`);
+    // Only when on: Jev judging each turn is a real change to how the loop
+    // decides, and "is it actually on?" should not need a command to answer.
+    // Off is the default, and a row saying so would just be noise.
+    if (this.jevActive) {
+      lines.push(`${C.dim}◆ jev${C.reset}      ${C.ok}on${C.reset}${this.jevLastMs ? `${C.dim} · ${this.jevLastMs}ms${C.reset}` : ''}`);
+    }
     lines.push(`${C.dim}cost${C.reset} ${this._statusCostText()} ${C.dim}· ctx${C.reset} ${this._statusCtxText()}`);
     lines.push(`${C.dim}msgs${C.reset} ${C.text}${this.messages.filter(m => m.role !== 'todos').length}${C.reset}`);
     // Which skills the prompt woke, and how many were on offer. Without it a

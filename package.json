@@ -10,11 +10,11 @@
   "scripts": {
     "start": "node bin/cli.js",
     "dev": "node bin/cli.js",
-    "test": "node --test",
+    "test": "node --import ./tests/helpers/test-setup.mjs --test",
     "test:display": "python3 test_display.py",
     "check": "npm test && npm run lint && npm run test:display",
     "release:check": "npm run check",
-    "eval": "node --test tests/agent-evals.test.js",
+    "eval": "node --import ./tests/helpers/test-setup.mjs --test tests/agent-evals.test.js",
     "lint": "eslint src tests",
     "lint:fix": "eslint src tests --fix",
     "format": "eslint src tests --fix",

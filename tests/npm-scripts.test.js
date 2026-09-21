@@ -29,7 +29,10 @@ test('the test script does not name a directory either', () => {
   // a module path and dies with MODULE_NOT_FOUND. Passing nothing is the only
   // form both agree on: search the working directory recursively.
   const script = pkg.scripts.test;
-  assert.match(script, /^node --test\s*$/, `\`${script}\` is not the portable form`);
+  // Flags before `--test` are fine — the suite loads a setup module that way.
+  // What must never appear is a path after it.
+  assert.match(script, /(^|\s)--test\s*$/, `\`${script}\` names something after --test`);
+  assert.match(script, /^node\s/, `\`${script}\` must run node directly`);
 });
 
 test('the declared engine range is one the test script can actually run', () => {

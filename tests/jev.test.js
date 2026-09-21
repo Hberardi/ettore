@@ -16,15 +16,22 @@ import { judgeTurn, resolveVerdict, buildTurnState, TURN_QUESTIONS } from '../sr
 
 let dir;
 const previousConfigDir = process.env.ETTORE_CONFIG_DIR;
+const previousApiKey = process.env.TYPESAFE_API_KEY;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'ettore-jev-'));
   process.env.ETTORE_CONFIG_DIR = dir;
+  // The developer running this suite may have a real key exported. getJevKey
+  // prefers the environment, so leaving it set makes these tests read — and
+  // print, on failure — someone's live credential. Never run against it.
+  delete process.env.TYPESAFE_API_KEY;
 });
 
 afterEach(() => {
   if (previousConfigDir === undefined) delete process.env.ETTORE_CONFIG_DIR;
   else process.env.ETTORE_CONFIG_DIR = previousConfigDir;
+  if (previousApiKey === undefined) delete process.env.TYPESAFE_API_KEY;
+  else process.env.TYPESAFE_API_KEY = previousApiKey;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -371,4 +378,24 @@ test('TYPESAFE_API_KEY alone turns Jev on, and /jev out still wins over it', asy
     if (previous === undefined) delete process.env.TYPESAFE_API_KEY;
     else process.env.TYPESAFE_API_KEY = previous;
   }
+});
+
+test('the sidebar says Jev is on without anyone having to ask', async () => {
+  const { TUI } = await import('../src/app/tui-native.js');
+  const tui = new TUI();
+  assert.equal(tui.jevActive, false, 'off is the default, and off draws no row');
+  // The sidebar is clipped to the terminal height, which is 0 without a TTY.
+  tui.rows = 40;
+  tui.cols = 120;
+  tui.version = '1.6.0';
+  Object.defineProperty(tui, 'availableHeight', { value: 60, configurable: true });
+
+  const draw = () => tui._renderSidebar(30).map(line => tui._stripAnsi(line)).join('\n');
+  assert.doesNotMatch(draw(), /jev/i, 'off is the default state and draws nothing');
+
+  tui.jevActive = true;
+  tui.jevLastMs = 814;
+  const rendered = draw();
+  assert.match(rendered, /jev\s+on/, `expected a jev row, got:\n${rendered}`);
+  assert.match(rendered, /814ms/);
 });
