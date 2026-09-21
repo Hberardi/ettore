@@ -7,8 +7,18 @@ import { constants } from 'fs';
 import { connectionManager } from '../providers/index.js';
 import { getModelCapability } from '../providers/model_capability.js';
 
+// Conf picks its own directory (~/.config/ettore-cli-nodejs) and ignores
+// ETTORE_CONFIG_DIR, unlike every other store in the CLI. That made the
+// variable a half-promise: the encrypted secret store honoured it, the config
+// did not, so a test or a sandboxed run that redirected the config dir still
+// wrote `jevEnabled`, `compressionPrivacyWarned` and the rest into the user's
+// real settings. Passing `cwd` closes the gap. Users who do not set the
+// variable keep the exact path they have today.
+const CONFIG_DIR_OVERRIDE = process.env.ETTORE_CONFIG_DIR || null;
+
 const store = new Conf({
   projectName: 'ettore-cli',
+  ...(CONFIG_DIR_OVERRIDE ? { cwd: CONFIG_DIR_OVERRIDE } : {}),
   defaults: {
     model: 'gpt-4-turbo',
     stream: true,
