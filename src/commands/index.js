@@ -1848,7 +1848,6 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
       const reviewAndEnqueue = async (plan, { originalGoal } = {}) => {
         // Loop until the user picks Esegui or Annulla. Modifica + Salva just
         // mutate the plan and re-display it.
-        // eslint-disable-next-line no-constant-condition
         while (true) {
           const choice = await askUser(
             `${fmtPlan(plan)}\n\nCosa faccio?`,
