@@ -9,6 +9,7 @@ import { Agent } from '../agents/index.js';
 import { createSession, saveSession, sessionHasContent } from '../sessions/index.js';
 import { isJevEnabled } from '../jev/index.js';
 import { modelVisionSupport } from '../utils/images.js';
+import { evaluateStall } from './stall-watchdog.js';
 import { uiBridge } from '../tools/bridge.js';
 import { listInstallSessionApprovals, setAutoApprove } from '../tools/index.js';
 import { builtinCommands } from '../commands/index.js';
@@ -1500,6 +1501,9 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
   let running = true;
   let renderLoop = null;
   let stallWatchdog = null;
+  // Idle animation rate. Real changes still render on the next tick.
+  const ANIMATION_INTERVAL_MS = 100;
+  let lastAnimationAt = 0;
 
   const startRenderLoop = () => {
     if (renderLoop) return;
@@ -1509,19 +1513,20 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
       // for it — repainting the prompt, and the frame behind it, continuously.
       // Only an actual state change (a key, a moved selection) redraws now, so
       // the screen holds still on the question until the user chooses.
-      if (tui.shouldRenderOnTick()) {
-        tui.render();
-        tui.needsRender = false;
-        // While waiting on a tool, every frame is "activity" — the user sees
-        // the screen updating (pulse + elapsed time), so the stall watchdog
-        // shouldn't fire on silent tools that don't emit toolProgress. Without
-        // this, a 5-minute read on a slow disk triggers the watchdog at 300s
-        // even though the user is seeing the UI tick.
-        if (tui.isRunning && tui.streaming?.waitKind === 'tool') {
-          tui.streaming.lastActivityAt = Date.now();
-        }
-      }
-    }, 16); // Always 60fps when active
+      if (!tui.shouldRenderOnTick()) return;
+      // A real change draws at once. Otherwise this is the idle animation —
+      // a pulse and a seconds counter, which nothing can see move faster than
+      // ~10fps — and repainting the whole screen 60 times a second for it cost
+      // a third of a core for the length of every turn.
+      const now = Date.now();
+      if (!tui.needsRender && now - lastAnimationAt < ANIMATION_INTERVAL_MS) return;
+      lastAnimationAt = now;
+      tui.render();
+      tui.needsRender = false;
+      // Nothing here touches streaming.lastActivityAt. A repaint is the CLI
+      // drawing the same thing again, not the tool making progress, and
+      // counting it as progress is what kept a stuck tool's watchdog fed.
+    }, 16);
   };
 
   const _stopRenderLoop = () => {
@@ -1545,32 +1550,29 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
       const provider = connectionManager.activeProvider || '';
       const modelId = connectionManager.activeModel || '';
       const longReasoningModel = hasLongReasoningWindow(provider, modelId);
-      // Default thresholds tightened from the old 300/120s. Real-world signal
-      // shows the model genuinely never responds in 5 minutes — better to
-      // fail fast and let the user retry or switch model than to make them
-      // stare at a frozen screen. Override with ETTORE_STALL_TIMEOUT_MS env.
-      const overrideMs = Number(process.env.ETTORE_STALL_TIMEOUT_MS) || 0;
-      const modelStallMs = overrideMs > 0
-        ? overrideMs
-        : (longReasoningModel ? 180_000 : 90_000);
-      const hardStallMs = waitKind === 'tool' ? 300_000 : modelStallMs;
-      // Soft warning at 60s (model) / 120s (tool) — push a system message
-      // so the user knows to consider ESC. Doesn't cancel anything; just
-      // makes the wait actionable instead of mysterious.
-      const softWarnMs = waitKind === 'tool' ? 120_000 : 60_000;
-      if (idleMs >= softWarnMs && idleMs < softWarnMs + 1500 && !tui.streaming._softWarned) {
+      const { warn, cancel, idleSec } = evaluateStall({
+        idleMs,
+        waitKind,
+        longReasoningModel,
+        overrideMs: Number(process.env.ETTORE_STALL_TIMEOUT_MS) || 0,
+        alreadyWarned: Boolean(tui.streaming._softWarned),
+      });
+      if (warn) {
         tui.streaming._softWarned = true;
-        const idleSec = Math.round(idleMs / 1000);
-        const msg = waitKind === 'tool'
-          ? `⚠ Tool fermo da ${idleSec}s — se sembra bloccato, premi ESC per annullare.`
-          : `⚠ Modello senza risposta da ${idleSec}s — se continua, premi ESC per annullare o cambia modello con /use.`;
-        tui.messages.push({ role: 'system', text: msg, tools: [], id: Date.now() });
+        tui.messages.push({
+          role: 'system',
+          text: waitKind === 'tool'
+            ? `⚠ Tool fermo da ${idleSec}s senza segnalare progresso — se sembra bloccato, premi ESC per annullare.`
+            : `⚠ Modello senza risposta da ${idleSec}s — se continua, premi ESC per annullare o cambia modello con /use.`,
+          tools: [],
+          id: Date.now(),
+        });
         tui.needsRender = true;
       }
-      if (idleMs < hardStallMs) return;
+      if (!cancel) return;
       const reason = waitKind === 'tool'
-        ? `tool fermo da ${Math.round(idleMs / 1000)}s`
-        : `nessun token dal modello da ${Math.round(idleMs / 1000)}s`;
+        ? `tool fermo da ${idleSec}s`
+        : `nessun token dal modello da ${idleSec}s`;
       tui.messages.push({
         role: 'assistant',
         text: `Error: stallo rilevato (${reason}). Operazione annullata automaticamente.\n` +

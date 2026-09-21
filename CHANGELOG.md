@@ -8,6 +8,33 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-09-21
+
+### Fixed — a turn stuck on a tool could stay stuck forever
+
+The stall watchdog warns at 120s and cancels at 300s when a tool stops making
+progress. It never fired. The render loop refreshed the activity timestamp on
+every frame while a tool was running — added so that a silent tool would not
+look idle — so a tool that never returned kept its own watchdog fed 60 times a
+second. The idle time never exceeded one frame, and neither the warning nor the
+cancel could happen: the turn sat there until someone noticed.
+
+Progress now means progress the tool or the model reported. A repaint is the
+CLI drawing the same thing again, and no longer counts. The decision moved into
+`src/app/stall-watchdog.js` where it can be tested, the tool ceiling was raised
+to 420s so it sits above every per-tool timeout — a slow tool is stopped by its
+own timeout, with its own message, and the watchdog only catches what escapes
+that — and the warning no longer has to land inside a 1.5-second window to be
+delivered.
+
+### Changed — the idle animation no longer costs a third of a core
+
+While a turn was running the whole screen was repainted 60 times a second, even
+with nothing to show but a pulse and a seconds counter. Measured on a stuck
+turn: ~38% of a core, sustained, for as long as it lasted. Real changes still
+draw on the next tick; the idle animation runs at 10fps.
+
+
 ## [1.8.1] — 2026-09-21
 
 ### Fixed
