@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { Agent } from '../src/agents/index.js';
 import { toolHandlers } from '../src/tools/index.js';
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = ms => new Promise(resolve => { setTimeout(resolve, ms); });
 
 function agentFor(client, extra = {}) {
   return new Agent(client, {
