@@ -2816,7 +2816,19 @@ export class Agent {
       // string in the second tool call" pattern seen across providers.
       if (isInvalidToolArgsError(e)) {
         const retried = await this._retryAfterInvalidToolArgs(e, emitter);
-        if (retried) return;
+        if (retried) {
+          // The retry ends the turn on purpose — the nudge waits in history
+          // for the next prompt — but it used to end it in silence. With no
+          // terminal event the TUI never learned the turn was over: it stayed
+          // "running" with the last tool frozen on screen, and only the
+          // animation ticking, for the rest of the session.
+          const message = 'Il provider ha rifiutato gli argomenti di una tool call (JSON non valido). '
+            + 'Ho lasciato in conversazione una correzione per il modello: scrivi "continua" e riparte da qui.';
+          this.messages.push({ role: 'assistant', content: message });
+          emitter?.emit('complete', message);
+          emitTurnState('completed', { reason: 'tool_args_retry' });
+          return message;
+        }
       }
       // The retry count is what the client actually spent, so the message can
       // only claim to have retried when it did.

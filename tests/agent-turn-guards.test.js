@@ -114,3 +114,57 @@ test('a failed edit neither touches the file nor moves the workspace revision', 
     toolHandlers.edit = original;
   }
 });
+
+test('the invalid-tool-args retry ends the turn out loud, not in silence', async () => {
+  // The retry deliberately stops the turn and leaves a nudge in history for
+  // the next prompt. It used to do that without emitting anything, so the TUI
+  // never learned the turn was over: it stayed "running" with the last tool
+  // frozen on screen for the rest of the session.
+  const providerRejection = Object.assign(
+    new Error('invalid function arguments json string'),
+    { status: 400 },
+  );
+  const agent = agentFor({
+    async turn() { throw providerRejection; },
+  });
+  const emitter = new EventEmitter();
+  const terminal = [];
+  for (const name of ['complete', 'error', 'cancelled']) {
+    emitter.on(name, payload => terminal.push({ name, payload }));
+  }
+  const states = collect(emitter, 'turnState');
+
+  const result = await agent.run('leggi tmp/launch_wine.sh', emitter);
+
+  assert.equal(terminal.length, 1, `exactly one terminal event, got ${JSON.stringify(terminal.map(t => t.name))}`);
+  assert.equal(terminal[0].name, 'complete');
+  assert.match(String(result), /tool call/i);
+  assert.ok(
+    states.some(s => s.state === 'completed'),
+    'the turn state must reach a terminal value too',
+  );
+  // The nudge is left where the next prompt will pick it up.
+  assert.ok(agent.messages.some(m => m.role === 'user' && /JSON/i.test(String(m.content || ''))));
+});
+
+test('every run() that returns has emitted a terminal event first', async () => {
+  // A sweep over the ordinary shapes a turn can take. The point is the
+  // invariant, not any one of them: the UI unfreezes on these events, so a
+  // path that returns without one strands the session.
+  const cases = {
+    'plain answer': { async turn() { return { type: 'text', content: 'Ecco.' }; } },
+    'provider throws': { async turn() { throw new Error('connessione persa'); } },
+    'empty tool batch': {
+      async turn() {
+        return { type: 'tool_calls', tool_calls: [], message: { role: 'assistant', content: '', tool_calls: [] } };
+      },
+    },
+  };
+  for (const [label, client] of Object.entries(cases)) {
+    const emitter = new EventEmitter();
+    const terminal = [];
+    for (const name of ['complete', 'error', 'cancelled']) emitter.on(name, () => terminal.push(name));
+    await agentFor(client).run('fai qualcosa', emitter);
+    assert.ok(terminal.length >= 1, `"${label}" returned without a terminal event`);
+  }
+});

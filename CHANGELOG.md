@@ -8,6 +8,29 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.8.7] — 2026-09-21
+
+### Fixed — a turn could end without telling anyone
+
+When a provider rejects a tool call's arguments as malformed JSON, ETTORE
+repairs the history, leaves a nudge for the model and stops the turn on
+purpose — the nudge waits for the next prompt. It stopped in silence: that path
+returned from `run()` without emitting `complete`, `error` or `cancelled`.
+
+The TUI unfreezes on those events, so the session never learned the turn was
+over. It stayed "running" with the last tool frozen mid-spinner — seen in the
+wild as `read tmp/launch_wine.sh … [56s] (ancora in esecuzione…)` on a tool
+whose own 20-second timeout had killed it long before — and would not take
+another prompt. Diagnosed on the live process: idle, no sockets, no children,
+no open files, just the animation ticking.
+
+It now ends out loud, with a message saying what happened and that "continua"
+resumes from there. And the TUI no longer depends on the agent being perfect:
+`runAgent` resets the running state when `run()` returns, whatever it emitted,
+so no future silent path can strand a session. A test pins the invariant that
+every return from `run()` is preceded by a terminal event.
+
+
 ## [1.8.6] — 2026-09-21
 
 ### Fixed — Windows

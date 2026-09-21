@@ -477,6 +477,20 @@ export async function startApp(options = {}) {
       await agent.run(text, emitter, { imageAttachments, continuation });
     } catch {
       // Errors are surfaced via the 'error' event; nothing to do here.
+    } finally {
+      // The turn is over the moment run() returns, whatever it did or did not
+      // emit. Leaving this to the complete/error/cancelled handlers alone
+      // meant one silent return path froze the UI for the rest of the session:
+      // isRunning stayed true, the last tool kept its spinner, and nothing
+      // could take a new prompt. The handlers still do the rich work; this
+      // only guarantees the screen never outlives the turn.
+      if (tui.isRunning) {
+        closeDanglingTools('terminato');
+        tui.isRunning = false;
+        tui.streaming = null;
+        tui.turnState = 'completed';
+        tui.needsRender = true;
+      }
     }
     session.messages = agent.messages;
     // The model can change mid-session (/model), and at startup it may not
