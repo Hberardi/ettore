@@ -8,6 +8,21 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.8.9] — 2026-09-21
+
+### Fixed — a plugin's slash command did nothing when typed
+
+Plugin commands (like `/kali`) live in the plugin registry; the TUI's command
+dispatcher only ever consulted `builtinCommands`. So a plugin's slash command
+fell through to "unknown command", or — when the palette had pre-selected it —
+did nothing at all. The registry already merged them (`getAllCommands`) and the
+agent already saw plugin *tools*; only the command bridge in the UI was missing.
+
+The dispatcher now runs a registered plugin command through the registry, and
+the command palette rebuilds its list each time it opens, so a plugin installed
+this session shows up and runs without a restart.
+
+
 ## [1.8.8] — 2026-09-21
 
 ### Fixed

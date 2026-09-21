@@ -1630,12 +1630,22 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
   startRenderLoop();
   startStallWatchdog();
 
-  const commandList = Object.entries(builtinCommands).map(([name, cmd]) => ({
+  const builtinCommandList = Object.entries(builtinCommands).map(([name, cmd]) => ({
     name,
     description: cmd.description || '',
     usage:       cmd.usage || name,
     aliases:     cmd.aliases || [],
-  })).sort((a, b) => a.name.localeCompare(b.name));
+  }));
+  // Rebuilt each time the palette opens so a plugin installed this session
+  // shows up without a restart. Plugin commands live in the registry, which is
+  // why /kali was invisible in the palette and did nothing when typed.
+  const buildCommandList = () => {
+    const pluginCommands = Object.entries(pluginRegistry?.getAllCommands?.() || {})
+      .filter(([, def]) => def.plugin)
+      .map(([name, def]) => ({ name, description: def.description || '', usage: def.usage || name, aliases: [], plugin: def.plugin }));
+    return [...builtinCommandList, ...pluginCommands].sort((a, b) => a.name.localeCompare(b.name));
+  };
+  const commandList = buildCommandList();
   let pendingSlashArgs = [];
   let commandPaletteInput = '';
 
@@ -1650,7 +1660,7 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
 
   const suggestCommand = (input) => {
     const normalized = input.toLowerCase();
-    const allNames = commandList.flatMap(cmd => [cmd.name, ...(cmd.aliases || [])]);
+    const allNames = buildCommandList().flatMap(cmd => [cmd.name, ...(cmd.aliases || [])]);
     const prefix = allNames.find(name => name.startsWith(normalized) || normalized.startsWith(name));
     if (prefix) return prefix;
 
@@ -1730,6 +1740,23 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
         return executeCommand(base, [...sub, ...cmdArgs]);
       }
     }
+    // Plugin commands (e.g. /kali) live in the registry, not builtinCommands.
+    // Without this branch a plugin's slash command fell through to "Unknown
+    // command" — or, when the palette had pre-selected it, did nothing at all.
+    if (!builtinCommands[cmdName]) {
+      const pluginCommands = pluginRegistry?.getAllCommands?.() || {};
+      const pluginCmd = pluginCommands[cmdName];
+      if (pluginCmd && pluginCmd.plugin) {
+        try {
+          const res = await pluginCmd.handler(cmdArgs.join(' '), { signal: null });
+          showCommandOutput(cmdName, res?.output || '(no output)');
+        } catch (err) {
+          showCommandOutput(cmdName, `Error: ${err?.message || err}`);
+        }
+        return;
+      }
+    }
+
     const cmd = builtinCommands[cmdName];
     if (!cmd) {
       const suggestion = suggestCommand(cmdName);
@@ -2161,7 +2188,7 @@ if (cmdName === 'connect') {
         return;
       }
 
-      tui.openCommandPalette(commandList);
+      tui.openCommandPalette(buildCommandList());
       updateCommandPaletteInput([cmdName, ...pendingSlashArgs].filter(Boolean).join(' '));
       return;
     }
@@ -2432,7 +2459,7 @@ if (cmdName === 'connect') {
       if (key?.name === 'left') {
         tui.closeApiKeyInput();
         const items = SUBMENU_COMMANDS.connect();
-        tui.openCommandPalette(commandList);
+        tui.openCommandPalette(buildCommandList());
         tui.openSubMenu('connect', items);
         return;
       }
@@ -2483,7 +2510,7 @@ if (cmdName === 'connect') {
           // state are re-initialized — flipping the flag directly would
           // leave `commandFiltered` undefined and crash the next render.
           tui.closeSubMenu();
-          tui.openCommandPalette(commandList);
+          tui.openCommandPalette(buildCommandList());
         }
         return;
       }
@@ -2491,7 +2518,7 @@ if (cmdName === 'connect') {
         // Same rationale as the backspace branch above: route through
         // `openCommandPalette` to keep palette state consistent.
         tui.closeSubMenu();
-        tui.openCommandPalette(commandList);
+        tui.openCommandPalette(buildCommandList());
         return;
       }
       if (str && !key?.ctrl && !key?.meta && str.codePointAt(0) >= 32) {
@@ -2611,7 +2638,7 @@ if (cmdName === 'connect') {
     if (str === '/' && tui.input === '' && !tui.isRunning) {
       pendingSlashArgs = [];
       commandPaletteInput = '';
-      tui.openCommandPalette(commandList);
+      tui.openCommandPalette(buildCommandList());
       return;
     }
 

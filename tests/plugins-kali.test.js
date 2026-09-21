@@ -97,3 +97,26 @@ test('kali: an off-by-one CIDR boundary is respected', async () => {
   requireInScope(parseTarget('10.10.10.3'));
   assert.throws(() => requireInScope(parseTarget('10.10.10.4')), /not in the authorisation scope/);
 });
+
+test('kali: the /kali command runs through the registry and reports the inventory', async () => {
+  // The command that appeared to "do nothing": it lives in the plugin
+  // registry, not in builtinCommands, so the dispatcher has to consult
+  // getAllCommands(). This pins the path the UI fix depends on.
+  const { PluginRegistry } = await import('../src/plugins/registry.js');
+  const { readManifest, importPlugin } = await import('../src/plugins/loader.js');
+
+  const reg = new PluginRegistry({});
+  const manifest = await readManifest(PLUGIN_DIR);
+  const { mod, validated } = await importPlugin(manifest);
+  reg.register({ manifest, ...validated, _module: mod, loadedAt: new Date().toISOString() });
+
+  const cmds = reg.getAllCommands();
+  assert.ok(cmds.kali, '/kali must be a registered plugin command');
+  assert.equal(cmds.kali.plugin, 'kali');
+
+  const res = await cmds.kali.handler('', { signal: null });
+  assert.equal(res.handled, true);
+  assert.match(res.output, /Installed:/);
+  assert.match(res.output, /Scope:/);
+  assert.match(res.output, /authorised to test/i);
+});
