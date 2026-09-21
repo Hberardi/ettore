@@ -38,8 +38,11 @@ async function seed({ provider = 'anthropic', model = 'claude-opus-5', turns = 1
   }
   await saveSession(session);
   if (updated) {
+    // saveSession stamps `updated` itself, so asking it to write a past time
+    // never worked: both seeds ended up on the same millisecond and "newest
+    // first" came down to a tie. Age the file directly instead.
     session.updated = updated;
-    await saveSession(session);
+    writeFileSync(join(dir, `${session.id}.json`), JSON.stringify(session, null, 2));
   }
   return session;
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { Agent } from '../src/agents/index.js';
 import { toolHandlers } from '../src/tools/index.js';
@@ -29,18 +29,28 @@ test('porcelain -z: plain entries, and both ends of a rename', () => {
 });
 
 test('diff: appeared, vanished and re-edited paths count, unchanged ones do not', () => {
-  const before = { root: '/r', entries: new Map([['a.js', ' M|1|10'], ['gone.js', '??|1|1'], ['same.js', ' M|5|5']]) };
-  const after = { root: '/r', entries: new Map([['a.js', ' M|2|12'], ['new.js', '??|3|3'], ['same.js', ' M|5|5']]) };
-  assert.deepEqual(diffSnapshots(before, after), ['/r/a.js', '/r/gone.js', '/r/new.js']);
+  // The root is joined with the platform separator, so the expectation is
+  // built the same way rather than hard-coding POSIX.
+  const root = resolve(sep, 'r');
+  const before = { root, entries: new Map([['a.js', ' M|1|10'], ['gone.js', '??|1|1'], ['same.js', ' M|5|5']]) };
+  const after = { root, entries: new Map([['a.js', ' M|2|12'], ['new.js', '??|3|3'], ['same.js', ' M|5|5']]) };
+  assert.deepEqual(
+    diffSnapshots(before, after),
+    [join(root, 'a.js'), join(root, 'gone.js'), join(root, 'new.js')],
+  );
   assert.deepEqual(diffSnapshots(null, after), []);
 });
 
 test('command write targets: redirects, tee and in-place edits, never /dev or fd dups', () => {
-  assert.deepEqual(commandWriteTargets('echo x > out.js', '/w'), ['/w/out.js']);
-  assert.deepEqual(commandWriteTargets('cat a | tee -a /abs/log.txt', '/w'), ['/abs/log.txt']);
-  assert.deepEqual(commandWriteTargets("sed -i 's/a/b/' src/x.py", '/w'), ['/w/src/x.py']);
-  assert.deepEqual(commandWriteTargets('npm test 2>&1 > /dev/null', '/w'), []);
-  assert.deepEqual(commandWriteTargets('ls -la && grep foo bar.js', '/w'), []);
+  // Relative targets resolve against the cwd with the platform's separator.
+  const cwd = resolve(sep, 'w');
+  assert.deepEqual(commandWriteTargets('echo x > out.js', cwd), [join(cwd, 'out.js')]);
+  assert.deepEqual(commandWriteTargets("sed -i 's/a/b/' src/x.py", cwd), [join(cwd, 'src', 'x.py')]);
+  // An absolute POSIX path stays absolute on POSIX; on Windows it is not one,
+  // so it resolves against the cwd like any other relative target.
+  assert.deepEqual(commandWriteTargets('cat a | tee -a /abs/log.txt', cwd), [resolve(cwd, '/abs/log.txt')]);
+  assert.deepEqual(commandWriteTargets('npm test 2>&1 > /dev/null', cwd), []);
+  assert.deepEqual(commandWriteTargets('ls -la && grep foo bar.js', cwd), []);
 });
 
 test('snapshot sees a second edit to a file that was already dirty', { skip: !gitAvailable }, async () => {
@@ -52,7 +62,7 @@ test('snapshot sees a second edit to a file that was already dirty', { skip: !gi
     assert.ok(first, 'a git work tree yields a snapshot');
     await writeFile(join(dir, 'a.js'), 'two, and longer\n');
     const second = await snapshotWorkspace(dir);
-    assert.deepEqual(diffSnapshots(first, second).map(p => p.slice(p.lastIndexOf('/') + 1)), ['a.js']);
+    assert.deepEqual(diffSnapshots(first, second).map(p => p.slice(p.lastIndexOf(sep) + 1)), ['a.js']);
     assert.deepEqual(diffSnapshots(second, await snapshotWorkspace(dir)), []);
   } finally {
     await rm(dir, { recursive: true, force: true });

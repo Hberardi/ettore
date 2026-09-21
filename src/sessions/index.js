@@ -58,7 +58,13 @@ export async function listSessions() {
       if (sessionHasContent(data)) sessions.push(data);
     } catch {}
   }
-  return sessions.sort((a, b) => b.updated - a.updated);
+  // Two sessions saved inside the same millisecond would otherwise land in
+  // whatever order readdir happened to return, which is how "newest first"
+  // became a coin flip on a fast machine. `created` breaks the tie, and the
+  // id — which carries its own timestamp — settles the rest.
+  return sessions.sort((a, b) => (b.updated - a.updated)
+    || ((b.created || 0) - (a.created || 0))
+    || String(b.id || '').localeCompare(String(a.id || '')));
 }
 
 export async function loadSession(id) {

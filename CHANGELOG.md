@@ -8,6 +8,23 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.8.4] — 2026-09-21
+
+### Fixed
+
+- **"Newest first" was a coin flip.** `listSessions` sorted on `updated`
+  alone, so two sessions saved inside the same millisecond came back in
+  whatever order the directory listing gave — which is how the ordering test
+  failed on CI while passing on a slower machine. `created` and then the id
+  break the tie.
+- Tests written on Linux assumed POSIX paths and failed on Windows:
+  the workspace-diff and shell-target cases now build their expectations with
+  the platform separator, and the config-isolation case allows Conf's own
+  per-platform directory layout.
+- The `seed` helper in the session tests could not age a session: it set
+  `updated` and then called `saveSession`, which stamps `updated` itself.
+
+
 ## [1.8.3] — 2026-09-21
 
 ### Fixed — a tool could be shown running for the rest of the session

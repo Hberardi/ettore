@@ -51,7 +51,10 @@ test('without the variable the store keeps the path it has always used', () => {
     import Conf from 'conf';
     console.log(new Conf({ projectName: 'ettore-cli' }).path);
   `], { cwd: repoRoot, encoding: 'utf-8' }).trim();
-  assert.match(out, /ettore-cli-nodejs[/\\]config\.json$/);
+  // Conf picks a per-platform directory: ~/.config/ettore-cli-nodejs on Linux,
+  // %APPDATA%\ettore-cli-nodejs\Config on Windows. What matters is that it is
+  // still Conf's own, not a redirected one.
+  assert.match(out, /ettore-cli-nodejs[/\\].*config\.json$/i);
 });
 
 test('the redirect is honoured even when set after the module was imported', async () => {
