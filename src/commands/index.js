@@ -6,7 +6,7 @@ import { connectionManager, ConnectionManager } from '../providers/index.js';
 import { PROVIDER_REGISTRY } from '../providers/registry.js';
 import { getProviderEnvVars, listConfiguredEnvProviders } from '../providers/env.js';
 import { clearInstallSessionApprovals, listInstallSessionApprovals, setAutoApprove, getAutoApprove } from '../tools/index.js';
-import { saveConfig } from '../config/index.js';
+import { saveConfig, getConfig } from '../config/index.js';
 import { redactSecrets } from '../utils/secrets.js';
 import { listSessions, loadSession } from '../sessions/index.js';
 
@@ -196,7 +196,7 @@ First steps
 
       output += group('Core commands', ['help', 'status', 'doctor', 'providers', 'models', 'connect', 'use', 'disconnect']);
       output += group('Session and project', ['clear', 'new', 'sessions', 'resume', 'init', 'memory', 'skills', 'mission', 'compress', 'agent', 'caveman', 'approvals', 'history', 'team', 'loop']);
-      output += group('Configuration', ['keys', 'config', 'theme', 'system', 'version', 'exit']);
+      output += group('Configuration', ['keys', 'config', 'jev', 'theme', 'system', 'version', 'exit']);
       output += '\nUse /help <command> for details, for example /help connect.';
 
       return output.trimEnd();
@@ -403,6 +403,82 @@ ${setupHint()}`;
         return `Session "${id}" has no conversation in it.`;
       }
       return { action: 'resumeSession', session };
+    }
+  },
+
+  jev: {
+    description: 'Jev (TypeSafe System One) as the agent\'s judgment layer',
+    usage: 'jev [active <api key>|out|status|test]',
+    aliases: ['typesafe'],
+    handler: async (args, _context = {}) => {
+      const {
+        activateJev, deactivateJev, getJevClient, isJevEnabled, getJevKey,
+        JEV_DEFAULT_MODEL,
+      } = await import('../jev/index.js');
+      const { maskSecret } = await import('../utils/secrets.js');
+      const [rawSub = 'status', ...rest] = args;
+      const sub = String(rawSub).toLowerCase();
+
+      const statusLine = () => {
+        if (!getJevKey()) return 'Jev: off — no API key saved.\nActivate it with /jev active <api key> (key from https://console.typesafe.ai/keys).';
+        const model = getConfig('jevModel') || JEV_DEFAULT_MODEL;
+        return isJevEnabled()
+          ? `Jev: on — model ${model}, key ${maskSecret(getJevKey())}.\nThe agent asks it to judge each finished turn. Turn it off with /jev out.`
+          : `Jev: off — key ${maskSecret(getJevKey())} is saved but not in use.\nTurn it back on with /jev active.`;
+      };
+
+      // `active` is what the user types; the rest are the words people reach
+      // for when they forget which one it was.
+      if (['active', 'activate', 'on', 'in'].includes(sub)) {
+        const key = String(rest[0] || '').trim();
+        if (!key && !getJevKey()) {
+          return 'Missing API key.\nUsage: /jev active <api key> — get one at https://console.typesafe.ai/keys';
+        }
+        try {
+          const { masked, model } = key
+            ? activateJev(key)
+            : (saveConfig('jevEnabled', true), { masked: maskSecret(getJevKey()), model: getConfig('jevModel') || JEV_DEFAULT_MODEL });
+          return `Jev on — model ${model}, key ${masked}.\n`
+            + 'The agent now asks Jev to judge each finished turn: whether it announced work without doing it, '
+            + 'deferred it back to you, or is genuinely done. Jev only overrides the existing check when it is sure, '
+            + 'and a failed call changes nothing.\n'
+            + 'Turn it off with /jev out.';
+        } catch (error) {
+          return `Could not activate Jev: ${error.message}`;
+        }
+      }
+
+      if (['out', 'off', 'deactivate', 'stop'].includes(sub)) {
+        const forget = ['forget', '--forget', 'key'].includes(String(rest[0] || '').toLowerCase());
+        if (!getJevKey()) return 'Jev is already off — no key saved.';
+        const { forgotten } = deactivateJev({ forget });
+        return forgotten
+          ? 'Jev off, and the saved API key has been deleted.'
+          : 'Jev off. The key stays saved — /jev active turns it back on without retyping it.';
+      }
+
+      if (sub === 'test') {
+        const client = getJevClient();
+        if (!client) return isJevEnabled() ? 'Jev has no usable key.' : 'Jev is off. Turn it on with /jev active <api key>.';
+        try {
+          const answer = await client.ask(
+            { note: 'This is a connectivity check from the ETTORE CLI.' },
+            'This state is a connectivity check.',
+          );
+          if (answer.value === null) return 'Jev answered, but the response had no usable value.';
+          return `Jev reachable — answered ${answer.value.toFixed(2)} (${answer.decisive ? 'decisive' : 'uncertain'}).`;
+        } catch (error) {
+          return `Jev call failed: ${error.message}`;
+        }
+      }
+
+      if (sub === 'status') return statusLine();
+
+      return `Unknown /jev subcommand: ${rawSub}\n\n`
+        + '  /jev active <api key>   turn Jev on (key saved, encrypted)\n'
+        + '  /jev out                turn Jev off (add "forget" to delete the key)\n'
+        + '  /jev status             show the current state\n'
+        + '  /jev test               check the key and the connection';
     }
   },
 

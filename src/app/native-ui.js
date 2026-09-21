@@ -1205,6 +1205,39 @@ export async function startApp(options = {}) {
     tui.needsRender = true;
   });
 
+  // Jev judged the turn. Shown only when it actually says something decisive:
+  // a line on every turn would be noise, and a silent decision layer would be
+  // worse — the user has to be able to see why a turn was pushed on.
+  emitter.on('jevJudgment', ({ verdicts, ms }) => {
+    const decisive = Object.entries(verdicts || {})
+      .filter(([, value]) => typeof value === 'number' && Math.abs(value - 0.5) >= 0.25);
+    if (!decisive.length) return;
+    const LABELS = {
+      announced: 'lavoro annunciato ma non fatto',
+      deferred: 'lavoro rimandato all\'utente',
+      unapplied_code: 'codice mostrato invece che scritto',
+      complete: 'richiesta completata',
+    };
+    const parts = decisive.map(([key, value]) => `${LABELS[key] || key}: ${value > 0.5 ? 'sì' : 'no'}`);
+    tui.messages.push({
+      role: 'system',
+      text: `◆ Jev (${ms}ms) — ${parts.join(' · ')}`,
+      tools: [],
+      id: Date.now(),
+    });
+    tui.needsRender = true;
+  });
+
+  emitter.on('jevError', ({ error }) => {
+    tui.messages.push({
+      role: 'system',
+      text: `◆ Jev non raggiungibile: ${error}. Il turno prosegue con i controlli normali.`,
+      tools: [],
+      id: Date.now(),
+    });
+    tui.needsRender = true;
+  });
+
   // ── Token / cost tracking ──────────────────────────────────────────────────
   // Initialise context window size from the current model
   const _initModelMeta = () => {

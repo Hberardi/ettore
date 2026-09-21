@@ -434,6 +434,47 @@ And `edit` helps when it misses: a block copied with the wrong indentation still
 applies, "not found" quotes the closest region of the file with line numbers,
 and a successful edit shows the changed lines.
 
+## Jev: a second opinion on when a turn is done
+
+Every turn in build mode ends with a judgment: did the model *announce* work
+without doing it, hand it back to you, show code instead of writing it — or is
+the request genuinely finished? ETTORE answers that with regex over Italian and
+English phrasing. It works, but wording is a proxy for meaning: a false yes
+re-prompts a model that was already done, a false no ends a turn with the job
+half finished.
+
+[Jev](https://docs.typesafe.ai/introduction), TypeSafe's System One model, can
+answer the same questions from meaning instead of wording. It does not generate
+text — it evaluates typed questions against a state and returns structured
+answers with calibrated probabilities. ETTORE asks all four questions in a
+single request, evaluated in parallel.
+
+```bash
+/jev active <api key>      # turn it on (key from https://console.typesafe.ai/keys)
+/jev status                # what is on, and which model
+/jev test                  # check the key and the connection
+/jev out                   # turn it off; add "forget" to delete the key
+```
+
+Three properties make it safe to leave on:
+
+- **Jev decides, it never writes.** No text of its own ever reaches you or the
+  transcript. It only answers yes/no questions about a turn that already
+  happened.
+- **It only overrides when it is sure.** A Noul answer near the middle — the
+  model's way of saying "could go either way" — is discarded and the existing
+  check stands. Jev can only change an outcome it is confident about.
+- **Failure changes nothing.** No key, no network, a rate limit, a timeout:
+  the turn proceeds on exactly the checks it used before, and you see one line
+  saying Jev was unreachable.
+
+When Jev does decide something, you see it: `◆ Jev (240ms) — lavoro annunciato
+ma non fatto: sì`. An invisible decision layer would be worse than none.
+
+The key is stored with the same encrypted store used for provider keys, and is
+never written to disk in plaintext or echoed back in full. `/jev out` keeps the
+key so you can switch it back on without retyping; `/jev out forget` deletes it.
+
 ## Plugins
 
 ETTORE ships eight plugins and can load your own. A plugin adds **tools** the

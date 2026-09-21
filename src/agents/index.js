@@ -64,6 +64,8 @@ import { executeToolHandler } from './tool-executor.js';
 import { guardToolCall, parseToolCall } from './tool-call-guard.js';
 import { ReleaseGateCoordinator } from './release-gate-coordinator.js';
 import { commandWriteTargets, diffSnapshots, snapshotWorkspace } from './workspace-changes.js';
+import { getJevClient } from '../jev/index.js';
+import { judgeTurn, resolveVerdict } from '../jev/turn-judge.js';
 
 // Increase default max listeners to avoid AbortSignal warnings
 EventEmitter.setMaxListeners(20);
@@ -1069,6 +1071,31 @@ export class Agent {
     this._queueTurnOverlay(text);
   }
 
+  /**
+   * Jev's reading of a turn that is trying to end, or empty verdicts when it
+   * is off, unreachable or unsure. One call serves every gate below: the
+   * questions are evaluated in parallel against one state, so asking all of
+   * them at once costs barely more than asking one.
+   */
+  async _judgeTurnEnd(turn, emitter, signal) {
+    const client = getJevClient();
+    if (!client) return {};
+    const started = Date.now();
+    const { ok, verdicts, error, usage } = await judgeTurn(client, turn, { signal });
+    if (!ok) {
+      // A judgment is an aside: the turn keeps the verdict it already had.
+      this._debugLog(emitter, 'jev.unavailable', { error });
+      if (error) emitter?.emit('jevError', { error });
+      return {};
+    }
+    const summary = Object.fromEntries(
+      Object.entries(verdicts).map(([key, v]) => [key, v.value === null ? null : Number(v.value.toFixed(2))]),
+    );
+    emitter?.emit('jevJudgment', { verdicts: summary, ms: Date.now() - started, usage });
+    this._debugLog(emitter, 'jev.judged', { verdicts: summary, ms: Date.now() - started });
+    return verdicts;
+  }
+
   _createTurnRecoveryState() {
     return createTurnRecoveryState();
   }
@@ -1798,6 +1825,19 @@ export class Agent {
           }
         }
 
+        // One judgment for the whole end-of-turn decision. Only when the turn
+        // is actually trying to end — a turn that is still calling tools has
+        // nothing to judge yet.
+        const jev = result.type === 'text'
+          ? await this._judgeTurnEnd({
+            prompt: promptText,
+            reply: clean,
+            toolsRan: toolCallCount,
+            filesTouched: [...touchedFiles],
+            verificationDone,
+          }, emitter, controller.signal)
+          : {};
+
         // A text-only recovery turn that parked the work instead of delivering
         // it. Deliberately not folded into the announcement stall below: that
         // one retries to get tool calls, and here there are no tools to get —
@@ -1808,7 +1848,7 @@ export class Agent {
           forceTextOnlyNextTurn
           && !turnRecoveryState.deferralRetryUsed
           && result.type === 'text'
-          && responseDefersWork(clean)
+          && resolveVerdict(responseDefersWork(clean), jev.deferred).value
         ) {
           const deferral = extractDeferral(clean);
           this.messages.push({ role: 'assistant', content: result.content });
@@ -1828,13 +1868,18 @@ export class Agent {
         //     ("Piano:", "Prossimo passo: scrivo X", "Ora creo Y") but never
         //     invoked the tool — its own intent is enough to justify a retry,
         //     even if the latest user prompt is just "continua" / "ok".
+        const snippetStall = resolveVerdict(
+          userLikelyRequestedWorkspaceEdit(promptText) && responseLooksLikeUnappliedCode(clean),
+          jev.unapplied_code,
+        ).value;
+        const announcementStall = resolveVerdict(
+          responseAnnouncesUnexecutedAction(clean),
+          jev.announced,
+        ).value;
         const stalledOnAnnouncement = !this._isLite
           && this.mode === 'build'
           && !mutationToolUsed
-          && (
-            (userLikelyRequestedWorkspaceEdit(promptText) && responseLooksLikeUnappliedCode(clean)) ||
-            responseAnnouncesUnexecutedAction(clean)
-          );
+          && (snippetStall || announcementStall);
         if (stalledOnAnnouncement) {
           // One retry was not enough: a model that narrates instead of acting
           // narrates again, and every announcement after the first one used to
@@ -1947,8 +1992,11 @@ export class Agent {
           && (this._todoFromBlock || (this._todoFromMarkdown && toolCallCount > 0))
           // "Task completo." with steps still unticked means the model finished
           // without emitting every <done:N>. Pushing it for another round there
-          // only burns turns, and the TUI's resume policy already agrees.
-          && !modelDeclaredCompletion(clean);
+          // only burns turns, and the TUI's resume policy already agrees. The
+          // regex reads the wording; Jev, when it is sure, reads whether the
+          // request was actually carried out — which is the question that
+          // matters when a model declares victory over unfinished steps.
+          && !resolveVerdict(modelDeclaredCompletion(clean), jev.complete).value;
         if (autoContinueEligible) {
           // Repeating the same overlay against an unchanged state just burns
           // turns: the model that ignored it once ignores it again. A step
