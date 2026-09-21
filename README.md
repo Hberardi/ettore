@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.7.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.8.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -25,7 +25,7 @@ ETTORE is an advanced AI CLI assistant that helps with software engineering task
 - ⚡ **Fast on every provider** - requests are shaped so the provider can reuse its prompt cache, context summaries are written by a fast model of the same provider, and `--verbose-tokens` reports time-to-first-token and cached tokens per call
 - 🔍 **Delegated search** - `explore` answers one question about the codebase in a separate read-only context and returns a short report with `file:line` references; the greps and full-file reads behind it never enter the main conversation
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn, and its steps drive the progress panel and the auto-continue, so a plan left half-done is resumed instead of dropped
-- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev judges each finished turn (did the model announce work without doing it? is the request really carried out?), lets a turn continue without a declared plan, and routes codebase-wide searches to the `explore` sub-agent; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
+- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev judges each finished turn (did the model announce work without doing it? is the request really carried out?), lets a turn continue without a declared plan, and picks the skills that apply, and routes codebase-wide searches to the `explore` sub-agent; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
 - 🧩 **Eight plugins included** - PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts — installed with `/plugins install`, and you can write your own
 
 ## Installation
@@ -499,7 +499,18 @@ actually ran tools, ETTORE continues by itself: at most three rounds, stopping
 the moment a round changes nothing. A turn that ran no tools is never pushed —
 answering a question is not unfinished work.
 
-**3. It routes searching to the sub-agent.** ETTORE has a read-only sub-agent
+**3. It picks the skills that actually apply.** Skill activation scores words
+— stems, exact hits, thresholds — so `funziona` matches `funzionale` and "questo
+non funziona" could wake a web-design skill. Jev reads the request against each
+skill's description instead. A decisive answer wins in both directions: it adds
+a skill the words missed and drops one they matched by coincidence. You see it
+when it differs:
+
+```
+◆ Jev (210ms) — skill: +debug · −web-design
+```
+
+**4. It routes searching to the sub-agent.** ETTORE has a read-only sub-agent
 (the `explore` tool) that answers one question about the codebase in a context
 of its own and returns a short report, so the greps and reads behind it never
 fill the main conversation. It is offered on every build turn and models still
@@ -508,7 +519,11 @@ the turn opens with a nudge to delegate it. This one is asked *before* the first
 token, so it runs only for a fresh, non-trivial build request — never for a
 continuation, a short message, or a lite model.
 
-Items 2 and 3 exist only with Jev on. They are reached through a decisive
+Decisions 3 and 4 are made before the first token, and they travel in a single
+request — Jev evaluates every question in parallel against one state, so asking
+about the approach and about six skills costs one round trip, not seven.
+
+Items 2, 3 and 4 exist only with Jev on. They are reached through a decisive
 verdict, and there is no verdict when Jev is off, unreachable or unsure.
 
 ### Checking it is really working

@@ -1251,6 +1251,25 @@ export async function startApp(options = {}) {
     tui.needsRender = true;
   });
 
+  // Jev changed which skills guide the turn. Only shown when it actually
+  // differs from what the word scoring picked.
+  emitter.on('jevSkills', ({ before, after, ms }) => {
+    tui.jevActive = true;
+    const added = after.filter(n => !before.includes(n));
+    const dropped = before.filter(n => !after.includes(n));
+    const parts = [];
+    if (added.length) parts.push(`+${added.join(', ')}`);
+    if (dropped.length) parts.push(`−${dropped.join(', ')}`);
+    if (!parts.length) return;
+    tui.messages.push({
+      role: 'system',
+      text: `◆ Jev (${ms}ms) — skill: ${parts.join(' · ')}`,
+      tools: [],
+      id: Date.now(),
+    });
+    tui.needsRender = true;
+  });
+
   emitter.on('jevError', ({ error }) => {
     tui.messages.push({
       role: 'system',

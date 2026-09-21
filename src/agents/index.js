@@ -59,13 +59,13 @@ import { selectToolDefinitions, selectedToolNames, promptHasEditIntent, isContin
 import { authorizeToolAccess, normalizeToolArgsForWorkspace } from '../tools/workspace-policy.js';
 import { buildVisionContent } from '../utils/images.js';
 import { isWebImageResult } from '../tools/web-image.js';
-import { SkillSystem } from '../skills/index.js';
+import { MAX_MATCHED_SKILLS, SkillSystem } from '../skills/index.js';
 import { executeToolHandler } from './tool-executor.js';
 import { guardToolCall, parseToolCall } from './tool-call-guard.js';
 import { ReleaseGateCoordinator } from './release-gate-coordinator.js';
 import { commandWriteTargets, diffSnapshots, snapshotWorkspace } from './workspace-changes.js';
 import { getJevClient } from '../jev/index.js';
-import { judgeApproach, judgeTurn, resolveVerdict } from '../jev/turn-judge.js';
+import { judgePreTurn, judgeTurn, resolveVerdict } from '../jev/turn-judge.js';
 
 // Increase default max listeners to avoid AbortSignal warnings
 EventEmitter.setMaxListeners(20);
@@ -1035,9 +1035,18 @@ export class Agent {
     ];
   }
 
-  _activateSkills(prompt, emitter = null) {
+  /**
+   * Which skills guide this turn. Word scoring picks them by default; when Jev
+   * has judged the request against each skill's description, a decisive answer
+   * wins over the score — in either direction, so it can add a skill the words
+   * missed and drop one they matched by coincidence.
+   */
+  _activateSkills(prompt, emitter = null, { jevVerdicts = null } = {}) {
     this._skillPromptText = String(prompt || '');
-    this._activeSkills = this.skillSystem.matchSkills(this._skillPromptText);
+    const byWords = this.skillSystem.matchSkills(this._skillPromptText);
+    this._activeSkills = jevVerdicts
+      ? this._resolveSkills(byWords, jevVerdicts)
+      : byWords;
     this._activeSkillPrompt = this.skillSystem.getPromptForSkills(this._activeSkills);
     this.workingMemory.activeSkills = this._activeSkills.map(skill => skill.name);
     this._refreshActiveSystemPrompt();
@@ -1049,6 +1058,18 @@ export class Agent {
       available: this.skillSystem.getAllSkills().filter(s => s.enabled).length,
     });
     return this._activeSkills;
+  }
+
+  _resolveSkills(byWords, verdicts) {
+    const matchedNames = new Set(byWords.map(skill => skill.name));
+    const scored = this.skillSystem.getAllSkills()
+      .filter(skill => skill.enabled)
+      .map(skill => ({ skill, verdict: verdicts[skill.name] }))
+      .filter(({ skill, verdict }) => resolveVerdict(matchedNames.has(skill.name), verdict).value)
+      // Most clearly applicable first: the prompt carries them in this order,
+      // and the cap keeps a vague request from pulling in the whole library.
+      .sort((a, b) => (b.verdict?.value ?? 0) - (a.verdict?.value ?? 0));
+    return scored.slice(0, MAX_MATCHED_SKILLS).map(({ skill }) => skill);
   }
 
   async reloadSkills() {
@@ -1097,39 +1118,54 @@ export class Agent {
   }
 
   /**
-   * Route the investigation before the turn starts: when Jev is sure the
-   * request needs a codebase-wide search, point the model at the `explore`
-   * sub-agent instead of letting it grep by hand into the main context.
+   * The judgment made before the first model call: how the request should be
+   * investigated, and which skills apply to it. One request carries both — and
+   * one question per skill — because Jev evaluates them in parallel against a
+   * single state, so the user waits for one round trip rather than several.
    *
-   * Costs one Jev call before the first token, so it is asked only for the
-   * turns where the answer could change anything. Returns nothing useful
-   * unless Jev is on and confident — every other case leaves the turn alone.
+   * Returns nothing useful unless Jev is on and confident; every other case
+   * leaves the turn with the heuristics it already had.
    */
-  async _routeInvestigation(promptText, emitter, signal) {
+  async _judgePreTurn(promptText, emitter, signal) {
     const client = getJevClient();
     if (!client) return null;
-    const started = Date.now();
-    const verdict = await judgeApproach(client, promptText, { signal });
-    if (verdict.error) {
-      this._debugLog(emitter, 'jev.route_unavailable', { error: verdict.error });
+    const skills = this.skillSystem.getAllSkills().filter(skill => skill.enabled);
+    const { approach, skills: verdicts, error, ms } = await judgePreTurn(
+      client,
+      { prompt: promptText, skills },
+      { signal },
+    );
+    if (error) {
+      this._debugLog(emitter, 'jev.preturn_unavailable', { error });
       return null;
     }
+
+    const before = this._activeSkills.map(skill => skill.name);
+    if (skills.length) {
+      this._activateSkills(promptText, null, { jevVerdicts: verdicts });
+      const after = this._activeSkills.map(skill => skill.name);
+      if (before.join(',') !== after.join(',')) {
+        emitter?.emit('jevSkills', { before, after, ms });
+        this._debugLog(emitter, 'jev.skills_rerouted', { before, after });
+      }
+      emitter?.emit('skillsActivated', {
+        skills: this._activeSkills.map(skill => skill.name),
+        available: skills.length,
+      });
+    }
+
     emitter?.emit('jevRoute', {
-      choice: verdict.choice,
-      confidence: verdict.confidence,
-      decisive: verdict.decisive,
-      ms: Date.now() - started,
+      choice: approach.choice,
+      confidence: approach.confidence,
+      decisive: approach.decisive,
+      ms,
     });
-    this._debugLog(emitter, 'jev.routed', {
-      choice: verdict.choice,
-      confidence: verdict.confidence,
-      ms: Date.now() - started,
-    });
-    if (verdict.decisive && verdict.choice === 'explore') {
+    this._debugLog(emitter, 'jev.routed', { choice: approach.choice, confidence: approach.confidence, ms });
+    if (approach.decisive && approach.choice === 'explore') {
       this._queueNamedTurnOverlay('explore_first');
       return 'explore';
     }
-    return verdict.choice;
+    return approach.choice;
   }
 
   _createTurnRecoveryState() {
@@ -1511,7 +1547,7 @@ export class Agent {
       && !continuation
       && promptText.trim().length >= 15
     ) {
-      await this._routeInvestigation(promptText, emitter, controller.signal);
+      await this._judgePreTurn(promptText, emitter, controller.signal);
     }
 
     try {

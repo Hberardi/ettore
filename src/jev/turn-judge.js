@@ -103,45 +103,90 @@ export function resolveVerdict(heuristic, verdict) {
   return { value, source: value === Boolean(heuristic) ? 'agreed' : 'jev' };
 }
 
-// ── routing the investigation, before the turn starts ──────────────────────
+// ── the pre-turn judgment ──────────────────────────────────────────────────
 //
-// ETTORE has a read-only sub-agent (the `explore` tool) that answers a
-// question about the codebase in a context of its own and returns a short
-// report, so the greps and reads it needed never enter the main conversation.
-// It is in the routed tool set of every build turn, and models still reach for
-// glob/grep/read by hand — which is exactly the case it was built for.
+// Two decisions are made before the first model call, and they ride in one
+// request: many questions evaluated in parallel against one state is the shape
+// Jev is built for, and adding questions barely moves the latency. Asking them
+// separately would pay the round trip twice while the user waits.
 //
-// This is the docs' intent-routing pattern: classify the request first, then
-// let code pick the handler. A Choice, because the answer is one of a few
-// named approaches, and Choice reports confidence.
+// 1. How to investigate. ETTORE has a read-only sub-agent (the `explore` tool)
+//    that answers one question about the codebase in a context of its own and
+//    returns a short report, so the greps and reads behind it never fill the
+//    main conversation. It is offered on every build turn and models still
+//    search by hand. This is the docs' intent-routing pattern.
+//
+// 2. Which skills apply. Skill activation scores words — stems, exact hits,
+//    thresholds, relative cutoffs — and the skill system's own comments admit
+//    the guesswork: a stem match is `funziona` against `funzionale`, so "questo
+//    non funziona" could wake a web-design skill. Jev reads the request against
+//    each skill's description instead, which is a judgment about two pieces of
+//    text and needs no sight of the codebase.
+
 export const APPROACH_QUESTION = {
-  approach: {
-    type: 'choice',
-    instructions: 'How should this request be investigated, before anything is changed? Judge the request itself, not any codebase you cannot see.',
-    criteria: {
-      direct: 'The files to look at are named or obvious. A couple of reads settle it.',
-      explore: 'Answering needs a search across the codebase first — where something lives, how a flow works end to end, which files a change would touch — and the raw search output is not worth keeping afterwards.',
-      none: 'No code needs looking at: a question about a concept, a chat message, or a task the request already specifies in full.',
-    },
+  type: 'choice',
+  instructions: 'How should this request be investigated, before anything is changed? Judge the request itself, not any codebase you cannot see.',
+  criteria: {
+    direct: 'The files to look at are named or obvious. A couple of reads settle it.',
+    explore: 'Answering needs a search across the codebase first — where something lives, how a flow works end to end, which files a change would touch — and the raw search output is not worth keeping afterwards.',
+    none: 'No code needs looking at: a question about a concept, a chat message, or a task the request already specifies in full.',
   },
 };
 
+// Question ids are ours to choose and are never shown to the model, so a skill
+// whose name is not a usable key gets a positional one.
+function skillQuestionId(index) {
+  return `skill_${index}`;
+}
+
+export function buildSkillQuestions(skills = []) {
+  const questions = {};
+  const byId = new Map();
+  skills.forEach((skill, index) => {
+    const id = skillQuestionId(index);
+    byId.set(id, skill.name);
+    questions[id] = {
+      type: 'noul',
+      instructions: {
+        skill_covers: String(skill.description || skill.name).slice(0, 1000),
+        question: 'The user request falls within what `skill_covers` describes, so that guidance would help answer it.',
+      },
+      criteria: {
+        true: 'The request is about this subject, and the guidance applies to it.',
+        false: 'The request is about something else. A word the two happen to share is not enough.',
+      },
+    };
+  });
+  return { questions, byId };
+}
+
 /**
- * Which approach the request calls for, or `{ decisive: false }` when Jev is
- * off, unreachable, or not confident enough to be worth acting on.
+ * The decisions worth making before the turn starts. Never throws: with Jev
+ * off, unreachable or unsure, every field comes back undecided and the agent
+ * keeps the heuristics it already had.
  *
- * @returns {Promise<{choice: string|null, confidence: number|null, decisive: boolean, error: string|null}>}
+ * @returns {Promise<{approach: object, skills: Record<string, object>, error: string|null, ms: number}>}
  */
-export async function judgeApproach(client, prompt, { signal = null } = {}) {
-  if (!client) return { choice: null, confidence: null, decisive: false, error: null };
+export async function judgePreTurn(client, { prompt, skills = [] } = {}, { signal = null } = {}) {
+  const empty = { approach: { choice: null, confidence: null, decisive: false }, skills: {}, error: null, ms: 0 };
+  if (!client) return empty;
+  const startedAt = Date.now();
+  const { questions, byId } = buildSkillQuestions(skills);
   try {
     const { answers } = await client.evaluate({
       state: { user_request: String(prompt || '').slice(0, 8000) },
-      questions: APPROACH_QUESTION,
+      questions: { approach: APPROACH_QUESTION, ...questions },
       signal,
     });
-    return { ...readChoice(answers?.approach), error: null };
+    const skillVerdicts = {};
+    for (const [id, name] of byId) skillVerdicts[name] = readNoul(answers?.[id]);
+    return {
+      approach: readChoice(answers?.approach),
+      skills: skillVerdicts,
+      error: null,
+      ms: Date.now() - startedAt,
+    };
   } catch (error) {
-    return { choice: null, confidence: null, decisive: false, error: error?.message || String(error) };
+    return { ...empty, error: error?.message || String(error), ms: Date.now() - startedAt };
   }
 }

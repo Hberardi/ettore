@@ -8,6 +8,30 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-09-21
+
+### Added — Jev picks the skills, and both pre-turn decisions share one call
+
+Skill activation scored words: stems, exact hits, a floor and a relative
+cutoff. The skill system's own comments admit what that costs — a stem match is
+`funziona` against `funzionale`, so "questo non funziona" could wake a
+web-design skill, and a skill whose wording simply differs from the user's never
+woke at all. Judging a request against a skill's description is a question about
+two pieces of text, which is exactly what Jev answers and needs no sight of the
+codebase.
+
+With Jev on, a decisive answer now wins over the word score in both directions:
+it adds a skill the words missed and drops one they matched by coincidence,
+capped at the same three as before and ordered most-applicable first. The TUI
+prints the difference when there is one. Word scoring remains the behaviour for
+everyone who has not turned Jev on.
+
+The approach routing added in 1.7.0 and the per-skill questions now travel in a
+single request rather than two, since Jev evaluates every question in parallel
+against one state: the approach plus six skills is one round trip, not seven,
+and the user waits once.
+
+
 ## [1.7.0] — 2026-09-21
 
 An optional judgment layer, and a round of fixes found by reading saved

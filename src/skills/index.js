@@ -12,7 +12,7 @@ const SKILL_NAME_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const MAX_SKILL_INSTRUCTIONS = 12_000;
 // Two was tight: a generic skill with common triggers took one of the slots on
 // almost every prompt, leaving one for everything specific.
-const MAX_MATCHED_SKILLS = 3;
+export const MAX_MATCHED_SKILLS = 3;
 // A trigger is the skill author saying "this is what I am for", so it outweighs
 // anything inferred from prose. The name is a weaker version of the same claim.
 const TRIGGER_WEIGHT = 4;

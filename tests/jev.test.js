@@ -711,3 +711,142 @@ test('short messages and continuations do not pay for a routing call', async () 
     globalThis.fetch = originalFetch;
   }
 });
+
+// ── skills chosen by meaning rather than by shared words ──────────────────
+
+function jevPreTurn({ approach = 'direct', confidence = 0.9, skills = {} } = {}) {
+  return async (_url, init) => {
+    const body = JSON.parse(init.body);
+    const answers = {
+      approach: { type: 'choice', choice: approach, confidence, probabilities: { [approach]: confidence } },
+    };
+    // Map each skill question back by the description it carries.
+    for (const [id, q] of Object.entries(body.questions)) {
+      if (id === 'approach') continue;
+      const covers = q.instructions.skill_covers;
+      const match = Object.entries(skills).find(([desc]) => covers.includes(desc));
+      answers[id] = { type: 'noul', noul: match ? match[1] : 0.5 };
+    }
+    return jsonResponse({ model: 'jev-1.13.0', answers, usage: {} });
+  };
+}
+
+function agentWithSkills(client, skillList) {
+  const skillSystem = {
+    getAllSkills: () => skillList,
+    matchSkills: (prompt) => skillList.filter(s => (s.triggers || []).some(t => prompt.includes(t))),
+    getPromptForSkills: (skills) => (skills.length ? `\nSKILLS: ${skills.map(s => s.name).join(', ')}\n` : ''),
+    loadAllSkills: async () => {},
+  };
+  return new Agent(client, {
+    provider: 'test', model: 'gpt-4o', modelCapability: 'full',
+    workdir: process.cwd(), contextWindow: 128000, verifyAfterEdit: false,
+    skillSystem,
+  }, 'build');
+}
+
+const SKILLS = [
+  { name: 'web-design', description: 'Creare e modificare pagine e siti web', enabled: true, triggers: ['funziona'] },
+  { name: 'debug', description: 'Analisi e risoluzione bug nel codice', enabled: true, triggers: [] },
+];
+
+test('Jev drops a skill the word scoring matched by coincidence', async () => {
+  const { activateJev } = await import('../src/jev/index.js');
+  activateJev('sk-test-key-value');
+  const originalFetch = globalThis.fetch;
+  // "questo non funziona" shares a word with the web skill and means nothing
+  // like it; Jev is sure it does not apply, and sure that debug does.
+  globalThis.fetch = jevPreTurn({ skills: { 'siti web': 0.03, 'risoluzione bug': 0.95 } });
+  try {
+    let promptSeen = '';
+    const emitter = new EventEmitter();
+    const changes = [];
+    emitter.on('jevSkills', e => changes.push(e));
+    await agentWithSkills({
+      async turn(messages) {
+        promptSeen = String(messages[0]?.content || '');
+        return { type: 'text', content: 'Guardo il bug.' };
+      },
+    }, SKILLS).run('questo non funziona, il salvataggio va in errore', emitter);
+
+    assert.equal(changes.length, 1);
+    assert.deepEqual(changes[0].before, ['web-design']);
+    assert.deepEqual(changes[0].after, ['debug']);
+    assert.match(promptSeen, /SKILLS: debug/);
+    assert.doesNotMatch(promptSeen, /web-design/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('an unsure Jev leaves the word scoring alone', async () => {
+  const { activateJev } = await import('../src/jev/index.js');
+  activateJev('sk-test-key-value');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = jevPreTurn({ skills: { 'siti web': 0.55, 'risoluzione bug': 0.5 } });
+  try {
+    let promptSeen = '';
+    const emitter = new EventEmitter();
+    const changes = [];
+    emitter.on('jevSkills', e => changes.push(e));
+    await agentWithSkills({
+      async turn(messages) {
+        promptSeen = String(messages[0]?.content || '');
+        return { type: 'text', content: 'Ok.' };
+      },
+    }, SKILLS).run('questo non funziona, il salvataggio va in errore', emitter);
+    assert.deepEqual(changes, [], 'nothing decisive means nothing changes');
+    assert.match(promptSeen, /SKILLS: web-design/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('both decisions ride in one request, not two', async () => {
+  const { activateJev, resetJevStats, getJevStats } = await import('../src/jev/index.js');
+  activateJev('sk-test-key-value');
+  resetJevStats();
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  globalThis.fetch = async (url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return jevPreTurn({ approach: 'explore', confidence: 0.9 })(url, init);
+  };
+  try {
+    await agentWithSkills({
+      async turn() { return { type: 'text', content: 'Fatto.' }; },
+    }, SKILLS).run('come funziona il flusso di salvataggio da cima a fondo?', new EventEmitter());
+
+    const preTurn = bodies.filter(b => b.questions.approach);
+    assert.equal(preTurn.length, 1, 'one pre-turn call, however many skills');
+    // The approach plus one question per enabled skill, together.
+    assert.equal(Object.keys(preTurn[0].questions).length, 1 + SKILLS.length);
+    resetJevStats();
+    assert.equal(getJevStats().calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('with Jev off, skills are chosen exactly as before', async () => {
+  let fetched = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { fetched++; return jsonResponse({}); };
+  try {
+    let promptSeen = '';
+    const emitter = new EventEmitter();
+    const changes = [];
+    emitter.on('jevSkills', e => changes.push(e));
+    await agentWithSkills({
+      async turn(messages) {
+        promptSeen = String(messages[0]?.content || '');
+        return { type: 'text', content: 'Ok.' };
+      },
+    }, SKILLS).run('questo non funziona, il salvataggio va in errore', emitter);
+    assert.equal(fetched, 0);
+    assert.deepEqual(changes, []);
+    assert.match(promptSeen, /SKILLS: web-design/, 'the word scoring still decides');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
