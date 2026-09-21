@@ -467,6 +467,19 @@ export TYPESAFE_API_KEY=sk-...
 An explicit `/jev out` still wins over the variable, so turning the feature off
 never means hunting down where the export lives.
 
+With Jev on, one thing behaves differently rather than just more accurately:
+**a turn can continue on its own without a declared plan.** Auto-continue
+normally needs a `<todo>` list, and a model that writes "task completo"
+suppresses it — so the work of restarting fell to you. Measured on real
+sessions, 56% of the prompts sent were restarts rather than requests, the same
+sentence typed 28 times. When Jev is sure the request has not been carried out,
+and the turn actually ran tools, ETTORE continues by itself: at most three
+rounds, and it stops the moment a round changes nothing.
+
+Without Jev that branch does not exist. It is reached only through a decisive
+verdict, and there is no verdict when Jev is off, unreachable or unsure, so
+every user who never turns it on keeps exactly today's behaviour.
+
 Three properties make it safe to leave on:
 
 - **Jev decides, it never writes.** No text of its own ever reaches you or the

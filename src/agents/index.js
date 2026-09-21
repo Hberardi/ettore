@@ -1997,6 +1997,54 @@ export class Agent {
           // request was actually carried out — which is the question that
           // matters when a model declares victory over unfinished steps.
           && !resolveVerdict(modelDeclaredCompletion(clean), jev.complete).value;
+
+        // The same push, for a turn that declared no plan at all.
+        //
+        // In real sessions 56% of the user's prompts were not requests but
+        // restarts — "continua con il prossimo passo" typed 28 times — because
+        // auto-continue needs a <todo> list and a model that says "task
+        // completo" suppresses it. Without a plan the harness has nothing to
+        // measure completion against, and a regex over wording is not enough
+        // to keep a turn running on its own.
+        //
+        // Jev is, when it is sure. This branch therefore exists only while Jev
+        // is on: `jev` is an empty object when it is off, unreachable or
+        // unsure, so `decisive` is undefined and nothing below can fire. Every
+        // user without Jev keeps exactly the behaviour they have today.
+        const jevSaysUnfinished = jev.complete?.decisive === true && jev.complete.yes === false;
+        const autoContinueUnplanned = !autoContinueEligible
+          && pendingTodos.length === 0
+          && jevSaysUnfinished
+          && this.mode === 'build'
+          && !this._isLite
+          && !forceTextOnlyNextTurn
+          // A turn that ran no tools answered a question; pushing it would
+          // argue with the user rather than finish a job.
+          && toolCallCount > 0;
+        if (autoContinueUnplanned) {
+          // No plan to measure against means no way to tell "three steps left"
+          // from "one more call", so the budget is tight and any turn that
+          // moves nothing ends it.
+          const progressKey = `${touchedFiles.size}:${toolCallCount}`;
+          const cap = Math.min(this.maxAutoContinues, 3);
+          if (this._autoContinueCount < cap && lastAutoContinueProgress !== progressKey) {
+            this._autoContinueCount++;
+            lastAutoContinueProgress = progressKey;
+            this._queueNamedTurnOverlay('jev_unfinished', { attempt: this._autoContinueCount, max: cap });
+            emitter?.emit('autoContinue', {
+              attempt: this._autoContinueCount,
+              max: cap,
+              remaining: 0,
+              stalled: false,
+              source: 'jev',
+            });
+            this._debugLog(emitter, 'turn.auto_continue_jev', {
+              attempt: this._autoContinueCount,
+              confidence: jev.complete.value,
+            });
+            continue;
+          }
+        }
         if (autoContinueEligible) {
           // Repeating the same overlay against an unchanged state just burns
           // turns: the model that ignored it once ignores it again. A step

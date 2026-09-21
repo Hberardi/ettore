@@ -458,3 +458,136 @@ test('/jev status reports the traffic, not just the switch', async () => {
   assert.match(after, /10 in, 1 out/);
   resetJevStats();
 });
+
+// ── auto-continue without a plan: Jev only ────────────────────────────────
+
+function jevAnswering(complete, extra = {}) {
+  return async () => jsonResponse({
+    model: 'jev-1.13.0',
+    answers: {
+      announced: { type: 'noul', noul: 0.1 },
+      deferred: { type: 'noul', noul: 0.1 },
+      unapplied_code: { type: 'noul', noul: 0.1 },
+      complete: { type: 'noul', noul: complete },
+      ...extra,
+    },
+    usage: {},
+  });
+}
+
+// A turn that edits a file and then stops, with no <todo> plan anywhere.
+function toolThenStopClient(counter) {
+  return {
+    async turn() {
+      counter.turns++;
+      if (counter.turns === 1) {
+        const tc = {
+          id: 'e1',
+          type: 'function',
+          function: { name: 'edit', arguments: JSON.stringify({ file_path: 'a.js', old_string: 'a', new_string: 'b' }) },
+        };
+        return { type: 'tool_calls', tool_calls: [tc], message: { role: 'assistant', content: '', tool_calls: [tc] } };
+      }
+      return { type: 'text', content: 'Task completo.' };
+    },
+  };
+}
+
+function agentInBuild(client) {
+  return new Agent(client, {
+    provider: 'test', model: 'gpt-4o', modelCapability: 'full',
+    workdir: process.cwd(), contextWindow: 128000, verifyAfterEdit: false,
+  }, 'build');
+}
+
+let Agent;
+test('setup: load the agent once', async () => {
+  ({ Agent } = await import('../src/agents/index.js'));
+});
+
+test('with Jev sure the work is unfinished, a planless turn continues by itself', async () => {
+  const { activateJev } = await import('../src/jev/index.js');
+  const { toolHandlers } = await import('../src/tools/index.js');
+  activateJev('sk-test-key-value');
+  const originalEdit = toolHandlers.edit;
+  toolHandlers.edit = async () => 'Edited a.js (1 line changed)';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = jevAnswering(0.03);   // decisively "not complete"
+  try {
+    const counter = { turns: 0 };
+    const emitter = new EventEmitter();
+    const pushes = [];
+    emitter.on('autoContinue', e => pushes.push(e));
+    await agentInBuild(toolThenStopClient(counter)).run('sistema a.js', emitter);
+    assert.ok(counter.turns > 2, `expected the turn to be pushed on, got ${counter.turns} turns`);
+    assert.ok(pushes.some(p => p.source === 'jev'), 'the push must be attributed to Jev');
+  } finally {
+    globalThis.fetch = originalFetch;
+    toolHandlers.edit = originalEdit;
+  }
+});
+
+test('the same turn with Jev OFF behaves exactly as before — no push', async () => {
+  const { toolHandlers } = await import('../src/tools/index.js');
+  const originalEdit = toolHandlers.edit;
+  toolHandlers.edit = async () => 'Edited a.js (1 line changed)';
+  let fetched = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { fetched++; return jsonResponse({}); };
+  try {
+    // No activateJev: this is every user who never turned it on.
+    const counter = { turns: 0 };
+    const emitter = new EventEmitter();
+    const pushes = [];
+    emitter.on('autoContinue', e => pushes.push(e));
+    await agentInBuild(toolThenStopClient(counter)).run('sistema a.js', emitter);
+    assert.equal(fetched, 0, 'Jev must not be contacted when it is off');
+    assert.deepEqual(pushes, [], 'no plan and no Jev means no push, as before');
+    assert.equal(counter.turns, 2, 'the turn ends where it always did');
+  } finally {
+    globalThis.fetch = originalFetch;
+    toolHandlers.edit = originalEdit;
+  }
+});
+
+test('an unsure Jev does not push a planless turn either', async () => {
+  const { activateJev } = await import('../src/jev/index.js');
+  const { toolHandlers } = await import('../src/tools/index.js');
+  activateJev('sk-test-key-value');
+  const originalEdit = toolHandlers.edit;
+  toolHandlers.edit = async () => 'Edited a.js (1 line changed)';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = jevAnswering(0.45);   // inside the undecided band
+  try {
+    const counter = { turns: 0 };
+    const emitter = new EventEmitter();
+    const pushes = [];
+    emitter.on('autoContinue', e => pushes.push(e));
+    await agentInBuild(toolThenStopClient(counter)).run('sistema a.js', emitter);
+    assert.deepEqual(pushes, []);
+    assert.equal(counter.turns, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    toolHandlers.edit = originalEdit;
+  }
+});
+
+test('a turn that ran no tools is never pushed, however sure Jev is', async () => {
+  const { activateJev } = await import('../src/jev/index.js');
+  activateJev('sk-test-key-value');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = jevAnswering(0.01);
+  try {
+    let turns = 0;
+    const emitter = new EventEmitter();
+    const pushes = [];
+    emitter.on('autoContinue', e => pushes.push(e));
+    await agentInBuild({
+      async turn() { turns++; return { type: 'text', content: 'La risposta è 42.' }; },
+    }).run('quanto fa la domanda fondamentale?', emitter);
+    assert.equal(turns, 1, 'answering a question is not unfinished work');
+    assert.deepEqual(pushes, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

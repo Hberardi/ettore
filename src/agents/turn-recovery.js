@@ -296,6 +296,15 @@ export function buildTurnOverlay(kind, data = {}) {
       + 'Do not restate the plan and do not announce what you are about to do — that is what stalled the last turn. Either call the tools that finish the next step right now, or, if a step cannot be done, say which one and why in one sentence. Mark each finished step with todo_write (or a <done:N> marker) so progress is actually recorded.',
     auto_continue: ({ attempt, max, pendingLines }) =>
       `You stopped, but the following steps from your initial plan are still incomplete (auto-continue ${attempt}/${max}):\n${pendingLines}\n\nContinue without asking for confirmation. Use tools, emit <done:N> markers as you complete each, and only stop when every item is done or you genuinely need user input.`,
+    // Only reachable with Jev on: the harness has no calibrated read of "is
+    // this actually finished" without it, and a regex must never drive a turn
+    // that has no declared plan to measure against.
+    jev_unfinished: ({ attempt, max }) =>
+      `You ended the turn, but the request you were given has not been carried out in full (continuing ${attempt}/${max}).`
+      + ' Do not summarize again and do not describe what you would do next — that is not progress.'
+      + ' Carry out the remaining part now with tool calls.'
+      + ' If the rest genuinely cannot be done — it needs a decision only the user can make, a credential, a machine you cannot reach —'
+      + ' say which part and why in one sentence, and stop.',
     unaddressed_targets: ({ targetList }) =>
       `The request named ${targetList}, and nothing in this turn read, searched or changed `
       + 'it — so whatever was asked for it has not been done. Either carry out the request on it now '
