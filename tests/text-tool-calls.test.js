@@ -190,3 +190,34 @@ test('PARTIAL_TOOL_TAG_RE holds back a tool tag split across chunks', () => {
     assert.ok(!PARTIAL_TOOL_TAG_RE.test(done), `should not hold back ${JSON.stringify(done)}`);
   }
 });
+
+// ── shapes seen when MiniMax's own serializer slips ────────────────────────
+
+test('arguments carried inside the invoke tag are recovered, not dropped', () => {
+  const leaked = ']<]minimax[>[<tool_call> ]<]minimax[>[<invoke name "read", "file_path": "/tmp/a.py", "offset": 175, "limit": 60]<]minimax[>[</arguments>';
+  const { calls } = parseTextToolCalls(leaked);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].function.name, 'read');
+  assert.deepEqual(JSON.parse(calls[0].function.arguments), { file_path: '/tmp/a.py', offset: 175, limit: 60 });
+});
+
+test('invoke_name= is still an invoke', () => {
+  const leaked = ']<]minimax[>[<invoke_name="write">]<]minimax[>[<file_path>/tmp/R.md</file_path>]<]minimax[>[<content>ciao</content>';
+  const { calls, detected } = parseTextToolCalls(leaked);
+  assert.equal(detected, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].function.name, 'write');
+  assert.deepEqual(JSON.parse(calls[0].function.arguments), { file_path: '/tmp/R.md', content: 'ciao' });
+});
+
+test('child tags win over a name-like pair in the tag itself', () => {
+  const leaked = '<invoke name="read", "file_path": "/wrong.py"><file_path>/right.py</file_path></invoke>';
+  const { calls } = parseTextToolCalls(leaked);
+  assert.deepEqual(JSON.parse(calls[0].function.arguments), { file_path: '/right.py' });
+});
+
+test('prose that merely mentions invoke or tool_call is not a leak', () => {
+  const { detected, calls } = parseTextToolCalls('Spiego come invoke e tool_call funzionano, senza tag.');
+  assert.equal(detected, false);
+  assert.deepEqual(calls, []);
+});

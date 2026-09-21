@@ -27,7 +27,10 @@
 
 import { INVISIBLE_BETWEEN_DELIMS as INV, TAG_NAMESPACE as NS, stripProviderFraming } from './stream-parser.js';
 
-const INVOKE_OPEN_RE = new RegExp(`<[${INV}]*${NS}invoke\\b([^>]*)>`, 'gi');
+// `invoke_name="write"` (the separator collapsed into an underscore) is a
+// shape MiniMax emits when its own serializer slips; `\b` never matched it,
+// because `_` is a word character, and the whole call was dropped.
+const INVOKE_OPEN_RE = new RegExp(`<[${INV}]*${NS}invoke(_name)?\\b([^>]*)>`, 'gi');
 const INVOKE_CLOSE_RE = new RegExp(`<[${INV}]*\\/[${INV}]*${NS}invoke[${INV}]*>`, 'i');
 const NAME_ATTR_RE = /name[\s=]*=?\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i;
 const PARAMETER_TAG_RE = new RegExp(
@@ -43,7 +46,7 @@ const TOOL_CALL_WRAPPER_RE = new RegExp(
 // Any sign that the model was *trying* to call a tool in text. Used to nudge
 // the model back onto the native protocol even when nothing parseable came out.
 const LEAK_MARKER_RE = new RegExp(
-  `<[${INV}]*\\/?[${INV}]*${NS}(?:tool_call|tool_use|invoke|function_calls)\\b`,
+  `<[${INV}]*\\/?[${INV}]*${NS}(?:tool_call|tool_use|invoke(?:_name)?|function_calls)\\b`,
   'i',
 );
 
@@ -96,6 +99,24 @@ function extractName(attrs) {
   const match = String(attrs || '').match(NAME_ATTR_RE);
   if (!match) return '';
   return String(match[1] ?? match[2] ?? match[3] ?? '').trim();
+}
+
+// Arguments the model put in the invoke tag itself rather than in child tags:
+//   <invoke name "read", "file_path": "/x.py", "offset": 175, "limit": 60]
+// The name parses, and everything after it used to be dropped — the tool then
+// ran with no arguments and failed validation instead of doing the work.
+function parseAttrArgs(attrs) {
+  const text = String(attrs || '');
+  const args = {};
+  const pairs = [...text.matchAll(/"([A-Za-z_][\w.-]{0,63})"\s*:\s*("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?|true|false|null|\[[^\]]*\]|\{[^}]*\})/g)];
+  for (const [, key, raw] of pairs) {
+    try {
+      args[key] = JSON.parse(raw);
+    } catch {
+      args[key] = raw.replace(/^"|"$/g, '');
+    }
+  }
+  return args;
 }
 
 function parseInvokeArgs(body) {
@@ -187,7 +208,10 @@ export function parseTextToolCalls(rawText) {
   INVOKE_OPEN_RE.lastIndex = 0;
   let match;
   while ((match = INVOKE_OPEN_RE.exec(source)) !== null) {
-    const name = extractName(match[1]);
+    // `<invoke_name="x">` leaves the attribute text as `="x"`: put the name
+    // the underscore swallowed back in front of it.
+    const attrs = match[1] ? `name${match[2]}` : match[2];
+    const name = extractName(attrs);
     if (!name) continue;
     const bodyStart = match.index + match[0].length;
     const rest = source.slice(bodyStart);
@@ -201,7 +225,9 @@ export function parseTextToolCalls(rawText) {
     let bodyEnd = rest.length;
     if (close) bodyEnd = Math.min(bodyEnd, close.index);
     if (nextOpen >= 0) bodyEnd = Math.min(bodyEnd, nextOpen);
-    pushCall(calls, name, parseInvokeArgs(rest.slice(0, bodyEnd)));
+    // Child tags win over anything found in the tag itself: they are the
+    // shape the model uses when its serializer is working.
+    pushCall(calls, name, { ...parseAttrArgs(attrs), ...parseInvokeArgs(rest.slice(0, bodyEnd)) });
     INVOKE_OPEN_RE.lastIndex = bodyStart + bodyEnd;
   }
 
@@ -210,4 +236,4 @@ export function parseTextToolCalls(rawText) {
   return { calls, detected: true, text: source };
 }
 
-export const _internal = { coerceParamValue, decodeXmlEntities, parseInvokeArgs, trimTagBody };
+export const _internal = { coerceParamValue, decodeXmlEntities, parseAttrArgs, parseInvokeArgs, trimTagBody };
