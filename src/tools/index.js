@@ -214,6 +214,32 @@ function detectInstallAction(command) {
   return null;
 }
 
+// Paths reported by a search, as the platform writes them.
+//
+// ripgrep — and glob, in the built-in fallback — join a Windows directory with
+// the match using '/', so a result reads `C:\\dir\\sub/file.txt`. That path goes
+// to the model and comes back as an argument to read and edit, so the mixed
+// form has to be repaired. Only the path is touched: on a `path:line:text`
+// line the text after the line number is the file's own content and must be
+// left exactly as it is.
+// The transformation, separated from the platform check so it can be tested
+// where the bug does not reproduce.
+export function toWindowsSearchPaths(text) {
+  return String(text ?? '')
+    .split('\n')
+    .map((line) => {
+      // Everything up to the colon that follows the drive letter is the path;
+      // on a `path:line:text` line the rest is the file's own content.
+      const match = line.match(/^([A-Za-z]:[^:]*)(.*)$/);
+      return match ? match[1].replace(/\//g, '\\') + match[2] : line;
+    })
+    .join('\n');
+}
+
+export function normalizeSearchPaths(text) {
+  return process.platform === 'win32' ? toWindowsSearchPaths(text) : String(text ?? '');
+}
+
 function decodeHtml(text = '') {
   const entities = {
     amp: '&',
@@ -2502,7 +2528,7 @@ export const toolHandlers = {
       }
 
       if (!output.trim()) return 'No matches';
-      return truncateLines(output.trimEnd(), around ? safeLimit * (2 * around + 2) : safeLimit).text;
+      return truncateLines(normalizeSearchPaths(output.trimEnd()), around ? safeLimit * (2 * around + 2) : safeLimit).text;
     } catch (error) {
       return error.stdout || `Error: ${error.message}`;
     }

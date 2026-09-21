@@ -102,3 +102,28 @@ test('grep supports ignore_case, context and files_only', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('a search result carries the platform path, not glob and ripgrep mixed', async () => {
+  const { toWindowsSearchPaths } = await import('../src/tools/index.js');
+  // ripgrep and glob both join a Windows directory with the match using '/',
+  // so results came back half one separator and half the other. Those paths go
+  // to the model and return as arguments to read and edit.
+  assert.equal(
+    toWindowsSearchPaths('C:\\Users\\R\\Temp\\ettore-grep-x/a.txt'),
+    'C:\\Users\\R\\Temp\\ettore-grep-x\\a.txt',
+  );
+  // On a match line only the path is repaired: the text after the line number
+  // is the file's own content, slashes included.
+  assert.equal(
+    toWindowsSearchPaths('C:\\dir/sub/a.js:12:const url = "https://example.com/x";'),
+    'C:\\dir\\sub\\a.js:12:const url = "https://example.com/x";',
+  );
+  // A line that is not a Windows path is left alone.
+  assert.equal(toWindowsSearchPaths('/home/re77/a.txt'), '/home/re77/a.txt');
+  assert.equal(toWindowsSearchPaths('No matches'), 'No matches');
+  // Several lines, each judged on its own.
+  assert.equal(
+    toWindowsSearchPaths('C:\\a/b.txt\nC:\\a/c.txt'),
+    'C:\\a\\b.txt\nC:\\a\\c.txt',
+  );
+});

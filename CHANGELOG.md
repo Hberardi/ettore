@@ -8,7 +8,7 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
-## [1.8.5] — 2026-09-21
+## [1.8.6] — 2026-09-21
 
 ### Fixed — Windows
 
@@ -21,11 +21,12 @@ real features unusable on Windows rather than merely failing a test:
   and was refused. It now uses the same `relative()` check as
   `src/tools/workspace-policy.js`, which is correct on both platforms and still
   refuses a sibling directory that merely shares the prefix.
-- **The built-in search returned mixed-separator paths.** When neither ripgrep
-  nor grep is installed — the normal case on Windows — the fallback searcher
-  reported `C:\dir\sub/file.txt`, because glob joins the cwd and the match with
-  `/`. Those paths go to the model and come back to read and edit, so they are
-  now normalised to the platform's separator.
+- **Search results carried mixed-separator paths.** ripgrep, and glob in the
+  built-in fallback, both join a Windows directory with the match using `/`, so
+  a result read `C:\dir\sub/file.txt`. Those paths go to the model and come back
+  as arguments to read and edit, so the path part of every result line is now
+  normalised to the platform's separator — the text after a line number is the
+  file's own content and is left untouched.
 
 ## [1.8.4] — 2026-09-21
 
