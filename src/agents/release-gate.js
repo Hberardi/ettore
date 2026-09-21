@@ -115,8 +115,12 @@ export function createReleaseGateState() {
 // A mutation tool that refused, was cancelled or failed changed nothing.
 const NOT_APPLIED_RE = /^(?:Error:|Blocked:|Cancelled\b)/;
 
+export function mutationApplied(output) {
+  return !NOT_APPLIED_RE.test(String(output ?? ''));
+}
+
 export function recordMutation(state, filePath, output) {
-  if (NOT_APPLIED_RE.test(String(output ?? ''))) return;
+  if (!mutationApplied(output)) return;
   state.mutationSeq++;
   if (isCodePath(filePath)) state.codeTouched = true;
 }

@@ -29,6 +29,7 @@ import {
   classifyVerification,
   createReleaseGateState,
   failureExcerpt,
+  mutationApplied,
   recordMutation,
   recordVerification,
   DEFAULT_MAX_RELEASE_GATE_RETRIES,
@@ -291,6 +292,8 @@ export class Agent {
     this.maxIterations = Math.max(1, Number(config.maxIterations) || 50);
     this.maxReadOnlyToolBatches = Math.max(2, Number(config.maxReadOnlyToolBatches) || 12);
     this.maxToolCallsPerTurn = Number(config.maxToolCallsPerTurn) || 80;
+    // How long a provider call may go without sending anything.
+    this.turnIdleTimeoutMs = Number(config.turnIdleTimeoutMs) || AGENT_TURN_TIMEOUT_MS;
     // 16 of 37 tools left the route permanently short: the base build set
     // alone is 15, so the intent families were competing for one free slot and
     // a prompt that matched none reached the model with no way to run, test or
@@ -721,7 +724,9 @@ export class Agent {
       wm.toolCalls[key].fingerprint = await this._fileFingerprint(args.file_path);
       await this._rememberFileSeen(args.file_path, args, output);
     }
-    if (name === 'write' || name === 'edit' || name === 'apply_patch_structured') {
+    // A refused or failed write changed nothing; moving the revision for it
+    // would reset the repeat budget of a model stuck retrying the same edit.
+    if ((name === 'write' || name === 'edit' || name === 'apply_patch_structured') && mutationApplied(output)) {
       this._recordWorkspaceChange([args.file_path], name);
     }
     wm.cacheEntries = this.toolCache.size;
@@ -1547,7 +1552,7 @@ export class Agent {
         if (hardLimit) {
           const currentTokens = estimateTokens(this.messages, tools);
           if (currentTokens > hardLimit) {
-            this.messages = await this.compressor.compress(this.messages, emitter);
+            this.messages = await this.compressor.compress(this.messages, emitter, controller.signal);
             const afterTokens = estimateTokens(this.messages, tools);
             emitter?.emit('tokenCount', afterTokens);
             if (afterTokens > hardLimit) {
@@ -1563,18 +1568,32 @@ export class Agent {
 
         const signal = controller.signal;
 
-        const onToken = (text) => markup.push(text);
+        // The timeout measures silence, not duration: every chunk pushes it
+        // back. Counted from the start of the call, it cut off a slow local
+        // model that was still writing after five minutes — while the error
+        // claimed there had been no progress.
+        let lastProgressAt = Date.now();
+        const onToken = (text) => {
+          lastProgressAt = Date.now();
+          markup.push(text);
+        };
 
         let turnTimer = null;
+        const idleLimitMs = this.turnIdleTimeoutMs;
         const turnTimeout = new Promise((_, reject) => {
-          turnTimer = setTimeout(() => {
+          const check = () => {
+            const idle = Date.now() - lastProgressAt;
+            if (idle < idleLimitMs) {
+              turnTimer = setTimeout(check, idleLimitMs - idle);
+              return;
+            }
+            const error = new Error(`Agent turn timeout — no progress for ${Math.round(idleLimitMs / 1000)}s`);
             try {
-              if (!controller.signal.aborted) {
-                controller.abort(new Error(`Agent turn timeout — no progress for ${Math.round(AGENT_TURN_TIMEOUT_MS / 1000)}s`));
-              }
+              if (!controller.signal.aborted) controller.abort(error);
             } catch {}
-            reject(new Error(`Agent turn timeout — no progress for ${Math.round(AGENT_TURN_TIMEOUT_MS / 1000)}s`));
-          }, AGENT_TURN_TIMEOUT_MS);
+            reject(error);
+          };
+          turnTimer = setTimeout(check, idleLimitMs);
         });
         let result;
         const providerStartedAt = Date.now();
@@ -2133,17 +2152,26 @@ export class Agent {
       const askUserCall = result.tool_calls.find(tc => tc.function.name === 'ask_user');
       
       if (askUserCall) {
-        let askUserArgs;
-        try {
-          askUserArgs = JSON.parse(askUserCall.function.arguments);
-          if (typeof askUserArgs !== 'object' || askUserArgs === null || Array.isArray(askUserArgs)) askUserArgs = {};
-        } catch { askUserArgs = {}; }
+        // Same parse and admission as every other tool: a call with no
+        // question used to reach the user as an empty prompt.
+        const askUserParsed = parseToolCall(askUserCall, { coerceArgs: coerceToolArgsToSchema });
+        const askUserArgs = askUserParsed.args;
 
         emitter?.emit('toolStart', { id: askUserCall.id, name: 'ask_user', args: askUserArgs, plugin: this._pluginForTool('ask_user') });
 
         const handler = this._getAllToolHandlers()['ask_user'];
         let askUserOutput;
-        if (handler) {
+        const askUserAdmission = askUserParsed.parseError
+          ? { allowed: false, output: askUserParsed.output }
+          : await guardToolCall({
+            name: 'ask_user',
+            args: askUserArgs,
+            validate: validateToolArgs,
+            authorize: (name, args) => authorizeToolAccess(name, args, workspacePolicy),
+          });
+        if (!askUserAdmission.allowed) {
+          askUserOutput = askUserAdmission.output;
+        } else if (handler) {
           try { askUserOutput = await handler(askUserArgs); }
           catch (e) { askUserOutput = `Error: ${e.message}`; }
         } else {
@@ -2296,7 +2324,7 @@ export class Agent {
             ].join('\n'),
           });
         }
-        if (p.name === 'write' || p.name === 'edit' || p.name === 'apply_patch_structured') {
+        if ((p.name === 'write' || p.name === 'edit' || p.name === 'apply_patch_structured') && mutationApplied(output)) {
           mutationToolUsed = true;
           touchedFiles.add(p.args.file_path);
           recordMutation(releaseGate, p.args.file_path, output);
