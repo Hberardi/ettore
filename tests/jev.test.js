@@ -353,3 +353,22 @@ test('with Jev on but unsure, the agent keeps exactly its own verdict', async ()
     globalThis.fetch = originalFetch;
   }
 });
+
+test('TYPESAFE_API_KEY alone turns Jev on, and /jev out still wins over it', async () => {
+  const { isJevEnabled, deactivateJev, getJevKey } = await import('../src/jev/index.js');
+  const previous = process.env.TYPESAFE_API_KEY;
+  process.env.TYPESAFE_API_KEY = 'sk-from-the-environment';
+  try {
+    // No command run, no key saved: exporting the variable is enough.
+    assert.equal(getJevKey(), 'sk-from-the-environment');
+    assert.equal(isJevEnabled(), true);
+
+    // An explicit off beats the variable, so turning it off never means
+    // hunting down where the export lives.
+    deactivateJev();
+    assert.equal(isJevEnabled(), false);
+  } finally {
+    if (previous === undefined) delete process.env.TYPESAFE_API_KEY;
+    else process.env.TYPESAFE_API_KEY = previous;
+  }
+});

@@ -456,6 +456,17 @@ single request, evaluated in parallel.
 /jev out                   # turn it off; add "forget" to delete the key
 ```
 
+If you cannot reach the command — a script, a sandbox, or a CLI session that
+was already running when Jev was installed — exporting the key is enough on its
+own:
+
+```bash
+export TYPESAFE_API_KEY=sk-...
+```
+
+An explicit `/jev out` still wins over the variable, so turning the feature off
+never means hunting down where the export lives.
+
 Three properties make it safe to leave on:
 
 - **Jev decides, it never writes.** No text of its own ever reaches you or the

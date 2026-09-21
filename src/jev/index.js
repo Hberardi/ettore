@@ -178,8 +178,20 @@ export function getJevKey() {
   return process.env.TYPESAFE_API_KEY || getSecret(JEV_SECRET_ID) || null;
 }
 
+/**
+ * Jev is on when there is a key and nothing has switched it off.
+ *
+ * `TYPESAFE_API_KEY` in the environment is enough on its own: exporting the
+ * key is a clear statement of intent, and it gives anyone who cannot reach the
+ * command — a script, a sandbox, a CLI already running — a way in. An explicit
+ * `/jev out` still wins over it, so turning the feature off never depends on
+ * unsetting a variable.
+ */
 export function isJevEnabled() {
-  return getConfig('jevEnabled') === true && Boolean(getJevKey());
+  if (!getJevKey()) return false;
+  const flag = getConfig('jevEnabled');
+  if (flag === false) return false;
+  return flag === true || Boolean(process.env.TYPESAFE_API_KEY);
 }
 
 /** Store the key and switch Jev on. Returns the masked key for display. */
