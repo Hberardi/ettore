@@ -479,6 +479,13 @@ Three properties make it safe to leave on:
   the turn proceeds on exactly the checks it used before, and you see one line
   saying Jev was unreachable.
 
+To check it is really calling the API rather than showing a label, `/jev status`
+reports the traffic: how many calls succeeded and failed this session, the
+round-trip time, the tokens billed, and **which model answered** — that id
+(`jev-1.13.0`) and the token counts come back from the server, so ETTORE cannot
+print them without having made the call. `/jev test` does one call on demand
+and reports the same.
+
 When Jev does decide something, you see it: `◆ Jev (240ms) — lavoro annunciato
 ma non fatto: sì`. An invisible decision layer would be worse than none.
 

@@ -413,18 +413,35 @@ ${setupHint()}`;
     handler: async (args, _context = {}) => {
       const {
         activateJev, deactivateJev, getJevClient, isJevEnabled, getJevKey,
-        JEV_DEFAULT_MODEL,
+        getJevStats, JEV_DEFAULT_MODEL,
       } = await import('../jev/index.js');
       const { maskSecret } = await import('../utils/secrets.js');
       const [rawSub = 'status', ...rest] = args;
       const sub = String(rawSub).toLowerCase();
 
+      // What the CLI measured, plus what the server said. The resolved model
+      // id and the token counts come back from Jev, so they are evidence of a
+      // real round trip rather than a label the CLI prints to itself.
+      const trafficLines = () => {
+        const s = getJevStats();
+        if (!s.calls && !s.failures) {
+          return ['', 'No calls yet this session — the counters below fill in after the first judged turn.'];
+        }
+        const lines = ['', `Calls this session: ${s.calls} ok, ${s.failures} failed.`];
+        if (s.lastModel) lines.push(`Answered by: ${s.lastModel} (reported by the server, not by ETTORE).`);
+        if (s.lastMs) lines.push(`Last call: ${s.lastMs}ms at ${new Date(s.lastAt).toLocaleTimeString()}.`);
+        if (s.inputTokens || s.outputTokens) lines.push(`Tokens billed: ${s.inputTokens} in, ${s.outputTokens} out.`);
+        if (s.lastError) lines.push(`Last error: ${s.lastError}`);
+        return lines;
+      };
+
       const statusLine = () => {
         if (!getJevKey()) return 'Jev: off — no API key saved.\nActivate it with /jev active <api key> (key from https://console.typesafe.ai/keys).';
         const model = getConfig('jevModel') || JEV_DEFAULT_MODEL;
-        return isJevEnabled()
+        const head = isJevEnabled()
           ? `Jev: on — model ${model}, key ${maskSecret(getJevKey())}.\nThe agent asks it to judge each finished turn. Turn it off with /jev out.`
           : `Jev: off — key ${maskSecret(getJevKey())} is saved but not in use.\nTurn it back on with /jev active.`;
+        return [head, ...trafficLines()].join('\n');
       };
 
       // `active` is what the user types; the rest are the words people reach
@@ -466,7 +483,12 @@ ${setupHint()}`;
             'This state is a connectivity check.',
           );
           if (answer.value === null) return 'Jev answered, but the response had no usable value.';
-          return `Jev reachable — answered ${answer.value.toFixed(2)} (${answer.decisive ? 'decisive' : 'uncertain'}).`;
+          const s = getJevStats();
+          return [
+            `Jev reachable — answered ${answer.value.toFixed(2)} (${answer.decisive ? 'decisive' : 'uncertain'}).`,
+            `Round trip: ${s.lastMs}ms, answered by ${s.lastModel || 'an unnamed model'}.`,
+            'That model id and the token count come from the API, so this was a real call.',
+          ].join('\n');
         } catch (error) {
           return `Jev call failed: ${error.message}`;
         }

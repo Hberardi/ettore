@@ -399,3 +399,62 @@ test('the sidebar says Jev is on without anyone having to ask', async () => {
   assert.match(rendered, /jev\s+on/, `expected a jev row, got:\n${rendered}`);
   assert.match(rendered, /814ms/);
 });
+
+test('the counters record real traffic, and a failure is counted as a failure', async () => {
+  const { JevClient, getJevStats, resetJevStats } = await import('../src/jev/index.js');
+  resetJevStats();
+
+  const ok = fakeFetch(() => jsonResponse({
+    model: 'jev-1.13.0',
+    answers: { a: { type: 'noul', noul: 0.9 } },
+    usage: { input_tokens: 296, output_tokens: 20 },
+  }));
+  const client = new JevClient({ apiKey: 'k', fetchImpl: ok });
+  const question = { a: { type: 'noul', instructions: 'x' } };
+  await client.evaluate({ state: 's', questions: question });
+  await client.evaluate({ state: 's', questions: question });
+
+  let stats = getJevStats();
+  assert.equal(stats.calls, 2);
+  assert.equal(stats.failures, 0);
+  // Proof of a real round trip: neither of these is something the CLI knows
+  // on its own — the server sent them back.
+  assert.equal(stats.lastModel, 'jev-1.13.0');
+  assert.equal(stats.inputTokens, 592);
+  assert.equal(stats.outputTokens, 40);
+  assert.ok(stats.lastAt, 'the time of the last call is recorded');
+
+  const refused = fakeFetch(() => ({ ok: false, status: 401, text: async () => 'bad key' }));
+  await assert.rejects(() => new JevClient({ apiKey: 'k', fetchImpl: refused })
+    .evaluate({ state: 's', questions: question }));
+
+  stats = getJevStats();
+  assert.equal(stats.calls, 2, 'a refused call is not a successful one');
+  assert.equal(stats.failures, 1);
+  assert.match(stats.lastError, /API key/i);
+  resetJevStats();
+});
+
+test('/jev status reports the traffic, not just the switch', async () => {
+  const { builtinCommands } = await import('../src/commands/index.js');
+  const { activateJev, resetJevStats } = await import('../src/jev/index.js');
+  resetJevStats();
+  activateJev('sk-abc123456789');
+
+  const before = await builtinCommands.jev.handler(['status'], {});
+  assert.match(before, /No calls yet this session/i);
+
+  const { JevClient } = await import('../src/jev/index.js');
+  await new JevClient({
+    apiKey: 'k',
+    fetchImpl: fakeFetch(() => jsonResponse({
+      model: 'jev-1.13.0', answers: {}, usage: { input_tokens: 10, output_tokens: 1 },
+    })),
+  }).evaluate({ state: 's', questions: { a: { type: 'noul', instructions: 'x' } } });
+
+  const after = await builtinCommands.jev.handler(['status'], {});
+  assert.match(after, /1 ok, 0 failed/);
+  assert.match(after, /jev-1\.13\.0/);
+  assert.match(after, /10 in, 1 out/);
+  resetJevStats();
+});

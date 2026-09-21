@@ -42,6 +42,32 @@ const NOUL_DECISION_MARGIN = 0.25;
 // worth acting on. The docs call this confidence-gated routing.
 const MIN_CONFIDENCE = 0.6;
 
+// Counters for this process, so "is it really talking to Jev?" has an answer
+// that does not depend on trusting a label. Everything here is either measured
+// locally (calls, latency) or reported by the server (the resolved model id,
+// the token counts) — the CLI cannot invent a `jev-1.13.0` it never received.
+const stats = {
+  calls: 0,
+  failures: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  lastMs: 0,
+  lastAt: null,
+  lastModel: null,
+  lastError: null,
+};
+
+export function getJevStats() {
+  return { ...stats };
+}
+
+export function resetJevStats() {
+  Object.assign(stats, {
+    calls: 0, failures: 0, inputTokens: 0, outputTokens: 0,
+    lastMs: 0, lastAt: null, lastModel: null, lastError: null,
+  });
+}
+
 export class JevError extends Error {
   constructor(message, { status = null, retryable = false } = {}) {
     super(message);
@@ -78,6 +104,7 @@ export class JevClient {
     if (!questions || !Object.keys(questions).length) throw new JevError('no questions to evaluate');
 
     let lastError = null;
+    const startedAt = Date.now();
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
         await wait(Math.min(4000, 500 * (2 ** (attempt - 1))), signal);
@@ -109,19 +136,38 @@ export class JevClient {
           continue;
         }
         const body = await response.json();
-        return { model: body?.model, answers: body?.answers || {}, usage: body?.usage || {} };
+        const usage = body?.usage || {};
+        stats.calls++;
+        stats.lastMs = Date.now() - startedAt;
+        stats.lastAt = new Date().toISOString();
+        stats.lastModel = body?.model || null;
+        stats.lastError = null;
+        stats.inputTokens += Number(usage.input_tokens) || 0;
+        stats.outputTokens += Number(usage.output_tokens) || 0;
+        return { model: body?.model, answers: body?.answers || {}, usage };
       } catch (error) {
         if (signal?.aborted) throw error;
-        if (error instanceof JevError && !error.retryable) throw error;
+        if (error instanceof JevError && !error.retryable) {
+          stats.failures++;
+          stats.lastMs = Date.now() - startedAt;
+          stats.lastAt = new Date().toISOString();
+          stats.lastError = error.message;
+          throw error;
+        }
         lastError = error;
       } finally {
         clearTimeout(timeout);
         signal?.removeEventListener('abort', onAbort);
       }
     }
-    throw lastError instanceof JevError
+    const failure = lastError instanceof JevError
       ? lastError
       : new JevError(`Jev unreachable: ${lastError?.message || 'unknown error'}`);
+    stats.failures++;
+    stats.lastMs = Date.now() - startedAt;
+    stats.lastAt = new Date().toISOString();
+    stats.lastError = failure.message;
+    throw failure;
   }
 
   /** One Noul question, as a convenience for callers that only need a yes/no. */
