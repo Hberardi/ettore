@@ -155,6 +155,9 @@ export class BashSession {
     });
     this.process = proc;
     this.alive = true;
+    // The flag describes THIS process's stderr pipe. A respawn gets a new one,
+    // and carrying the old value over would declare it dead from the start.
+    this._stderrEnded = false;
     // Guard against a SIGTERM'd previous process exiting AFTER we've already
     // spawned its replacement: only clear state if `proc` is still the active
     // one. Without this guard, the late `exit` event from the old shell would
@@ -236,7 +239,7 @@ export class BashSession {
         this.process?.stdout?.off('data', onStdout);
         this.process?.stderr?.off('data', onStderr);
         this.process?.stderr?.off('end', onStderrEnd);
-        this.process?.off('exit', onExit);
+        this.process?.off('close', onClose);
         signal?.removeEventListener?.('abort', onAbort);
         resolve(value);
       };
@@ -309,7 +312,14 @@ export class BashSession {
         }
       };
 
-      const onExit = (code, sig) => {
+      // The shell died under the command — `exit 3` ends the session shell
+      // itself, and so does a crash. Settling on the process's `exit` event
+      // read the buffers at the instant the process ended, which says nothing
+      // about whether its output had been read yet: on a loaded machine the
+      // stderr bytes were still in the pipe, and a command's error output came
+      // back empty beside a correct exit code. `close` is the event that means
+      // the process ended AND its stdio is drained, so the buffers are whole.
+      const onClose = (code, sig) => {
         settle({
           stdout: stdoutBuf,
           stderr: stderrBuf,
@@ -343,7 +353,7 @@ export class BashSession {
       this.process.stdout.on('data', onStdout);
       this.process.stderr.on('data', onStderr);
       this.process.stderr.on('end', onStderrEnd);
-      this.process.on('exit', onExit);
+      this.process.on('close', onClose);
       // A pipe that closed during an earlier command stays closed: nothing
       // will ever arrive on it again, so do not wait on it at all.
       if (this._stderrEnded) stderrSentinelSeen = true;

@@ -103,3 +103,25 @@ test('giving up on stderr is reported, never passed off as complete output', asy
   assert.equal(result.exitCode, 1);
   assert.equal(result.stderrTruncated, true);
 });
+
+test('a shell that dies mid-command still reports what it wrote', async () => {
+  const proc = fakeShell();
+  const session = sessionWith(proc);
+  const run = session.run('echo boom >&2; exit 3');
+
+  await tick(30);
+  // The shell ends: `exit 3` exits the session shell itself. The process is
+  // gone, but its output has not been read yet — which is the whole point.
+  proc.emit('exit', 3, null);
+  await tick(50);
+  proc.stderr.write('boom\n');
+  proc.stderr.end();
+  proc.stdout.end();
+  await tick(10);
+  proc.emit('close', 3, null);
+
+  const result = await run;
+  assert.equal(result.exitCode, 3);
+  assert.equal(result.sessionDied, true);
+  assert.match(result.stderr, /boom/, 'output written before the shell died must not be lost');
+});
