@@ -16,7 +16,9 @@
 
 import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
-import { resolve } from 'path';
+import { createServer } from 'net';
+import { tmpdir } from 'os';
+import { join, resolve } from 'path';
 import { killProcessTree, resolveShell } from '../utils/platform.js';
 
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
@@ -37,6 +39,8 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 // command's entire error output was reported as empty next to a correct exit
 // code. That is precisely the failure the stderr sentinel exists to prevent.
 const STDERR_SILENCE_GRACE_MS = 2000;
+// How long a piped PowerShell has to dial back before we give up on it.
+const PIPE_CONNECT_TIMEOUT_MS = 15_000;
 
 let _sharedSession = null;
 
@@ -99,18 +103,39 @@ export const SHELL_DIALECTS = {
     args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'],
     env: {},
     // An empty prompt so no `PS C:\>` lands in captured stdout, and Continue
-    // so a failing command does not tear the session down.
-    init: "function prompt { '' }\n$ErrorActionPreference = 'Continue'\n",
-    // No `& { }` wrapper: it would give the command its own scope and a
-    // `Set-Location` would not stick, which is the whole point of a session.
+    // so a failing command does not tear the session down. UTF-8 output so an
+    // accented file name or git message does not arrive in the OEM codepage.
+    init: "function prompt { '' }\n$ErrorActionPreference = 'Continue'\n$ProgressPreference = 'SilentlyContinue'\n"
+      + 'try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; $OutputEncoding = [Console]::OutputEncoding } catch { }\n',
+    // The command never reaches stdin as text. `-Command -` reads stdin the
+    // way the interactive console does: a multi-line statement — a `foreach`
+    // block, an `if` over three lines, a here-string — is only run once a
+    // BLANK line follows it. The frame had none, so every framing line after
+    // such a command was swallowed into the same pending statement, the
+    // sentinel never printed, and the call sat there for the full timeout.
+    // An unbalanced brace or quote did the same, forever. Models write
+    // multi-line PowerShell all the time, so this was the common case.
+    //
+    // Instead the command travels base64-encoded on one line and is parsed by
+    // [ScriptBlock]::Create: a syntax error becomes an exception with a
+    // message, not a hang, and non-ASCII text survives stdin's codepage.
+    //
+    // It is dot-sourced, not `& { }`: `&` would give the command its own
+    // scope and a `Set-Location` would not stick, which is the whole point of
+    // a session. `$?` is read inside the same script, right after the
+    // command's last statement, so it still describes the command.
     //
     // Exit codes come from two places in PowerShell — $LASTEXITCODE for native
     // executables, $? for cmdlets — so both are consulted. A cmdlet that fails
     // leaves $LASTEXITCODE untouched from an earlier command, hence the reset.
-    frame: (command, sentinel) => [
+    //
+    // With `cwd` the command runs isolated instead — see isolatedPowerShell.
+    frame: (command, sentinel, { cwd = null } = {}) => [
       '$LASTEXITCODE = 0',
-      command,
-      '$__ettore_ok = $?',
+      '$__ettore_ok = $false',
+      "try { . ([ScriptBlock]::Create([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"
+        + Buffer.from(cwd == null ? `${command}\n$__ettore_ok = $?` : isolatedPowerShell(command, cwd), 'utf8').toString('base64')
+        + "')))) } catch { [Console]::Error.WriteLine(($_ | Out-String).TrimEnd()) }",
       '$__ettore_ec = if ($__ettore_ok) { if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE } }'
         + ' else { if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 } }',
       `[Console]::Error.Write("\`n" + '${sentinel}' + "\`n")`,
@@ -119,6 +144,81 @@ export const SHELL_DIALECTS = {
     ].join('\n'),
   },
 };
+
+const psQuote = text => String(text).replace(/'/g, "''");
+
+/**
+ * A command run in a warm PowerShell as if it had a process of its own: the
+ * `bash` tool's contract, which is one fresh shell per call.
+ *
+ * - It starts in `cwd`, whatever the previous command did with the location.
+ * - Its variables and functions live in a child scope (`& { }`) and go with it.
+ * - `$env:` changes are undone afterwards, since a process of its own would
+ *   have taken them to its grave.
+ * - Its output is formatted inside the statement (`Out-String -Stream`). The
+ *   warm shell is one long-running pipeline, and left to Out-Default a table
+ *   is held back to size its columns — long enough for the end-of-command
+ *   sentinel, written straight to the console, to overtake it — and the
+ *   next command's objects would join the same table without a header.
+ *
+ * `$?` is taken inside the child scope, right after the command's last
+ * statement, and handed to the frame one scope up.
+ */
+export function isolatedPowerShell(command, cwd) {
+  return [
+    `Set-Location -LiteralPath '${psQuote(cwd)}'`,
+    '$__ettore_snap = [Environment]::GetEnvironmentVariables()',
+    'try {',
+    '& {',
+    command,
+    'Set-Variable -Scope 1 -Name __ettore_ok -Value $?',
+    // A bare `process` block, not ForEach-Object, which is several times
+    // slower per line in Windows PowerShell — noticeable on a big listing.
+    '} | Out-String -Stream -Width 200 | & { process { [Console]::Out.WriteLine($_) } }',
+    '} finally {',
+    '$__ettore_now = [Environment]::GetEnvironmentVariables()',
+    'foreach ($k in @($__ettore_now.Keys)) { if (-not $__ettore_snap.ContainsKey($k)) { [Environment]::SetEnvironmentVariable($k, $null) } }',
+    'foreach ($k in @($__ettore_snap.Keys)) { if ($__ettore_now[$k] -cne $__ettore_snap[$k]) { [Environment]::SetEnvironmentVariable($k, $__ettore_snap[$k]) } }',
+    '}',
+  ].join('\n');
+}
+
+/**
+ * The script a piped PowerShell runs: dial the named pipe, prove it is the
+ * child we started, then execute each line it receives — a base64-encoded
+ * frame — in its own scope.
+ *
+ * Commands arrive over a named pipe rather than stdin because stdin is
+ * inherited. A native program run from a `-Command -` shell reads the very
+ * pipe the commands are written into: `python` with no arguments, `git
+ * commit` with no -m, anything with a prompt, sat waiting on it until the
+ * timeout. This shell's stdin is closed, so they get EOF straight away — the
+ * same as a one-shot `powershell -Command`.
+ */
+export function powershellPipeBootstrap() {
+  return [
+    "$ErrorActionPreference = 'Continue'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    '$__ettore_utf8 = New-Object System.Text.UTF8Encoding $false',
+    'try { [Console]::OutputEncoding = $__ettore_utf8; $OutputEncoding = $__ettore_utf8 } catch { }',
+    "$__ettore_pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', $env:ETTORE_SH_PIPE, [System.IO.Pipes.PipeDirection]::InOut)",
+    `$__ettore_pipe.Connect(${PIPE_CONNECT_TIMEOUT_MS})`,
+    '$__ettore_w = New-Object System.IO.StreamWriter($__ettore_pipe, $__ettore_utf8)',
+    '$__ettore_w.AutoFlush = $true',
+    '$__ettore_w.WriteLine($env:ETTORE_SH_TOKEN)',
+    // Nothing the commands start should inherit the handshake.
+    'Remove-Item Env:ETTORE_SH_TOKEN, Env:ETTORE_SH_PIPE -ErrorAction SilentlyContinue',
+    '$__ettore_r = New-Object System.IO.StreamReader($__ettore_pipe, $__ettore_utf8)',
+    'while ($null -ne ($__ettore_line = $__ettore_r.ReadLine())) {',
+    '  . ([ScriptBlock]::Create($__ettore_utf8.GetString([Convert]::FromBase64String($__ettore_line))))',
+    '}',
+  ].join('\n');
+}
+
+/** Where a piped shell's named pipe lives: the pipe namespace on Windows. */
+export function pipePath(name, platform = process.platform) {
+  return platform === 'win32' ? `\\\\.\\pipe\\${name}` : join(tmpdir(), `${name}.sock`);
+}
 
 /** The dialect for this platform's session shell. */
 export function sessionDialect(options = {}) {
@@ -140,6 +240,14 @@ export class BashSession {
     this.platform = options.platform || process.platform;
     this.dialect = options.dialect || sessionDialect({ platform: this.platform, env: options.env || process.env });
     this._spawn = options.spawnFn || spawn;
+    // 'stdin' writes commands into the shell's stdin; 'pipe' (PowerShell
+    // only) sends them over a named pipe and leaves stdin closed.
+    this.transport = options.transport || 'stdin';
+    // Each command gets a fresh-process contract instead of a shared scope.
+    this.isolate = Boolean(options.isolate);
+    this._socket = null;
+    this._outbox = [];
+    this._ready = Promise.resolve();
     // Promise chain used to serialize concurrent run() calls — the shell
     // can only execute one command at a time, since stdin/stdout are shared.
     this._chain = Promise.resolve();
@@ -147,12 +255,14 @@ export class BashSession {
 
   ensureStarted() {
     if (this.alive && this.process) return;
-    const proc = this._spawn(this.dialect.file, this.dialect.args, {
-      cwd: this.workdir,
-      env: { ...process.env, ...this.dialect.env },
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
+    const proc = this.transport === 'pipe'
+      ? this._startPiped()
+      : this._spawn(this.dialect.file, this.dialect.args, {
+        cwd: this.workdir,
+        env: { ...process.env, ...this.dialect.env },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
     this.process = proc;
     this.alive = true;
     // The flag describes THIS process's stderr pipe. A respawn gets a new one,
@@ -172,12 +282,100 @@ export class BashSession {
     // stream, not as a throw from write(). Without a listener that becomes an
     // unhandled 'error' event and takes the CLI down; the pending call is
     // settled by the `exit` handler above.
-    proc.stdin.on('error', () => {});
+    proc.stdin?.on('error', () => {});
     // Prompt and error-preference setup, written before any user command so
-    // its output can never land inside a framed result.
-    if (this.dialect.init) {
+    // its output can never land inside a framed result. The piped bootstrap
+    // does its own.
+    if (this.dialect.init && this.transport !== 'pipe') {
       try { proc.stdin.write(this.dialect.init); } catch { /* handled above */ }
     }
+  }
+
+  // A PowerShell whose commands arrive over a named pipe it dials back to.
+  // Resolves `ready()` once the handshake proves the caller is our child.
+  _startPiped() {
+    const name = `ettore-sh-${randomBytes(12).toString('hex')}`;
+    const token = randomBytes(16).toString('hex');
+    this._socket = null;
+    this._outbox = [];
+    let settle = null;
+    this._ready = new Promise((resolveReady, rejectReady) => { settle = { resolveReady, rejectReady }; });
+    this._ready.catch(() => {});
+
+    const server = createServer((sock) => {
+      sock.on('error', () => {});
+      sock.setEncoding('utf8');
+      let hello = '';
+      const onHello = (data) => {
+        hello += data;
+        const nl = hello.indexOf('\n');
+        if (nl === -1) {
+          if (hello.length > 256) sock.destroy();
+          return;
+        }
+        sock.off('data', onHello);
+        // Anyone on the machine can dial a named pipe. Only the process that
+        // was handed the token in its environment gets the commands.
+        if (hello.slice(0, nl).trim() !== token) { sock.destroy(); return; }
+        done(null, sock);
+      };
+      sock.on('data', onHello);
+    });
+    const connectTimer = setTimeout(() => done(new Error('the shell did not connect')), PIPE_CONNECT_TIMEOUT_MS + 2000);
+    connectTimer.unref?.();
+    const done = (err, sock = null) => {
+      if (!settle) return;
+      const { resolveReady, rejectReady } = settle;
+      settle = null;
+      clearTimeout(connectTimer);
+      server.close(() => {});
+      if (err) { rejectReady(err); return; }
+      this._socket = sock;
+      if (!this._refed) sock.unref?.();
+      for (const line of this._outbox) sock.write(line);
+      this._outbox = [];
+      resolveReady();
+    };
+    server.on('error', err => done(err));
+    server.listen(pipePath(name, this.platform));
+    server.unref?.();
+
+    const encoded = Buffer.from(powershellPipeBootstrap(), 'utf16le').toString('base64');
+    const proc = this._spawn(this.dialect.file, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+      cwd: this.workdir,
+      env: { ...process.env, ETTORE_SH_PIPE: name, ETTORE_SH_TOKEN: token },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    proc.on('exit', () => done(new Error('the shell exited before it connected')));
+    proc.on('error', err => done(err));
+    return proc;
+  }
+
+  /** Resolves once the shell can take commands; rejects if it never will. */
+  ready() {
+    this.ensureStarted();
+    return this._ready;
+  }
+
+  // Whether this shell may hold the event loop open. A warm shell sitting
+  // idle must not keep the CLI from exiting; one running a command must.
+  setRef(on) {
+    this._refed = on;
+    const method = on ? 'ref' : 'unref';
+    for (const handle of [this.process, this.process?.stdout, this.process?.stderr, this._socket]) {
+      try { handle?.[method]?.(); } catch { /* already closed */ }
+    }
+  }
+
+  _send(text) {
+    if (this.transport !== 'pipe') {
+      this.process.stdin.write(text);
+      return;
+    }
+    const line = `${Buffer.from(text, 'utf8').toString('base64')}\n`;
+    if (this._socket) this._socket.write(line);
+    else this._outbox.push(line);
   }
 
   run(command, opts = {}) {
@@ -188,7 +386,7 @@ export class BashSession {
     return next;
   }
 
-  _runOne(command, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, onProgress } = {}) {
+  _runOne(command, { timeoutMs = DEFAULT_TIMEOUT_MS, signal, onProgress, cwd = null } = {}) {
     if (typeof command !== 'string' || !command.trim()) {
       return Promise.resolve({ stdout: '', stderr: '', exitCode: 0 });
     }
@@ -363,9 +561,9 @@ export class BashSession {
       }
 
       // See SHELL_DIALECTS for why each shell frames the way it does.
-      const wrapped = this.dialect.frame(command, sentinel);
+      const wrapped = this.dialect.frame(command, sentinel, this.isolate ? { cwd: cwd || this.workdir } : undefined);
       try {
-        this.process.stdin.write(wrapped);
+        this._send(wrapped);
       } catch (err) {
         settle({
           stdout: stdoutBuf,
@@ -381,6 +579,9 @@ export class BashSession {
     const proc = this.process;
     this.alive = false;
     this.process = null;
+    try { this._socket?.destroy(); } catch { /* already gone */ }
+    this._socket = null;
+    this._outbox = [];
     if (!proc) return;
     // The session shell may have started a build or a server; killing only the
     // shell would orphan it. Windows has no process group to signal, so this

@@ -9,6 +9,8 @@ import { join, extname, dirname } from 'path';
 import { glob as globby } from 'glob';
 import { uiBridge } from './bridge.js';
 import { runShellCommand } from './shell-run.js';
+import { runWarmShellCommand } from './warm-shell.js';
+import { judgeCommand } from '../jev/command-judge.js';
 import { detachOptions, killProcessTree, resolveBinary, resolvePython, shellInvocation } from '../utils/platform.js';
 import { searchFiles } from './grep-fallback.js';
 import { applyEol, detectEol, toLf } from './line-endings.js';
@@ -508,6 +510,30 @@ async function requestConfirmation({ title, detail, allowNonInteractive = true }
   });
   if (answer === '__cancelled__') return { allowed: false, interactive: true, reason: 'cancelled' };
   return { allowed: /^Sì/i.test(String(answer)), interactive: true };
+}
+
+/**
+ * The second opinion on a command the regex let through: Jev, when it is on
+ * and sure the command could do damage, turns it into a confirmation. Returns
+ * the tool result for a refused command, or null to run it. Jev can only add
+ * a question here, never skip one — and a Jev that is off, slow or unsure
+ * returns null straight away. See src/jev/command-judge.js.
+ */
+async function confirmIfJevFlags(command, workdir) {
+  const verdict = await judgeCommand(command, { cwd: workdir || process.cwd(), signal: getToolAbortSignal() });
+  if (!verdict.checked) return null;
+  uiBridge.emit('jevCommand', { command, value: verdict.value, flagged: verdict.flagged, ms: verdict.ms, cached: Boolean(verdict.cached) });
+  if (!verdict.flagged) return null;
+  const ok = await requestConfirmation({
+    title: `◆ Jev: questo comando potrebbe fare danni difficili da annullare (${Number(verdict.value).toFixed(2)})`,
+    detail: `$ ${command}`,
+    allowNonInteractive: false,
+  });
+  if (ok.allowed) return null;
+  if (ok.reason === 'non_interactive') {
+    return 'Blocked: Jev judged this command could cause damage that is hard to undo, and that needs an interactive confirmation. Run it from interactive mode, or use a safer command.';
+  }
+  return 'Cancelled by user: refused to run a command Jev flagged as potentially destructive. Find a safer way to do this, or ask the user how to proceed.';
 }
 
 async function requestInstallConfirmation({ label, kind, command }) {
@@ -1833,7 +1859,12 @@ export const toolHandlers = {
       } catch (rgErr) {
         const rgMissing = isMissingBinary(rgErr);
         if (!rgMissing && rgErr?.stdout) output = rgErr.stdout;
-        if (!output) {
+        // Exit 1 from ripgrep is its answer — no matches — not a failure. Going
+        // on to grep searched the whole tree a second time for the same
+        // nothing, and on Windows, where grep is absent, a third time through
+        // the built-in searcher: the slowest possible way to say "No matches".
+        const rgFoundNothing = !rgMissing && rgErr?.code === 1 && !output;
+        if (!output && !rgFoundNothing) {
           try {
             output = await tryGrep();
           } catch (grepErr) {
@@ -2046,6 +2077,9 @@ export const toolHandlers = {
           }
           return `Cancelled by user: refused to run "${danger}" command.`;
         }
+      } else {
+        const refused = await confirmIfJevFlags(command, workdir);
+        if (refused) return refused;
       }
       const startedAt = Date.now();
       const timeoutMs = Math.max(1000, Math.min(Number(timeout_ms) || 120_000, 600_000));
@@ -2059,12 +2093,17 @@ export const toolHandlers = {
         // open and a command that finished instantly still cost the full
         // timeout — `sleep 20 & echo started` took 120s, the same line with
         // stdout redirected took 10ms. See src/tools/shell-run.js.
-        const result = await runShellCommand(command, {
+        //
+        // On Windows a warm PowerShell takes the command when it can, which
+        // saves starting one per call; null means run it the one-shot way.
+        // See src/tools/warm-shell.js.
+        const shellOptions = {
           cwd: workdir || process.cwd(),
           timeoutMs,
           signal: getToolAbortSignal(),
-          maxBytes: 10 * 1024 * 1024,
-        });
+        };
+        const result = await runWarmShellCommand(command, shellOptions)
+          ?? await runShellCommand(command, { ...shellOptions, maxBytes: 10 * 1024 * 1024 });
         if (result.timedOut) {
           const partial = sanitizeOutput(`${result.stdout}${result.stderr}`, { maxBytes: 10_000 });
           return `${partial.output}\n[timeout — command killed. Re-run with a larger timeout_ms, or make it non-interactive.]`.trim();
@@ -2135,6 +2174,9 @@ export const toolHandlers = {
           }
           return `Cancelled by user: refused to run "${danger}" command.`;
         }
+      } else {
+        const refused = await confirmIfJevFlags(command, workdir);
+        if (refused) return refused;
       }
 
       const timeoutMs = Math.max(1000, Math.min(Number(timeout_ms) || 120_000, 600_000));
@@ -2453,7 +2495,13 @@ export const toolHandlers = {
   async glob({ pattern, path, max_results = DEFAULT_GLOB_RESULTS }) {
     try {
       const safeLimit = Math.max(1, Math.min(Number(max_results) || DEFAULT_GLOB_RESULTS, MAX_GLOB_RESULTS));
-      const files = await globby(pattern, { cwd: path || process.cwd(), absolute: true });
+      // `**/*.js` from a project root used to walk every node_modules and .git
+      // underneath it. On Windows, where each directory read is slow and goes
+      // past the antivirus, that alone was enough to make glob look hung. A
+      // pattern that names one of these directories still gets to search it.
+      const text = String(pattern || '');
+      const ignore = ['node_modules', '.git'].filter(dir => !text.includes(dir)).map(dir => `**/${dir}/**`);
+      const files = await globby(pattern, { cwd: path || process.cwd(), absolute: true, ignore });
       if (!files.length) return 'No files found';
       const sorted = files.sort((a, b) => a.localeCompare(b));
       const out = sorted.slice(0, safeLimit).join('\n');
@@ -2509,7 +2557,12 @@ export const toolHandlers = {
       } catch (rgErr) {
         const rgMissing = isMissingBinary(rgErr);
         if (!rgMissing && rgErr?.stdout) output = rgErr.stdout;
-        if (!output) {
+        // Exit 1 from ripgrep is its answer — no matches — not a failure. Going
+        // on to grep searched the whole tree a second time for the same
+        // nothing, and on Windows, where grep is absent, a third time through
+        // the built-in searcher: the slowest possible way to say "No matches".
+        const rgFoundNothing = !rgMissing && rgErr?.code === 1 && !output;
+        if (!output && !rgFoundNothing) {
           try {
             output = await tryGrep();
           } catch (grepErr) {

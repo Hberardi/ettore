@@ -162,7 +162,9 @@ test('killing a tree uses taskkill on Windows', () => {
     spawnSyncFn: (file, args) => calls.push([file, args]),
   });
 
-  assert.deepEqual(calls[0], ['taskkill', ['/pid', '4321', '/T']]);
+  // Without /F taskkill only asks a windowless console process to close,
+  // which it cannot do, so both signals force.
+  assert.deepEqual(calls[0], ['taskkill', ['/pid', '4321', '/T', '/F']]);
   assert.deepEqual(calls[1], ['taskkill', ['/pid', '4321', '/T', '/F']], 'SIGKILL forces');
 });
 

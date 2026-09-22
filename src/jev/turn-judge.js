@@ -133,6 +133,31 @@ export const APPROACH_QUESTION = {
   },
 };
 
+// Two more reads of the request, in the same call. Each one only ever adds
+// something to the turn — a question to the user first, a plan first — and
+// only when Jev is decisive, so an unsure answer leaves the turn as it was.
+export const PRETURN_FLAGS = {
+  ambiguous: {
+    type: 'noul',
+    instructions: {
+      question: 'The request cannot be carried out as written: something only the user can supply is missing — which file or feature, which of several readings is meant, what the result should be.',
+      note: 'A short request is not ambiguous when its meaning is clear. Details the assistant can find by reading the code are not missing information.',
+    },
+    criteria: {
+      true: 'Acting now would mean guessing what the user wants.',
+      false: 'The request is clear enough to act on, or the gaps can be filled by looking at the code.',
+    },
+  },
+  multi_step: {
+    type: 'noul',
+    instructions: 'Carrying out the request takes several distinct steps — changes in more than one place, or build then test then document — rather than one self-contained change or answer.',
+    criteria: {
+      true: 'The work has several parts that are worth listing before starting.',
+      false: 'One change, one lookup, or one answer covers it.',
+    },
+  },
+};
+
 // Question ids are ours to choose and are never shown to the model, so a skill
 // whose name is not a usable key gets a positional one.
 function skillQuestionId(index) {
@@ -165,23 +190,24 @@ export function buildSkillQuestions(skills = []) {
  * off, unreachable or unsure, every field comes back undecided and the agent
  * keeps the heuristics it already had.
  *
- * @returns {Promise<{approach: object, skills: Record<string, object>, error: string|null, ms: number}>}
+ * @returns {Promise<{approach: object, flags: Record<string, object>, skills: Record<string, object>, error: string|null, ms: number}>}
  */
 export async function judgePreTurn(client, { prompt, skills = [] } = {}, { signal = null } = {}) {
-  const empty = { approach: { choice: null, confidence: null, decisive: false }, skills: {}, error: null, ms: 0 };
+  const empty = { approach: { choice: null, confidence: null, decisive: false }, flags: {}, skills: {}, error: null, ms: 0 };
   if (!client) return empty;
   const startedAt = Date.now();
   const { questions, byId } = buildSkillQuestions(skills);
   try {
     const { answers } = await client.evaluate({
       state: { user_request: String(prompt || '').slice(0, 8000) },
-      questions: { approach: APPROACH_QUESTION, ...questions },
+      questions: { approach: APPROACH_QUESTION, ...PRETURN_FLAGS, ...questions },
       signal,
     });
     const skillVerdicts = {};
     for (const [id, name] of byId) skillVerdicts[name] = readNoul(answers?.[id]);
     return {
       approach: readChoice(answers?.approach),
+      flags: Object.fromEntries(Object.keys(PRETURN_FLAGS).map(key => [key, readNoul(answers?.[key])])),
       skills: skillVerdicts,
       error: null,
       ms: Date.now() - startedAt,

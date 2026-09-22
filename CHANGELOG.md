@@ -8,6 +8,81 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-09-22
+
+### Added — Jev takes part in the whole turn, not just its end
+
+With Jev on, it used to judge a turn only when the turn tried to end, and to
+*suggest* the `explore` sub-agent before it began. It now acts at every stage,
+and only where it is sure — an unsure, failing or absent Jev leaves every
+decision exactly as it was.
+
+- **Before the turn**, in the same single call that already chose the skills:
+  an *ambiguous* request makes the model ask you one question before touching
+  anything; a *multi-step* one gets the planning reminder the word heuristics
+  missed; one that needs *no code* is answered directly; and one that needs a
+  codebase-wide search now has the `explore` sub-agent **run** before the first
+  step, with its report opening the turn, instead of a nudge the model was free
+  to ignore.
+- **While the turn runs**, every eight tool calls, after two failed batches, or
+  when one call keeps coming back, Jev is shown the recent calls and asked
+  whether the agent is going round in circles, stuck on the same error, or off
+  the request. The first time it is sure the model is told to change course; a
+  turn still circling after that is wound down with what it has.
+- **Before a shell command runs**, Jev reads commands the destructive-command
+  regex let through — `Remove-Item -Recurse -Force`, `find … -delete`, `curl … |
+  sh`, `> config.json` — and asks for confirmation when it is sure they could do
+  damage. It can only add a confirmation, never remove one; commands that
+  plainly only read are never sent.
+- **One line per judged turn** in the chat, even when Jev only agrees, plus a
+  line whenever it acts.
+
+### Added — `/sidebar`, and a right panel that grows with the terminal
+
+The right panel was a fixed 32 columns everywhere, so model names, paths, skills
+and tool names were cut short on any screen. It now takes about a third of the
+terminal (32 to 64 columns; 41 on a 120-column terminal), and `/sidebar auto |
+wide | narrow | <n>` sets it, saved across sessions. The transcript always keeps
+its 40 columns.
+
+### Changed — the `bash` tool on Windows keeps PowerShell warm
+
+Each command used to start a new `powershell.exe`, 0.5–1.5s before the command
+even began. Up to three PowerShells now stay warm, and each call still behaves
+like a fresh process: its own working directory and variables, `$env:` changes
+undone, stdin closed (commands arrive over a named pipe guarded by a token, so a
+program that reads stdin gets EOF instead of the command stream). Anything that
+goes wrong with it falls back to one PowerShell per command;
+`ETTORE_WARM_SHELL=0` does that by hand.
+
+### Fixed
+
+- **`bash_session` on Windows hung on multi-line PowerShell.** `-Command -` runs
+  a multi-line statement — a `foreach` block, a here-string — only after a blank
+  line, so the framing was swallowed and the call waited out its full timeout;
+  an unclosed brace hung it for good. Commands now travel base64-encoded on one
+  line and are parsed as a script block, so a syntax error is reported instead,
+  and non-ASCII text survives the console codepage. Output is UTF-8.
+- **Stopping a command on Windows took 2s longer than it had to.** `taskkill`
+  without `/F` cannot end a windowless console process, so every timeout and Esc
+  waited out a second, forced attempt. It now forces straight away.
+- **Search was slow on Windows.** A "no matches" from ripgrep was retried with
+  `grep` and then with the built-in searcher; it is now the answer. `glob` no
+  longer walks `node_modules` and `.git` unless the pattern names them, the
+  built-in searcher reads 16 files at a time, and the shell lookup is cached
+  instead of sweeping `PATH` on every command.
+- **The todo list appeared twice while a turn ran**, as the Tasks block and at
+  the top of the streaming reply. It now shows once, in the reply while the turn
+  runs and as the Tasks block otherwise.
+- **Running out of tool calls ended on a red error with the wrong advice.** The
+  message counted the whole session ("156 tools completed", "the same call ran
+  5 times") and called five `todo_write` calls a loop. Counts are now per turn,
+  bookkeeping calls are not a loop, a loop means one call taking a real share of
+  the turn, and a provider that ignores the landing turn's empty tool list no
+  longer turns a finished job into an error: the turn closes with what was done,
+  which files changed, and the right advice.
+- **A plan requested by one turn stayed requested for every turn after it.**
+
 ## [1.8.9] — 2026-09-21
 
 ### Fixed — a plugin's slash command did nothing when typed

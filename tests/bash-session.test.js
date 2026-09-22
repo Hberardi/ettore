@@ -218,9 +218,16 @@ test('the session shell is bash on POSIX and PowerShell on Windows', async () =>
   assert.ok(win.args.includes('-NonInteractive'), 'a prompt would swallow the sentinel');
 });
 
+// PowerShell carries the command base64-encoded; this reads it back out.
+function framedCommand(name, framed) {
+  if (name !== 'powershell') return framed;
+  const b64 = framed.match(/FromBase64String\('([^']*)'\)/)?.[1] || '';
+  return framed.replace(b64, Buffer.from(b64, 'base64').toString('utf8'));
+}
+
 test('both dialects frame the command with the sentinel after the output', () => {
   for (const name of ['bash', 'powershell']) {
-    const framed = SHELL_DIALECTS[name].frame('echo hello', 'SENT_123');
+    const framed = framedCommand(name, SHELL_DIALECTS[name].frame('echo hello', 'SENT_123'));
     assert.ok(framed.includes('echo hello'), `${name}: command missing`);
     assert.ok(framed.includes('SENT_123'), `${name}: sentinel missing`);
     assert.ok(
@@ -236,7 +243,21 @@ test('the PowerShell frame emits a parseable EXIT code and resets it first', () 
   // The reader matches /EXIT:(-?\d+)/ against what follows the sentinel.
   assert.match(framed, /EXIT/);
   assert.ok(framed.includes('$LASTEXITCODE = 0'), 'a stale code from an earlier command would be reported');
-  assert.ok(framed.includes('$?'), 'cmdlets do not set $LASTEXITCODE, so $? is needed too');
+  assert.ok(framedCommand('powershell', framed).includes('$?'), 'cmdlets do not set $LASTEXITCODE, so $? is needed too');
+});
+
+test('the PowerShell frame keeps every statement on one line of stdin', () => {
+  // `-Command -` runs a multi-line statement only after a blank line. Sent as
+  // text, a `foreach` block swallowed the framing and the call hung until its
+  // timeout; an unclosed brace hung it for good.
+  const command = 'foreach ($i in 1..3) {\n  "è $i"\n}\n$x = @"\nhere\n"@\nif ($true) {';
+  const framed = SHELL_DIALECTS.powershell.frame(command, 'S');
+  const lines = framed.split('\n').filter(Boolean);
+  assert.ok(lines.every(line => !line.includes('foreach') && !line.includes('@"')), 'the command must not reach stdin as text');
+  const b64 = framed.match(/FromBase64String\('([^']*)'\)/)[1];
+  assert.equal(Buffer.from(b64, 'base64').toString('utf8'), `${command}\n$__ettore_ok = $?`, 'the command must round-trip, non-ASCII included');
+  assert.match(framed, /\. \(\[ScriptBlock\]::Create/, 'dot-sourced, so Set-Location still sticks');
+  assert.match(framed, /catch \{/, 'a parse error must become output, not a hang');
 });
 
 test('the PowerShell dialect does not put the command in its own scope', () => {

@@ -65,7 +65,16 @@ import { guardToolCall, parseToolCall } from './tool-call-guard.js';
 import { ReleaseGateCoordinator } from './release-gate-coordinator.js';
 import { commandWriteTargets, diffSnapshots, snapshotWorkspace } from './workspace-changes.js';
 import { getJevClient } from '../jev/index.js';
+import { shortenPath } from '../utils/platform.js';
 import { judgePreTurn, judgeTurn, resolveVerdict } from '../jev/turn-judge.js';
+import {
+  createProgressGuardState,
+  decideProgressAction,
+  judgeProgress,
+  progressCheckDue,
+  recordBatchForGuard,
+  recordToolForGuard,
+} from '../jev/progress-guard.js';
 
 // Increase default max listeners to avoid AbortSignal warnings
 EventEmitter.setMaxListeners(20);
@@ -90,6 +99,9 @@ const LOOP_GUARDED_TOOLS = new Set(['repo_map', 'glob', 'grep', 'list_dir', 'fil
 // work), and it resets whenever a write moves the workspace revision, which
 // is what keeps re-running a test suite after an edit perfectly fine.
 const REPEAT_BUDGET_TOOLS = { read: 2, bash: 3, bash_session: 3 };
+// Calls that maintain the turn rather than do its work. Repeating them is not
+// a loop, and a loop diagnosis naming one sends the user after the wrong thing.
+const BOOKKEEPING_TOOLS = new Set(['todo_write', 'ask_user']);
 // Read-only calls are safe to collapse when a provider emits the exact same
 // request more than once in one response. Mutation and stateful tools are
 // deliberately excluded: two identical writes or shell commands can still
@@ -633,10 +645,19 @@ export class Agent {
    * apart from a task that genuinely needs more calls.
    */
   _mostRepeatedToolCall() {
+    // Counted for this turn only. The registry lives for the whole session,
+    // so the raw count blamed a turn for repeats made hours earlier — "the
+    // same call ran 5 times" once meant five plans set across a day of work.
+    // Bookkeeping calls are left out: re-setting the todo list or asking the
+    // user again is not what a stuck turn looks like.
+    const baseline = this._turnCallBaseline || new Map();
     let top = null;
-    for (const entry of Object.values(this.workingMemory.toolCalls || {})) {
+    for (const [key, entry] of Object.entries(this.workingMemory.toolCalls || {})) {
       if (!entry || typeof entry.count !== 'number') continue;
-      if (!top || entry.count > top.count) top = entry;
+      if (BOOKKEEPING_TOOLS.has(entry.name)) continue;
+      const count = entry.count - (baseline.get(key) || 0);
+      if (count <= 0) continue;
+      if (!top || count > top.count) top = { ...entry, count };
     }
     if (!top) return null;
     const firstArg = Object.values(top.args || {}).find(v => typeof v === 'string');
@@ -645,6 +666,36 @@ export class Agent {
       count: top.count,
       preview: firstArg ? String(firstArg).replace(/\s+/g, ' ').slice(0, 60) : '',
     };
+  }
+
+  /**
+   * What to tell the user when a turn has used its whole tool-call budget.
+   * The two causes want opposite advice: a model repeating one call would only
+   * loop twice as long on twice the budget, while a genuinely large task
+   * wants the room. A loop is one call taking a real share of the turn — not
+   * any call that happened three times in eighty.
+   */
+  _toolBudgetAdvice(limit, toolCallCount) {
+    const repeated = this._mostRepeatedToolCall();
+    const looping = repeated && repeated.count >= 3 && repeated.count >= toolCallCount * 0.25;
+    if (looping) {
+      return `La stessa chiamata è stata ripetuta ${repeated.count} volte: ${repeated.name}${repeated.preview ? ` (${repeated.preview})` : ''}.`
+        + ' È un loop, e un limite più alto lo allungherebbe soltanto: riformula la richiesta, oppure esegui tu quel comando e incolla il risultato.';
+    }
+    return 'Il compito è semplicemente grande: scrivi "continua" per riprendere da qui, dividilo in richieste più piccole,'
+      + ` oppure alza il limite aggiungendo "maxToolCallsPerTurn": ${limit * 2} a .ettore/config.json.`;
+  }
+
+  // Where this turn's counts start from; see _mostRepeatedToolCall.
+  _markTurnToolBaseline() {
+    const wm = this.workingMemory;
+    this._turnCallBaseline = new Map(Object.entries(wm.toolCalls || {}).map(([key, entry]) => [key, entry?.count || 0]));
+    this._turnToolStatsBaseline = Object.values(wm.toolStats || {}).reduce((total, n) => total + Number(n || 0), 0);
+  }
+
+  _toolsCompletedThisTurn() {
+    const total = Object.values(this.workingMemory.toolStats || {}).reduce((sum, n) => sum + Number(n || 0), 0);
+    return Math.max(0, total - (this._turnToolStatsBaseline || 0));
   }
 
   _updateWorkingMemoryGoal(userPrompt) {
@@ -1102,6 +1153,7 @@ export class Agent {
   }
 
   _queueNamedTurnOverlay(kind, data = {}) {
+    if (kind === 'tool_loop_finalize' && data.reason) this._lastFinalizeReason = data.reason;
     const text = buildTurnOverlay(kind, data);
     this._queueTurnOverlay(text);
   }
@@ -1126,31 +1178,42 @@ export class Agent {
     const summary = Object.fromEntries(
       Object.entries(verdicts).map(([key, v]) => [key, v.value === null ? null : Number(v.value.toFixed(2))]),
     );
-    emitter?.emit('jevJudgment', { verdicts: summary, ms: Date.now() - started, usage });
+    emitter?.emit('jevJudgment', { verdicts: summary, ms: Date.now() - started, usage, preTurn: this._jevPreTurn || null });
     this._debugLog(emitter, 'jev.judged', { verdicts: summary, ms: Date.now() - started });
     return verdicts;
   }
 
   /**
-   * The judgment made before the first model call: how the request should be
-   * investigated, and which skills apply to it. One request carries both — and
-   * one question per skill — because Jev evaluates them in parallel against a
-   * single state, so the user waits for one round trip rather than several.
+   * The judgment made before the first model call, and what the agent does
+   * about it. One request carries every question — the approach, whether the
+   * request is ambiguous, whether it takes several steps, and one question per
+   * skill — because Jev evaluates them in parallel against a single state, so
+   * the user waits for one round trip rather than several.
    *
-   * Returns nothing useful unless Jev is on and confident; every other case
-   * leaves the turn with the heuristics it already had.
+   * Jev acts on what it is sure of, and each action only ever adds to the
+   * turn:
+   *   - ambiguous  → the model asks the user one question before anything else
+   *                  (and nothing is explored for a request not yet understood);
+   *   - explore    → the explore sub-agent runs NOW and its report opens the
+   *                  turn. It used to be a suggestion the model was free to
+   *                  ignore, and models searching by hand ignored it;
+   *   - none       → answer directly, without touring the codebase;
+   *   - multi_step → the planning reminder the word heuristics missed.
+   * An unsure, failing or absent Jev leaves the turn with the heuristics it
+   * already had.
    */
-  async _judgePreTurn(promptText, emitter, signal) {
+  async _judgePreTurn(promptText, emitter, signal, { planningEnabled = false } = {}) {
     const client = getJevClient();
     if (!client) return null;
     const skills = this.skillSystem.getAllSkills().filter(skill => skill.enabled);
-    const { approach, skills: verdicts, error, ms } = await judgePreTurn(
+    const { approach, flags = {}, skills: verdicts, error, ms } = await judgePreTurn(
       client,
       { prompt: promptText, skills },
       { signal },
     );
     if (error) {
       this._debugLog(emitter, 'jev.preturn_unavailable', { error });
+      emitter?.emit('jevError', { error });
       return null;
     }
 
@@ -1168,18 +1231,126 @@ export class Agent {
       });
     }
 
+    const sure = verdict => verdict?.decisive === true && verdict.yes === true;
+    const ambiguous = sure(flags.ambiguous);
+    const multiStep = sure(flags.multi_step);
+    const actions = [];
+    const overlays = [];
+
+    if (ambiguous) {
+      overlays.push(buildTurnOverlay('jev_clarify'));
+      actions.push('clarify');
+    } else if (approach.decisive && approach.choice === 'explore') {
+      emitter?.emit('jevRoute', { choice: approach.choice, confidence: approach.confidence, decisive: true, ms, actions: ['explore'] });
+      const report = await this._jevExploreFirst(promptText, emitter, signal);
+      if (report) {
+        actions.push('explore');
+      } else {
+        // The sub-agent could not deliver; fall back to pointing at it.
+        overlays.push(buildTurnOverlay('explore_first'));
+        actions.push('explore_hint');
+      }
+    } else if (approach.decisive && approach.choice === 'none' && !multiStep) {
+      overlays.push(buildTurnOverlay('jev_answer_directly'));
+      actions.push('answer');
+    }
+
+    const planAllowed = this.config.requireExplicitPlan !== false
+      && !['off', 'never'].includes(this.config.explicitPlan);
+    if (multiStep && !ambiguous && !planningEnabled && planAllowed) {
+      this.messages.push({ role: 'user', content: PLANNING_REMINDER });
+      this._planningActive = true;
+      emitter?.emit('planningStarted', { prompt: promptText, source: 'jev' });
+      actions.push('plan');
+    }
+
+    if (overlays.length) this._queueTurnOverlay(overlays.join('\n\n'));
+
+    const flagSummary = Object.fromEntries(
+      Object.entries(flags).map(([key, v]) => [key, v?.value == null ? null : Number(v.value.toFixed(2))]),
+    );
+    this._jevPreTurn = { choice: approach.choice, confidence: approach.confidence, decisive: approach.decisive, actions };
     emitter?.emit('jevRoute', {
       choice: approach.choice,
       confidence: approach.confidence,
       decisive: approach.decisive,
       ms,
+      actions,
+      flags: flagSummary,
+      done: true,
     });
-    this._debugLog(emitter, 'jev.routed', { choice: approach.choice, confidence: approach.confidence, ms });
-    if (approach.decisive && approach.choice === 'explore') {
-      this._queueNamedTurnOverlay('explore_first');
-      return 'explore';
-    }
+    this._debugLog(emitter, 'jev.routed', { choice: approach.choice, confidence: approach.confidence, flags: flagSummary, actions, ms });
     return approach.choice;
+  }
+
+  /**
+   * Run the explore sub-agent on the request itself, before the main model's
+   * first step, and open the turn with its report. Returns the report, or
+   * null when the sub-agent could not produce one.
+   *
+   * The report goes into the conversation as a message rather than a turn
+   * overlay: an overlay lasts one provider call, and the report has to be
+   * there for every step of the turn that builds on it.
+   */
+  async _jevExploreFirst(promptText, emitter, signal) {
+    if (this._isSubagent) return null;
+    const id = `jev-explore-${Date.now()}`;
+    const args = { question: String(promptText).replace(/\s+/g, ' ').slice(0, 160), by: 'jev' };
+    const question = 'Investigate the codebase for the request below and report what the main agent needs in order to act on it: '
+      + 'where the relevant code lives (file:line), how the parts involved work together, and which files a change would have to touch. '
+      + `Do not propose the change itself.\n\nREQUEST: ${String(promptText).slice(0, 4000)}`;
+    emitter?.emit('toolStart', { id, name: 'explore', args, jev: true });
+    let report = null;
+    try {
+      report = await this._exploreWithSubagent({ question }, emitter, signal);
+    } finally {
+      emitter?.emit('toolEnd', { id, name: 'explore', args, output: report ?? 'Error: interrupted', jev: true });
+    }
+    if (!report || /^Error:/.test(report) || /came back with nothing/.test(report)) return null;
+    this.messages.push({
+      role: 'user',
+      content: '[Jev — exploration already done]\n'
+        + 'Jev judged that this request needs a search across the codebase, so the explore sub-agent has already run on it before your first step. '
+        + 'Its report follows. Build on it: go straight to the files it points at, and do not repeat the searches it has already answered.\n\n'
+        + report,
+    });
+    this._debugLog(emitter, 'jev.explored', { reportChars: report.length });
+    return report;
+  }
+
+  /**
+   * Ask Jev, now and then, whether the turn is getting anywhere. Returns the
+   * action to take, or null when no check was due, Jev is off, or it could
+   * not answer. The main agent only: a sub-agent is short and bounded.
+   */
+  async _jevProgressCheck(guard, { prompt, toolCallCount, touchedFiles }, emitter, signal) {
+    if (this._isSubagent || this._isLite || this.mode !== 'build') return null;
+    const reason = progressCheckDue(guard, {
+      toolCallCount,
+      repeatedCount: this._mostRepeatedToolCall()?.count || 0,
+    });
+    if (!reason) return null;
+    const client = getJevClient();
+    if (!client) return null;
+    guard.lastCheckAt = toolCallCount;
+    const check = await judgeProgress(client, {
+      prompt,
+      recent: guard.recent,
+      toolsRan: toolCallCount,
+      filesTouched: [...touchedFiles],
+    }, { signal });
+    if (!check.ok) {
+      this._debugLog(emitter, 'jev.guard_unavailable', { error: check.error });
+      return null;
+    }
+    const decision = decideProgressAction(check.verdicts, guard);
+    if (decision.action === 'correct') guard.corrections++;
+    const verdicts = Object.fromEntries(
+      Object.entries(check.verdicts).map(([key, v]) => [key, v.value === null ? null : Number(v.value.toFixed(2))]),
+    );
+    emitter?.emit('jevGuard', { ...decision, reason, ms: check.ms, verdicts, toolCallCount });
+    this._debugLog(emitter, 'jev.guard', { ...decision, reason, verdicts });
+    return decision;
   }
 
   _createTurnRecoveryState() {
@@ -1341,6 +1512,10 @@ export class Agent {
     // no extra LLM call, no extra latency. The TUI can surface the plan to
     // the user, and the user can correct/cancel before the tool loop starts.
     const planningEnabled = shouldPlanExplicitly(promptText, this.config);
+    // Per turn: a plan asked for by an earlier turn is not this one's, and
+    // left set it kept the stream parser waiting for a plan nobody requested.
+    this._planningActive = false;
+    this._jevPreTurn = null;
     if (planningEnabled) {
       this.messages.push({ role: 'user', content: PLANNING_REMINDER });
       this._planningActive = true;
@@ -1374,6 +1549,10 @@ export class Agent {
     let iterations = 0;
     let todoEmitted = false;
     const turnRecoveryState = this._createTurnRecoveryState();
+    this._markTurnToolBaseline();
+    this._lastFinalizeReason = '';
+    // Jev's view of the turn while it runs. See _jevProgressCheck.
+    const jevGuard = createProgressGuardState();
     let mutationToolUsed = false;
     let verificationDone = false;
     // Memoized tool route for this turn — see the routing block inside the loop.
@@ -1561,7 +1740,7 @@ export class Agent {
       && !continuation
       && promptText.trim().length >= 15
     ) {
-      await this._judgePreTurn(promptText, emitter, controller.signal);
+      await this._judgePreTurn(promptText, emitter, controller.signal, { planningEnabled });
     }
 
     try {
@@ -1812,15 +1991,36 @@ export class Agent {
         // not execute it and do not fall through to the generic max-iteration
         // error: the work already performed is still useful, and the user
         // can continue from this preserved conversation on the next prompt.
-        if (forceTextOnlyNextTurn && iterations === this.maxIterations && result.type === 'tool_calls') {
-          const summary = `Ho raggiunto il limite di ${this.maxIterations} passaggi in questo turno. Il lavoro già eseguito è conservato: continuo da qui.`;
+        //
+        // The same holds for every other text-only turn — the tool budget, a
+        // duplicate or read-only streak, Jev's stop. The tool budget used to be
+        // the exception: the ignored call was counted against the budget a
+        // second time and the turn ended on a red "Tool-call limit reached"
+        // after the work had in fact gone fine.
+        //
+        // Not for a model stuck on malformed calls: that path ends on its own
+        // diagnosis — likely a model bug, and which calls were rejected — which
+        // says far more than "stopped here" would.
+        if (forceTextOnlyNextTurn && result.type === 'tool_calls' && turnRecoveryState.invalidToolCallStreak < 2) {
+          const reason = iterations === this.maxIterations
+            ? `ho raggiunto il limite di ${this.maxIterations} passaggi in questo turno`
+            : toolBudgetFinalizeUsed
+              ? `ho usato tutte le ${this.maxToolCallsPerTurn} chiamate di tool concesse a un turno`
+              : (this._lastFinalizeReason ? `mi fermo qui (${this._lastFinalizeReason})` : 'mi fermo qui');
+          const files = [...touchedFiles];
+          const fileNote = files.length
+            ? ` File modificati in questo turno: ${files.slice(0, 8).map(file => shortenPath(file, 3)).join(', ')}${files.length > 8 ? ` e altri ${files.length - 8}` : ''}.`
+            : '';
+          const advice = toolBudgetFinalizeUsed ? ` ${this._toolBudgetAdvice(this.maxToolCallsPerTurn, toolCallCount)}` : '';
+          const summary = `${reason.charAt(0).toUpperCase()}${reason.slice(1)}. Il lavoro già eseguito è conservato (${this._toolsCompletedThisTurn()} tool completati).${fileNote}`
+            + (advice || ' Scrivi "continua" per riprendere da dove sono arrivato.');
           this.messages.push({ role: 'assistant', content: summary });
           emitter?.emit('complete', summary);
-          emitTurnState('completed', { reason: 'max_iterations_recovered' });
+          emitTurnState('completed', { reason: iterations === this.maxIterations ? 'max_iterations_recovered' : 'text_only_recovered' });
           this._debugLog(emitter, 'turn.completed', {
             iterations,
             toolCallCount,
-            reason: 'max_iterations_recovered',
+            reason: iterations === this.maxIterations ? 'max_iterations_recovered' : 'text_only_recovered',
           });
           return summary;
         }
@@ -2295,54 +2495,26 @@ export class Agent {
       if (toolCallCount + effectiveBatchToolCallCount > this.maxToolCallsPerTurn) {
         const limit = this.maxToolCallsPerTurn;
         const attempted = toolCallCount + effectiveBatchToolCallCount;
-        const callSummary = callNames.join(', ');
-        // First breach: land the turn instead of losing it. Every other loop
+        // Land the turn instead of losing it. Every other loop
         // brake in this file (duplicate batches, read-only streaks, invalid
         // tool calls, iteration ceiling) gives the model one text-only turn to
         // report what it found; the tool-call budget was the only one that
         // threw away up to `limit` tool calls of real work. The rejected batch
         // is not executed and its assistant tool_calls are not persisted —
         // strict providers reject a tool_call without a matching result.
-        if (!toolBudgetFinalizeUsed) {
-          toolBudgetFinalizeUsed = true;
-          forceTextOnlyNextTurn = true;
-          this._queueNamedTurnOverlay('tool_loop_finalize', {
-            reason: `the ${limit} tool-call budget for this turn is exhausted; answer with what you already have`,
-          });
-          emitter?.emit('loopRecovery', { reason: 'tool_call_limit', iteration: iterations });
-          this._debugLog(emitter, 'turn.tool_call_limit_finalize', { limit, attempted, callNames });
-          continue;
-        }
-        // Second breach: the model kept calling tools even after being sent an
-        // empty tool list. Now it is a hard stop.
-        // The two causes want opposite advice, and the execution registry can
-        // tell them apart: a model repeating one command would only loop twice
-        // as long on twice the budget, while a genuinely large task wants room.
-        const repeated = this._mostRepeatedToolCall();
-        const looping = repeated && repeated.count >= 3;
-        const touched = [...touchedFiles].slice(0, 6);
-        const completedToolCount = Object.values(this.workingMemory.toolStats || {})
-          .reduce((total, count) => total + Number(count || 0), 0);
-        const progress = completedToolCount > 0
-          ? ` Il lavoro già eseguito è conservato (${completedToolCount} tool completati${touched.length ? `; file toccati: ${touched.join(', ')}` : ''}).`
-          : ' Nessun tool di questo batch è stato eseguito.';
-        emitter?.emit('error',
-          `Tool-call limit reached for this turn (${limit}). The model tried to issue ${attempted} tool-calls in a single turn: [${callSummary}]. ` +
-          progress +
-          (looping
-            ? `The same call ran ${repeated.count} times: ${repeated.name}${repeated.preview ? ` (${repeated.preview})` : ''}. `
-              + `That is a loop, and a bigger budget would only make it longer — rephrase the request, or run that command yourself and paste the result.`
-            : `This usually means the task is large enough to need more headroom. `
-              + `Raise the limit by adding "maxToolCallsPerTurn": ${limit * 2} to .ettore/config.json, or split the task into smaller turns.`)
-        );
-        emitTurnState('failed', { reason: 'tool_call_limit' });
-        this._debugLog(emitter, 'turn.failed', {
-          reason: 'tool_call_limit',
-          limit,
-          attempted,
-          callNames,
+        //
+        // There is no second breach to handle here. The landing turn is sent
+        // with no tools, and a provider that answers it with a tool call anyway
+        // is caught before the tool path, where the turn ends with what it has
+        // and the advice from _toolBudgetAdvice.
+        toolBudgetFinalizeUsed = true;
+        forceTextOnlyNextTurn = true;
+        this._queueNamedTurnOverlay('tool_loop_finalize', {
+          reason: `the ${limit} tool-call budget for this turn is exhausted; answer with what you already have`,
         });
-        return;
+        emitter?.emit('loopRecovery', { reason: 'tool_call_limit', iteration: iterations });
+        this._debugLog(emitter, 'turn.tool_call_limit_finalize', { limit, attempted, callNames });
+        continue;
       }
       toolCallCount += effectiveBatchToolCallCount;
       emitTurnState('tool_call', { tools: callNames });
@@ -2765,6 +2937,27 @@ export class Agent {
         }
       } else {
         turnRecoveryState.invalidToolCallStreak = 0;
+      }
+
+      // Jev watching the turn while it runs. Only a turn not already being
+      // wound down is worth checking; see src/jev/progress-guard.js.
+      for (const r of results) recordToolForGuard(jevGuard, r);
+      recordBatchForGuard(jevGuard, results);
+      if (!forceTextOnlyNextTurn && !this._pendingTurnOverlay) {
+        const verdict = await this._jevProgressCheck(jevGuard, {
+          prompt: promptText,
+          toolCallCount,
+          touchedFiles,
+        }, emitter, controller.signal);
+        if (verdict?.action === 'correct') {
+          this._queueNamedTurnOverlay('jev_course_correct', { issues: verdict.issues });
+        } else if (verdict?.action === 'stop') {
+          forceTextOnlyNextTurn = true;
+          this._queueNamedTurnOverlay('tool_loop_finalize', {
+            reason: 'Jev judged that the turn is still going round in circles after being told once to change course',
+          });
+          emitter?.emit('loopRecovery', { reason: 'jev_guard', iteration: iterations });
+        }
       }
 
       // Cheap lossy shrink before the heavier LLM-driven compress so the

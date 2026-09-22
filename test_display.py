@@ -231,7 +231,11 @@ def print_screen(screen, cols, sidebar_w, highlight_issues):
 
 # ─── Test scenarios ───────────────────────────────────────────────────────────
 
-SIDEBAR_W = 32   # matches tui-native.js sidebarWidth
+def sidebar_w_for(cols):
+    """Mirror of sidebarWidthFor(cols, 'auto') in src/app/tui-native.js."""
+    room = max(24, cols - 40)
+    target = min(64, max(32, round(cols * 0.34)))
+    return min(target, room)
 
 def run_scenario(label, cols, rows):
     print(f"\n{'═'*70}")
@@ -242,8 +246,8 @@ def run_scenario(label, cols, rows):
         print("  ✗ No output captured — app failed to start?")
         return []
     screen = reconstruct(raw, cols, rows)
-    issues = analyze(screen, cols, rows, SIDEBAR_W)
-    print_screen(screen, cols, SIDEBAR_W, issues)
+    issues = analyze(screen, cols, rows, sidebar_w_for(cols))
+    print_screen(screen, cols, sidebar_w_for(cols), issues)
     if issues:
         print(f"\n  Issues found ({len(issues)}):")
         for iss in issues:

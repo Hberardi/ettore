@@ -196,7 +196,7 @@ First steps
 
       output += group('Core commands', ['help', 'status', 'doctor', 'providers', 'models', 'connect', 'use', 'disconnect']);
       output += group('Session and project', ['clear', 'new', 'sessions', 'resume', 'init', 'memory', 'skills', 'mission', 'compress', 'agent', 'caveman', 'approvals', 'history', 'team', 'loop']);
-      output += group('Configuration', ['keys', 'config', 'jev', 'theme', 'system', 'version', 'exit']);
+      output += group('Configuration', ['keys', 'config', 'jev', 'theme', 'sidebar', 'system', 'version', 'exit']);
       output += '\nUse /help <command> for details, for example /help connect.';
 
       return output.trimEnd();
@@ -439,7 +439,7 @@ ${setupHint()}`;
         if (!getJevKey()) return 'Jev: off — no API key saved.\nActivate it with /jev active <api key> (key from https://console.typesafe.ai/keys).';
         const model = getConfig('jevModel') || JEV_DEFAULT_MODEL;
         const head = isJevEnabled()
-          ? `Jev: on — model ${model}, key ${maskSecret(getJevKey())}.\nThe agent asks it to judge each finished turn. Turn it off with /jev out.`
+          ? `Jev: on — model ${model}, key ${maskSecret(getJevKey())}.\nIt reads each request, watches each turn and its shell commands, and judges each finished turn. Turn it off with /jev out.`
           : `Jev: off — key ${maskSecret(getJevKey())} is saved but not in use.\nTurn it back on with /jev active.`;
         return [head, ...trafficLines()].join('\n');
       };
@@ -456,9 +456,9 @@ ${setupHint()}`;
             ? activateJev(key)
             : (saveConfig('jevEnabled', true), { masked: maskSecret(getJevKey()), model: getConfig('jevModel') || JEV_DEFAULT_MODEL });
           return `Jev on — model ${model}, key ${masked}.\n`
-            + 'The agent now asks Jev to judge each finished turn: whether it announced work without doing it, '
-            + 'deferred it back to you, or is genuinely done. Jev only overrides the existing check when it is sure, '
-            + 'and a failed call changes nothing.\n'
+            + 'Jev now reads each request before the turn (ask first, plan first, explore first), watches the turn '
+            + 'while its tools run, reads risky shell commands before they run, and judges each finished turn. '
+            + 'It only acts when it is sure, can add a confirmation but never remove one, and a failed call changes nothing.\n'
             + 'Turn it off with /jev out.';
         } catch (error) {
           return `Could not activate Jev: ${error.message}`;
@@ -824,6 +824,32 @@ ${setupHint()}`;
     }
   },
   
+  sidebar: {
+    description: 'Width of the right panel: auto (follows the terminal), wide, narrow, or a number of columns',
+    usage: 'sidebar [auto|wide|narrow|<columns>]',
+    aliases: [],
+    handler: async (args) => {
+      const [raw] = args;
+      const current = getConfig('sidebarWidth') ?? 'auto';
+      if (!raw) {
+        return `Right panel: ${current}.\n`
+          + 'Usage: /sidebar auto | wide | narrow | <columns>\n'
+          + '  auto    about a third of the terminal (default)\n'
+          + '  wide    nearly half of it, for long model names, paths and tool names\n'
+          + '  narrow  the old fixed 32 columns\n'
+          + '  <n>     exactly n columns (at least 24); the transcript always keeps 40';
+      }
+      const word = String(raw).toLowerCase();
+      const columns = Number.parseInt(word, 10);
+      let value;
+      if (['auto', 'wide', 'narrow'].includes(word)) value = word;
+      else if (/^\d+$/.test(word) && columns >= 24 && columns <= 200) value = columns;
+      else return `Invalid width "${raw}". Use auto, wide, narrow, or a number of columns from 24 to 200.`;
+      saveConfig('sidebarWidth', value);
+      return { action: 'setSidebar', value };
+    },
+  },
+
   theme: {
     description: 'Change UI theme (default/midnight/matrix/forest)',
     usage: 'theme <name>',

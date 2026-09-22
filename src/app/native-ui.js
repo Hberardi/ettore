@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { emitKeypressEvents } from 'readline';
-import { TUI, THEMES, setTheme } from './tui-native.js';
+import { TUI, THEMES, setTheme, sidebarWidthFor } from './tui-native.js';
 import { connectionManager, ConnectionManager } from '../providers/index.js';
 import { PROVIDER_REGISTRY } from '../providers/registry.js';
 import { loadConfig, getConfig } from '../config/index.js';
@@ -345,6 +345,8 @@ export async function startApp(options = {}) {
 
   const savedTheme = getConfig('theme');
   if (savedTheme && THEMES[savedTheme]) setTheme(savedTheme, { persist: false });
+  const savedSidebar = getConfig('sidebarWidth');
+  if (savedSidebar != null) tui.sidebarPreference = savedSidebar;
 
   // Restore auto-approve state from persisted config so user doesn't have to
   // re-toggle on every session start.
@@ -861,6 +863,21 @@ export async function startApp(options = {}) {
   });
 
   // Show a confirmation toast when the agent saves project memory
+  // A command the regex let through and Jev flagged. The confirmation that
+  // follows asks the question; this line says who is asking and why.
+  uiBridge.on('jevCommand', ({ command, value, flagged, ms }) => {
+    if (!flagged) return;
+    tui.jevActive = true;
+    const shown = String(command || '').replace(/\s+/g, ' ').slice(0, 80);
+    tui.messages.push({
+      role: 'system',
+      text: `◆ Jev (${ms}ms) — comando rischioso (${Number(value).toFixed(2)}): ${shown}`,
+      tools: [],
+      id: Date.now() + Math.random(),
+    });
+    tui.needsRender = true;
+  });
+
   uiBridge.on('memorySaved', ({ section, projectRoot: _projectRoot }) => {
     tui.messages.push({
       role: 'system',
@@ -1264,62 +1281,86 @@ export async function startApp(options = {}) {
     tui.needsRender = true;
   });
 
-  // Jev judged the turn. Shown only when it actually says something decisive:
-  // a line on every turn would be noise, and a silent decision layer would be
-  // worse — the user has to be able to see why a turn was pushed on.
-  emitter.on('jevJudgment', ({ verdicts, ms }) => {
+  // Jev says something on every turn it judges: one compact line with its
+  // verdict, even when it only confirms what the harness already thought. A
+  // judgment layer that speaks only when it overrules looks, most of the
+  // time, like one that is not there. What Jev *does* — explore, a question
+  // first, a plan, a correction — gets a line of its own when it happens.
+  const pushJev = (text) => {
     tui.jevActive = true;
+    tui.messages.push({ role: 'system', text: `◆ Jev ${text}`, tools: [], id: Date.now() + Math.random() });
+    tui.needsRender = true;
+  };
+  const isDecisive = value => typeof value === 'number' && Math.abs(value - 0.5) >= 0.25;
+  const ROUTE_LABELS = { direct: 'diretto', explore: 'ricerca estesa', none: 'nessuna lettura di codice' };
+
+  emitter.on('jevJudgment', ({ verdicts = {}, ms, preTurn }) => {
     tui.jevLastMs = ms;
-    const decisive = Object.entries(verdicts || {})
-      .filter(([, value]) => typeof value === 'number' && Math.abs(value - 0.5) >= 0.25);
-    if (!decisive.length) return;
     const LABELS = {
       announced: 'lavoro annunciato ma non fatto',
       deferred: 'lavoro rimandato all\'utente',
       unapplied_code: 'codice mostrato invece che scritto',
-      complete: 'richiesta completata',
     };
-    const parts = decisive.map(([key, value]) => `${LABELS[key] || key}: ${value > 0.5 ? 'sì' : 'no'}`);
-    tui.messages.push({
-      role: 'system',
-      text: `◆ Jev (${ms}ms) — ${parts.join(' · ')}`,
-      tools: [],
-      id: Date.now(),
-    });
-    tui.needsRender = true;
+    const parts = [];
+    const complete = verdicts.complete;
+    if (typeof complete === 'number') {
+      const word = !isDecisive(complete) ? 'incerto' : complete > 0.5 ? 'sì' : 'no';
+      parts.push(`completata: ${word} (${complete.toFixed(2)})`);
+    }
+    for (const [key, label] of Object.entries(LABELS)) {
+      const value = verdicts[key];
+      if (isDecisive(value) && value > 0.5) parts.push(`${label} (${value.toFixed(2)})`);
+    }
+    if (preTurn?.choice) {
+      parts.push(`approccio: ${ROUTE_LABELS[preTurn.choice] || preTurn.choice}${typeof preTurn.confidence === 'number' ? ` ${preTurn.confidence.toFixed(2)}` : ''}`);
+    }
+    pushJev(`(${ms}ms) — ${parts.join(' · ') || 'nessun verdetto utilizzabile'}`);
   });
 
-  // The pre-turn routing decision. Shown only when it actually redirects the
-  // turn: "Jev thought about it and changed nothing" is not worth a line.
-  emitter.on('jevRoute', ({ choice, confidence, decisive, ms }) => {
-    if (!decisive || choice !== 'explore') return;
+  // The pre-turn decision, when it changes how the turn starts.
+  emitter.on('jevRoute', ({ confidence, ms, actions = [], done }) => {
     tui.jevActive = true;
-    tui.messages.push({
-      role: 'system',
-      text: `◆ Jev (${ms}ms) — ricerca estesa: delego a explore (confidenza ${Number(confidence).toFixed(2)})`,
-      tools: [],
-      id: Date.now(),
-    });
-    tui.needsRender = true;
+    if (!done) {
+      // Sent before the exploration starts, so the wait has a reason.
+      if (actions.includes('explore')) {
+        pushJev(`(${ms}ms) — ricerca estesa: lancio explore prima di iniziare (confidenza ${Number(confidence).toFixed(2)})`);
+      }
+      return;
+    }
+    const ACTION_LABELS = {
+      clarify: 'richiesta ambigua: prima una domanda a te',
+      explore_hint: 'ricerca estesa: explore non ha risposto, lo suggerisco al modello',
+      answer: 'nessun codice da guardare: risposta diretta',
+      plan: 'lavoro su più passi: chiedo un piano prima di iniziare',
+    };
+    const shown = actions.filter(action => ACTION_LABELS[action]).map(action => ACTION_LABELS[action]);
+    if (shown.length) pushJev(`(${ms}ms) — ${shown.join(' · ')}`);
+  });
+
+  // Jev checked the turn while it was running and did something about it.
+  emitter.on('jevGuard', ({ action, issues = [], ms, toolCallCount }) => {
+    if (action !== 'correct' && action !== 'stop') return;
+    const ISSUE_LABELS = {
+      looping: 'gira a vuoto',
+      stuck_on_error: 'ripete lo stesso errore',
+      off_track: 'sta uscendo dalla richiesta',
+    };
+    const what = issues.map(issue => ISSUE_LABELS[issue] || issue).join(', ');
+    pushJev(action === 'stop'
+      ? `(${ms}ms) — dopo ${toolCallCount} tool l'agente ${what} anche dopo la correzione: stop ai tool, chiudo con quello che c'è`
+      : `(${ms}ms) — dopo ${toolCallCount} tool l'agente ${what}: gli chiedo di cambiare strada`);
   });
 
   // Jev changed which skills guide the turn. Only shown when it actually
   // differs from what the word scoring picked.
   emitter.on('jevSkills', ({ before, after, ms }) => {
-    tui.jevActive = true;
     const added = after.filter(n => !before.includes(n));
     const dropped = before.filter(n => !after.includes(n));
     const parts = [];
     if (added.length) parts.push(`+${added.join(', ')}`);
     if (dropped.length) parts.push(`−${dropped.join(', ')}`);
     if (!parts.length) return;
-    tui.messages.push({
-      role: 'system',
-      text: `◆ Jev (${ms}ms) — skill: ${parts.join(' · ')}`,
-      tools: [],
-      id: Date.now(),
-    });
-    tui.needsRender = true;
+    pushJev(`(${ms}ms) — skill: ${parts.join(' · ')}`);
   });
 
   emitter.on('jevError', ({ error }) => {
@@ -1804,6 +1845,12 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
         return;
       }
       if (result && typeof result === 'object' && result.action === 'setTheme') { setTheme(result.theme); tui.needsRender = true; return; }
+      if (result && typeof result === 'object' && result.action === 'setSidebar') {
+        tui.sidebarPreference = result.value;
+        showCommandOutput(cmdName, `Right panel: ${result.value} — ${sidebarWidthFor(tui.cols, result.value)} columns on this terminal.`);
+        tui.needsRender = true;
+        return;
+      }
       if (typeof result === 'string' && result.length > 0) {
         showCommandOutput(cmdName, result);
         tui.needsRender = true;

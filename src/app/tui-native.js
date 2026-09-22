@@ -87,6 +87,36 @@ export const THEMES = {
 let activeTheme = THEMES.default;
 const C = new Proxy({}, { get: (_, k) => activeTheme[k] || '' });
 
+// ─── Sidebar width ───────────────────────────────────────────────────────────
+//
+// The panel used to be a fixed 32 columns on every terminal. On a 200-column
+// screen that left the model name, the cwd, the skills and the tool names cut
+// to a few characters while 160 columns went to the transcript. It now takes a
+// share of the width, never less than it had and never so much that the
+// transcript drops under the 40 columns it always kept.
+export const SIDEBAR_PREFERENCES = ['auto', 'wide', 'narrow'];
+const SIDEBAR_NARROW = 32;
+const MAIN_MIN_COLS = 40;
+
+/**
+ * Columns for the right panel on a terminal `cols` wide.
+ * @param {'auto'|'wide'|'narrow'|number} preference  set with /sidebar
+ */
+export function sidebarWidthFor(cols, preference = 'auto') {
+  const room = Math.max(24, cols - MAIN_MIN_COLS);
+  let target;
+  if (typeof preference === 'number' && Number.isFinite(preference)) {
+    target = Math.max(24, Math.round(preference));
+  } else if (preference === 'narrow') {
+    target = SIDEBAR_NARROW;
+  } else if (preference === 'wide') {
+    target = Math.min(90, Math.max(40, Math.round(cols * 0.45)));
+  } else {
+    target = Math.min(64, Math.max(SIDEBAR_NARROW, Math.round(cols * 0.34)));
+  }
+  return Math.min(target, room);
+}
+
 export function setTheme(name, options = {}) {
   if (THEMES[name]) {
     activeTheme = THEMES[name];
@@ -210,7 +240,9 @@ class TUI {
     this._lastFrameWasModal = false;
     this.exitConfirmMode = false;
     this.currentPlan = [];
-    this.sidebarWidth = 32;
+    // What /sidebar asked for; the width itself follows the terminal.
+    this.sidebarPreference = 'auto';
+    this.sidebarWidth = SIDEBAR_NARROW;
     // /loop runtime — written by native-ui.js on start/advance/stop, read
     // by _renderSidebar. Null when no loop has run in this session.
     this.loopStatus = null;
@@ -280,7 +312,8 @@ class TUI {
       return;
     }
 
-    const sidebarWidth = Math.min(this.sidebarWidth, Math.max(24, this.cols - 40));
+    const sidebarWidth = sidebarWidthFor(this.cols, this.sidebarPreference);
+    this.sidebarWidth = sidebarWidth;
     const sidebarContentWidth = Math.max(1, sidebarWidth - 1);
     const mainWidth = Math.max(20, this.cols - sidebarWidth - 1);
 
@@ -449,7 +482,15 @@ class TUI {
   }
 
   _renderMessageFull(msg, maxWidth) {
-    if (msg.role === 'todos') return this._renderTodoBlock(msg.items, maxWidth);
+    if (msg.role === 'todos') {
+      // While a turn is streaming, its bubble already carries the plan at the
+      // top (see _renderStreamingFull). Drawing the Tasks block as well put
+      // the same list on screen twice, one above the other. The bubble copy
+      // wins because it stays beside the live output; this one shows when no
+      // turn is running.
+      if (this.streaming && this.currentPlan.length > 0) return [];
+      return this._renderTodoBlock(msg.items, maxWidth);
+    }
 
     const isUser = msg.role === 'user';
     const isSys = msg.role === 'system';
@@ -949,7 +990,9 @@ class TUI {
 
     // Show plan (if any) at the top of the message bubble
     if (this.currentPlan.length > 0) {
-      const maxPlan = Math.min(this.currentPlan.length, 5);
+      // The only copy of the plan on screen while the turn runs, so it shows
+      // a typical plan in full rather than cutting it at five.
+      const maxPlan = Math.min(this.currentPlan.length, 8);
       for (let i = 0; i < maxPlan; i++) {
         const item = this.currentPlan[i];
         const icon = item.status === 'done' ? `${C.ok}✔${C.reset}`
@@ -1231,7 +1274,9 @@ class TUI {
     } else {
       lines.push(`${C.dim}version unknown${C.reset}`);
     }
-    lines.push(`${C.border}${'━'.repeat(Math.max(4, width))}${C.reset}`);
+    // One short of the panel: a full-width rule reached the truncation limit
+    // and came out ending in "…".
+    lines.push(`${C.border}${'━'.repeat(Math.max(4, width - 1))}${C.reset}`);
 
     // /loop section: only when there's something to show. Either an active
     // loop (top-of-mind status: which step is running and how many remain)

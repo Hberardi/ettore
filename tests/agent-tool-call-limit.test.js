@@ -33,11 +33,12 @@ test('Agent: non-numeric or zero maxToolCallsPerTurn falls back to default', () 
   assert.equal(makeAgent({ maxToolCallsPerTurn: null }).maxToolCallsPerTurn, 80);
 });
 
-test('Agent: a model that keeps calling tools past the budget is stopped with a helpful error', async () => {
+test('Agent: a model that keeps calling tools past the budget ends the turn with what it has, and advice', async () => {
   // Client emits a batch of 5 tool-calls in a single turn; limit is set to 4
   // so the very first batch already overflows. This client ignores the empty
-  // tool list it gets for the recovery turn and keeps calling tools, which is
-  // what turns the soft landing into a hard stop.
+  // tool list it gets for the landing turn and keeps calling tools. That used
+  // to end on a red "Tool-call limit reached" error; the work is kept either
+  // way, so the turn now closes normally and says why and what to do next.
   const client = {
     async turn() {
       return {
@@ -74,23 +75,14 @@ test('Agent: a model that keeps calling tools past the budget is stopped with a 
   emitter.on('loopRecovery', (r) => recoveries.push(r));
 
   const result = await agent.run('do thing', emitter);
-  // The budget is only fatal on the second breach: the first one asks the
-  // model to wrap up.
   assert.ok(recoveries.some((r) => r.reason === 'tool_call_limit'));
-  // Should NOT have completed normally — should return undefined when limited.
-  assert.equal(result, undefined);
-  assert.equal(errors.length, 1);
-  const err = errors[0];
-  // Message must contain the limit, the attempted count, the call names, and
-  // a hint about how to raise the limit.
-  assert.match(err, /Tool-call limit reached for this turn \(4\)/);
-  assert.match(err, /5 tool-calls/);
-  assert.match(err, /maxToolCallsPerTurn/);
-  assert.match(err, /\.ettore\/config\.json/);
-  // Turn should be marked failed.
-  assert.ok(states.some((s) => s && s.state === 'failed'));
+  assert.deepEqual(errors, [], 'using the budget is not an error');
+  assert.match(result, /tutte le 4 chiamate di tool/);
+  assert.match(result, /maxToolCallsPerTurn": 8/, 'a big task is told how to get more room');
+  assert.match(result, /\.ettore\/config\.json/);
+  assert.ok(states.some((s) => s && s.state === 'completed'));
+  assert.ok(!states.some((s) => s && s.state === 'failed'));
 });
-
 
 test('Agent: exhausting the tool-call budget lands the turn instead of losing the work', async () => {
   // First batch overflows the budget; on the recovery turn the model complies
@@ -208,7 +200,7 @@ test('Agent: a command repeated with nothing changed in between is refused early
   assert.ok(outputs.some(o => /already ran 3 times/.test(o)), `expected a refusal telling the model why: ${outputs.slice(-1)}`);
 });
 
-test('Agent: the hard stop names the repeated command instead of advising a bigger budget', async () => {
+test('Agent: a turn that spends its budget on one command is called a loop, not a big task', async () => {
   const call = (id) => ({ id, function: { name: 'bash', arguments: JSON.stringify({ command: 'npm test' }) } });
   const client = {
     async turn() {
@@ -219,15 +211,38 @@ test('Agent: the hard stop names the repeated command instead of advising a bigg
   const agent = agentWithClient(client, { maxToolCallsPerTurn: 4, maxIterations: 8 });
   agent._getAllToolHandlers = () => ({ bash: async () => 'ok' });
 
-  const emitter = new EventEmitter();
-  const errors = [];
-  emitter.on('error', (msg) => errors.push(msg));
+  const result = await agent.run('lancia i test', new EventEmitter());
 
-  await agent.run('lancia i test', emitter);
+  assert.match(result, /ripetuta \d+ volte: bash \(npm test\)/);
+  assert.match(result, /un limite più alto lo allungherebbe soltanto/);
+  assert.match(result, /Il lavoro già eseguito è conservato/);
+  assert.doesNotMatch(result, /maxToolCallsPerTurn/, 'raising the limit is the wrong advice for a loop');
+});
 
-  assert.equal(errors.length, 1);
-  assert.match(errors[0], /The same call ran \d+ times: bash \(npm test\)/);
-  assert.match(errors[0], /a bigger budget would only make it longer/);
-  assert.match(errors[0], /Il lavoro già eseguito è conservato/);
-  assert.doesNotMatch(errors[0], /maxToolCallsPerTurn/, 'raising the limit is the wrong advice for a loop');
+test('Agent: repeats from earlier turns and todo bookkeeping are not a loop', async () => {
+  // The report that prompted this: a turn that edited six templates hit the
+  // budget and was told "the same call ran 5 times: todo_write (set)" — five
+  // plans set across the whole session, blamed on this turn as a loop.
+  let n = 0;
+  const client = {
+    async turn() {
+      n++;
+      const calls = [
+        { id: `t${n}`, function: { name: 'todo_write', arguments: JSON.stringify({ action: 'set', items: ['a', 'b'] }) } },
+        { id: `r${n}`, function: { name: 'bash', arguments: JSON.stringify({ command: `echo step ${n}` }) } },
+      ];
+      return { type: 'tool_calls', tool_calls: calls, message: { role: 'assistant', content: '', tool_calls: calls } };
+    },
+  };
+  const agent = agentWithClient(client, { maxToolCallsPerTurn: 12, maxIterations: 20 });
+  agent._getAllToolHandlers = () => ({ bash: async () => 'ok', todo_write: async () => 'ok' });
+  // What an earlier turn left in the session-wide registry.
+  for (let i = 0; i < 5; i++) await agent._recordToolExecution('bash', { command: 'npm test' }, 'ok');
+
+  const result = await agent.run('rifai i template', new EventEmitter());
+
+  assert.doesNotMatch(result, /loop/i, result);
+  assert.match(result, /maxToolCallsPerTurn/, 'a big task is advised to get more room');
+  assert.match(result, /\(12 tool completati\)|\(\d+ tool completati\)/);
+  assert.doesNotMatch(result, /\(1[7-9] tool completati\)/, 'earlier turns are not counted as this turn\'s work');
 });

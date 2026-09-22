@@ -77,3 +77,32 @@ test('sidebar renders Mission Control progress', () => {
   assert.match(sidebar, /plan 1\/2/);
   assert.match(sidebar, /wave 1\/1/);
 });
+
+// The plan was drawn twice while a turn ran: once as the Tasks block in the
+// scrollback, once at the top of the streaming bubble, one above the other.
+function tuiWithPlan({ streaming }) {
+  const tui = new TUI();
+  tui.availableHeight = 60;
+  const todos = ['Leggere il file', 'Modificare la funzione', 'Eseguire i test'].map(text => ({ text, status: 'pending' }));
+  tui.todos = todos;
+  tui.currentPlan = [...todos];
+  tui.messages = [
+    { role: 'user', text: 'fai tre cose', tools: [], id: 1 },
+    { role: 'todos', items: todos, id: 2 },
+  ];
+  tui.streaming = streaming
+    ? { text: 'Inizio dal primo passo.', reasoning: '', tools: [], startedAt: Date.now(), lastActivityAt: Date.now() }
+    : null;
+  return stripAllAnsi(tui._renderMessages().join('\n'));
+}
+
+test('the plan is on screen once while a turn runs', () => {
+  const screen = tuiWithPlan({ streaming: true });
+  assert.equal(screen.split('Modificare la funzione').length - 1, 1, screen);
+});
+
+test('the plan is on screen once when no turn runs', () => {
+  const screen = tuiWithPlan({ streaming: false });
+  assert.equal(screen.split('Modificare la funzione').length - 1, 1, screen);
+  assert.match(screen, /Tasks/);
+});

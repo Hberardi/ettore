@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
 
 import { JevClient, JevError, readNoul, readChoice } from '../src/jev/index.js';
-import { judgeTurn, resolveVerdict, buildTurnState, TURN_QUESTIONS } from '../src/jev/turn-judge.js';
+import { judgeTurn, resolveVerdict, buildTurnState, TURN_QUESTIONS, PRETURN_FLAGS } from '../src/jev/turn-judge.js';
 
 let dir;
 const previousConfigDir = process.env.ETTORE_CONFIG_DIR;
@@ -602,27 +602,36 @@ function jevRouting(choice, confidence) {
   });
 }
 
-test('a request that needs a codebase-wide search is pointed at explore', async () => {
+test('a request that needs a codebase-wide search is explored before the first step', async () => {
   const { activateJev } = await import('../src/jev/index.js');
   activateJev('sk-test-key-value');
   const originalFetch = globalThis.fetch;
   globalThis.fetch = jevRouting('explore', 0.88);
   try {
-    let promptSeenByModel = '';
+    const prompts = [];
     const emitter = new EventEmitter();
     const routes = [];
+    const started = [];
     emitter.on('jevRoute', r => routes.push(r));
+    emitter.on('toolStart', e => started.push(e));
     await agentInBuild({
       async turn(messages) {
-        promptSeenByModel = messages.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n');
+        const text = messages.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n');
+        prompts.push(text);
+        // The first call is the sub-agent's; it reports back.
+        if (/exploration sub-agent/i.test(text) && !/exploration already done/.test(text)) {
+          return { type: 'text', content: 'Il login passa da src/auth/login.js:12 a src/auth/session.js:40.' };
+        }
         return { type: 'text', content: 'Ecco come funziona il flusso.' };
       },
     }).run('come funziona il flusso di autenticazione da cima a fondo?', emitter);
 
-    assert.equal(routes.length, 1);
-    assert.equal(routes[0].choice, 'explore');
-    assert.equal(routes[0].decisive, true);
-    assert.match(promptSeenByModel, /delegate this one to `explore`/i, 'the turn must carry the nudge');
+    assert.ok(routes.some(r => r.choice === 'explore' && r.decisive && r.actions.includes('explore')));
+    assert.ok(started.some(e => e.name === 'explore' && e.jev), 'the exploration is shown as a tool Jev started');
+    const mainTurn = prompts.find(text => /exploration already done/.test(text));
+    assert.ok(mainTurn, 'the main model must start with the report in its conversation');
+    assert.match(mainTurn, /src\/auth\/login\.js:12/);
+    assert.doesNotMatch(mainTurn, /delegate this one to `explore`/i, 'no nudge once the work is done');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -722,7 +731,7 @@ function jevPreTurn({ approach = 'direct', confidence = 0.9, skills = {} } = {})
     };
     // Map each skill question back by the description it carries.
     for (const [id, q] of Object.entries(body.questions)) {
-      if (id === 'approach') continue;
+      if (!id.startsWith('skill_')) continue;
       const covers = q.instructions.skill_covers;
       const match = Object.entries(skills).find(([desc]) => covers.includes(desc));
       answers[id] = { type: 'noul', noul: match ? match[1] : 0.5 };
@@ -819,8 +828,9 @@ test('both decisions ride in one request, not two', async () => {
 
     const preTurn = bodies.filter(b => b.questions.approach);
     assert.equal(preTurn.length, 1, 'one pre-turn call, however many skills');
-    // The approach plus one question per enabled skill, together.
-    assert.equal(Object.keys(preTurn[0].questions).length, 1 + SKILLS.length);
+    // The approach, the two request flags and one question per enabled
+    // skill, together.
+    assert.equal(Object.keys(preTurn[0].questions).length, 1 + Object.keys(PRETURN_FLAGS).length + SKILLS.length);
     resetJevStats();
     assert.equal(getJevStats().calls, 0);
   } finally {

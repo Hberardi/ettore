@@ -111,6 +111,12 @@ const SHELLS = {
   cmd: file => ({ name: 'cmd', file, args: ['/d', '/s', '/c'] }),
 };
 
+// resolveShell runs for every command, and on Windows each lookup is a sweep
+// of PATH × PATHEXT through existsSync — a few hundred synchronous stats on a
+// filesystem where every one is slow and may pass through the antivirus. The
+// answer only changes when the inputs do, so it is kept per input.
+const shellCache = new Map();
+
 /**
  * The shell used to run a free-form command string.
  *
@@ -121,6 +127,16 @@ const SHELLS = {
  * would rather have Git Bash.
  */
 export function resolveShell({ env = process.env, platform = process.platform } = {}) {
+  const key = [platform, env.ETTORE_SHELL || '', env.PATH || env.Path || '', env.PATHEXT || '', env.ComSpec || ''].join('\0');
+  const cached = shellCache.get(key);
+  if (cached) return { ...cached, args: [...cached.args] };
+  const shell = pickShell({ env, platform });
+  if (shellCache.size > 16) shellCache.clear();
+  shellCache.set(key, shell);
+  return { ...shell, args: [...shell.args] };
+}
+
+function pickShell({ env, platform }) {
   const requested = String(env.ETTORE_SHELL || '').trim().toLowerCase();
   if (requested) {
     if (requested === 'bash' || requested === 'sh') {
@@ -230,14 +246,17 @@ export function killProcessTree(child, signal, {
   if (!pid) return false;
 
   if (platform === 'win32') {
-    const force = signal === 'SIGKILL';
-    const args = ['/pid', String(pid), '/T'];
-    if (force) args.push('/F');
+    // Always /F. Without it taskkill asks the process to close its window,
+    // and a console command run with windowsHide has none: it answers "can
+    // only be terminated forcefully" and nothing stops. Every timeout and
+    // every Esc then waited out the SIGKILL grace as well — two blocking
+    // taskkill runs and 2s of a UI that looked hung — for the same /F that
+    // ended it in the end. Windows has no graceful signal to give here.
     try {
-      spawnSyncFn('taskkill', args, { stdio: 'ignore', windowsHide: true });
+      spawnSyncFn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, timeout: 5000 });
       return true;
     } catch {
-      try { child.kill(force ? 'SIGKILL' : 'SIGTERM'); return true; } catch { return false; }
+      try { child.kill('SIGKILL'); return true; } catch { return false; }
     }
   }
 

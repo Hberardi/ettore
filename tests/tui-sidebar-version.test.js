@@ -95,3 +95,26 @@ test('native-ui.js startApp wires tui.version and tui.updateStatus', () => {
   assert.match(text, /tui\.updateStatus\s*=/);
   assert.match(text, /checkForUpdate\(\)\.then/);
 });
+
+test('the right panel grows with the terminal, and keeps the transcript readable', async () => {
+  const { sidebarWidthFor } = await import('../src/app/tui-native.js');
+  assert.equal(sidebarWidthFor(80), 32, 'a small terminal keeps the width it always had');
+  assert.ok(sidebarWidthFor(120) > 32, 'a standard terminal gets more room for names and paths');
+  assert.ok(sidebarWidthFor(200) <= 64, 'auto never takes over a wide screen');
+  assert.ok(sidebarWidthFor(160, 'wide') > sidebarWidthFor(160));
+  assert.equal(sidebarWidthFor(160, 'narrow'), 32);
+  assert.equal(sidebarWidthFor(160, 50), 50);
+  for (const cols of [60, 80, 120, 200]) {
+    for (const pref of ['auto', 'wide', 'narrow', 150]) {
+      assert.ok(cols - sidebarWidthFor(cols, pref) >= Math.min(40, cols - 24), `${cols}/${pref}: the transcript keeps its 40 columns`);
+    }
+  }
+});
+
+test('/sidebar validates the width and hands it to the UI', async () => {
+  const { builtinCommands } = await import('../src/commands/index.js');
+  assert.deepEqual(await builtinCommands.sidebar.handler(['wide']), { action: 'setSidebar', value: 'wide' });
+  assert.deepEqual(await builtinCommands.sidebar.handler(['48']), { action: 'setSidebar', value: 48 });
+  assert.match(await builtinCommands.sidebar.handler(['huge']), /Invalid width/);
+  assert.match(await builtinCommands.sidebar.handler([]), /Right panel: wide|Right panel: 48/);
+});

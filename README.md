@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.8.9-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.9.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -17,17 +17,17 @@ What changed in each release is in the [changelog](https://github.com/Hberardi/e
 - 💻 **Tool Execution** - bash, read, write, edit, grep, glob, web search, web fetch, image inspection, delegated codebase search
 - ✅ **Done means the tests pass** - when the agent changes code it runs your project's full test suite before handing the work back; a red suite goes back to the agent to fix, and it never reports "done" over failing tests ([details](#done-means-the-tests-pass))
 - 🖱️ **Runs your apps** - opens web apps in a real browser (reads the browser console: errors, exceptions, failed requests) and launches desktop apps (captures stdout/stderr, screenshots, clicks and types) to reproduce bugs before fixing them
-- 🎨 **Native TUI** - Custom ANSI renderer (no React/Ink) with themes and a sidebar
+- 🎨 **Native TUI** - Custom ANSI renderer (no React/Ink) with themes and a sidebar that grows with the terminal (`/sidebar auto|wide|narrow|<n>`)
 - 🖼️ **Vision** - Reads local images; agent can discover, download, and inspect public web images
 - 📄 **Super OCR for PDF** - Extracts native text first, then automatically handles scanned and low-quality PDFs with preprocessing, deskew, denoise, adaptive thresholding, and multi-pass Tesseract OCR
-- 🪟 **Linux, macOS and Windows** - shell commands, code search and file edits work natively on each; see [Platform support](#platform-support)
+- 🪟 **Linux, macOS and Windows** - shell commands, code search and file edits work natively on each; on Windows the `bash` tool keeps PowerShell warm instead of starting it per command; see [Platform support](#platform-support)
 - 🔌 **Easy Setup** - `/connect <provider> <key>` or environment variables
 - 💾 **Persistent Config** - API keys saved in a per-user config directory, `0600` on Linux/macOS ([details](#configuration))
 - 🧠 **Context Tools** - compression, project memory, working memory, sessions, auto-approve
 - ⚡ **Fast on every provider** - requests are shaped so the provider can reuse its prompt cache, context summaries are written by a fast model of the same provider, and `--verbose-tokens` reports time-to-first-token and cached tokens per call
 - 🔍 **Delegated search** - `explore` answers one question about the codebase in a separate read-only context and returns a short report with `file:line` references; the greps and full-file reads behind it never enter the main conversation
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn, and its steps drive the progress panel and the auto-continue, so a plan left half-done is resumed instead of dropped
-- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev judges each finished turn (did the model announce work without doing it? is the request really carried out?), lets a turn continue without a declared plan, picks the skills that apply, and routes codebase-wide searches to the `explore` sub-agent; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
+- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev reads each request before the turn (asks you first when it is ambiguous, starts a plan when it takes several steps, runs the `explore` sub-agent when it needs a codebase-wide search), watches the turn while it runs and steps in when it goes round in circles, asks before risky shell commands the regex does not know, and judges each finished turn — one line per turn in the chat; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
 - 🧩 **Nine plugins included** - PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts, and a security-tool wrapper for authorised testing (`kali`) — installed with `/plugins install`, and you can write your own
 
 ## Installation
@@ -90,6 +90,12 @@ $env:ETTORE_SHELL = 'bash'   # PowerShell
 ```
 
 Accepted values: `bash`, `pwsh`, `powershell`, `cmd`, or a path to a shell.
+
+On Windows the `bash` tool keeps up to three PowerShells warm instead of
+starting one per command, which is most of what a command used to cost. Each
+call still behaves like a fresh process — its own working directory and
+variables, `$env:` changes undone, stdin closed. `ETTORE_WARM_SHELL=0` goes
+back to one PowerShell per command.
 
 ### Running it from a terminal that works
 
@@ -265,6 +271,7 @@ installed, ETTORE keeps its native PDF and binary-text fallbacks.
 | `/keys list\|add\|remove` | Manage saved API keys |
 | `/reconnect [provider]` | Re-validate saved keys and reconnect |
 | `/theme <name>` | Switch theme (`default`, `midnight`, `matrix`, `forest`) |
+| `/sidebar [auto\|wide\|narrow\|<n>]` | Width of the right panel: `auto` follows the terminal (about a third of it), `wide` nearly half, `narrow` the old 32 columns, or exactly `n` columns. Saved across sessions. |
 | `/auto-approve [edits\|installs] on\|off` | Skip approval prompts (sensitive commands still prompt) |
 | `/config [key] [value] [--local]` | Show/set configuration; `--local` writes `.ettore/config.json` |
 | `/config max-iterations <1-200> [--local]` | Set the agent loop budget (default: 50) |
@@ -437,6 +444,24 @@ And `edit` helps when it misses: a block copied with the wrong indentation still
 applies, "not found" quotes the closest region of the file with line numbers,
 and a successful edit shows the changed lines.
 
+### When a turn runs out of tool calls
+
+A single turn may make up to 80 tool calls. When a big job reaches that, the
+turn is not thrown away: the agent gets one last step without tools to report
+what it did, and the turn ends with what was done, which files changed, and
+what to do next. If the provider ignores that and asks for another tool
+anyway, the turn still closes the same way rather than on an error.
+
+The advice depends on the cause. When one call has taken a real share of the
+turn — the same command over and over — it is a loop, and the answer names
+the call and says a bigger budget would only make it longer. Otherwise the job
+is simply large: type `continua` to pick up where it stopped, split it, or give
+the project more room in `.ettore/config.json`:
+
+```json
+{ "maxToolCallsPerTurn": 160 }
+```
+
 ## Jev — an optional judgment layer (TypeSafe)
 
 [Jev](https://docs.typesafe.ai/introduction) is TypeSafe's System One model. It
@@ -485,11 +510,12 @@ latency.
 single request and evaluated in parallel: did the model announce work without
 doing it, hand the remaining work back to you, show code instead of writing it
 to a file — and was the request actually carried out? Each answer either
-confirms or overrides the regex ETTORE would have used alone. When a judgment
-is decisive you see it:
+confirms or overrides the regex ETTORE would have used alone. Every judged turn
+gets one line, including the ones where Jev only agrees — a judgment layer that
+speaks only when it overrules looks absent most of the time:
 
 ```
-◆ Jev (814ms) — lavoro annunciato ma non fatto: sì
+◆ Jev (814ms) — completata: no (0.12) · lavoro annunciato ma non fatto (0.91) · approccio: diretto 0.88
 ```
 
 **2. It lets a turn continue without a declared plan.** Auto-continue normally
@@ -512,20 +538,53 @@ when it differs:
 ◆ Jev (210ms) — skill: +debug · −web-design
 ```
 
-**4. It routes searching to the sub-agent.** ETTORE has a read-only sub-agent
+**4. It explores before the first step.** ETTORE has a read-only sub-agent
 (the `explore` tool) that answers one question about the codebase in a context
 of its own and returns a short report, so the greps and reads behind it never
-fill the main conversation. It is offered on every build turn and models still
-search by hand. When Jev is confident a request needs a codebase-wide search,
-the turn opens with a nudge to delegate it. This one is asked *before* the first
-token, so it runs only for a fresh, non-trivial build request — never for a
+fill the main conversation. Offered as a tool, models still searched by hand.
+When Jev is confident a request needs a codebase-wide search, ETTORE runs the
+sub-agent itself, before the main model's first step, and the turn opens with
+its report. If the sub-agent comes back empty, the turn falls back to a nudge.
+
+```
+◆ Jev (240ms) — ricerca estesa: lancio explore prima di iniziare (confidenza 0.88)
+```
+
+**5. It reads the request before anything happens.** In the same call:
+
+- *ambiguous* — the request cannot be carried out without something only you
+  can supply. The model asks you one question (`ask_user`) before touching
+  anything, and nothing is explored for a request not yet understood.
+- *several steps* — the planning reminder the word heuristics missed is added,
+  so the turn starts from a plan. Not when planning is switched off.
+- *no code needed* — a concept question or a chat message is answered directly
+  instead of opening with a tour of the codebase.
+
+**6. It watches the turn while it runs.** Every eight tool calls, after two
+batches that all failed, or when one call keeps coming back, Jev is shown the
+last ten calls and asked whether the agent is going round in circles, stuck on
+the same error, or working on something the request did not ask for. The first
+time it is sure, the model is told to change course; if it is still circling
+after that, the tools are taken away and the turn closes with what it has.
+
+```
+◆ Jev (380ms) — dopo 9 tool l'agente gira a vuoto: gli chiedo di cambiare strada
+```
+
+**7. It reads shell commands before they run.** The `bash` tools already ask
+before `rm -rf`, `git push --force`, `sudo` and the other spellings a regex
+knows. Jev reads what a command would *do*, so `Remove-Item -Recurse -Force`,
+`find … -delete`, `curl … | sh` or `> config.json` get the same question. It
+can only add a confirmation, never remove one, and commands that plainly only
+read — `ls`, `git status`, `Get-Content`, a test run — are never sent.
+
+Decisions 3, 4 and 5 are made before the first token, and they travel in a
+single request — Jev evaluates every question in parallel against one state, so
+asking about the approach, the request and six skills costs one round trip. The
+pre-turn call runs only for a fresh, non-trivial build request — never for a
 continuation, a short message, or a lite model.
 
-Decisions 3 and 4 are made before the first token, and they travel in a single
-request — Jev evaluates every question in parallel against one state, so asking
-about the approach and about six skills costs one round trip, not seven.
-
-Items 2, 3 and 4 exist only with Jev on. They are reached through a decisive
+Items 2 to 7 exist only with Jev on. They are reached through a decisive
 verdict, and there is no verdict when Jev is off, unreachable or unsure.
 
 ### Checking it is really working
@@ -554,7 +613,7 @@ check instead of doing the work.
 ### Why it is safe to leave on
 
 - **Jev decides, it never writes.** No text of its own ever reaches you or the
-  transcript. It only answers questions about a turn that already happened.
+  transcript. It answers yes/no questions; what happens next is ETTORE's.
 - **It only acts when it is sure.** An answer near the middle — the model saying
   "could go either way" — is discarded, and the check ETTORE already had stands.
 - **Failure changes nothing.** No key, no network, a rate limit, a timeout: the
@@ -775,7 +834,8 @@ Prefer environment variables or `/connect` over `--api-key`; command-line
 arguments can be exposed in shell history and process lists.
 
 Other variables ETTORE reads: `ETTORE_SHELL` (which shell the agent's commands
-run in — see [Platform support](#platform-support)), `ETTORE_CHROME_BIN`,
+run in — see [Platform support](#platform-support)), `ETTORE_WARM_SHELL`
+(`0` turns off the warm PowerShells on Windows), `ETTORE_CHROME_BIN`,
 `ETTORE_AUTO_UPDATE`.
 
 ### Claude without an API key

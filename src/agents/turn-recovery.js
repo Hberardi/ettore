@@ -310,6 +310,26 @@ export function buildTurnOverlay(kind, data = {}) {
       'Before searching by hand, delegate this one to `explore`. It answers a question about the codebase in a separate read-only context and returns a short report with file:line references, so the repo_map, glob, grep and read output it needs never enters this conversation — which is what keeps the context for the actual work.'
       + ' Ask it one self-contained question naming the symbols, files or behaviour you are after, since it sees none of this conversation.'
       + ' Go straight to the tools yourself only if you already know the exact paths to read.',
+    // The rest of the Jev overlays below are reachable only with Jev on and
+    // decisive, like explore_first.
+    jev_clarify: () =>
+      'Jev read this request and judged it cannot be carried out as written: something only the user can supply is missing.'
+      + ' Before any other tool, ask the user ONE short question with `ask_user` that names exactly what is missing — which file or feature, which of the readings they mean, what the result should be — offering the likely answers as options.'
+      + ' Do not guess and do not start the work until they answer. If on reflection nothing is actually missing, go ahead and do the work.',
+    jev_answer_directly: () =>
+      'Jev judged that this request needs no look at the code: it is a question about a concept, a chat message, or a task already specified in full. Answer it directly; call tools only if the answer genuinely depends on something in the workspace.',
+    jev_course_correct: ({ issues = [] }) => {
+      const described = {
+        looping: 'you keep repeating the same kind of action without getting closer to the goal',
+        stuck_on_error: 'the same error keeps coming back and your attempts have not changed approach',
+        off_track: 'your recent calls are about something the request did not ask for',
+      };
+      const list = issues.map(key => described[key] || key).join('; and ');
+      return `Jev has been watching this turn's tool calls and judged that ${list}.`
+        + ' Stop and change course before the next call: re-read the original request, say in one sentence what is actually blocking you, and then take a genuinely different step —'
+        + ' read the code behind the error instead of re-running it, narrow the search, or go back to the part of the request still open.'
+        + ' If the blocker is something only the user can resolve, ask them with `ask_user` rather than trying again.';
+    },
     unaddressed_targets: ({ targetList }) =>
       `The request named ${targetList}, and nothing in this turn read, searched or changed `
       + 'it — so whatever was asked for it has not been done. Either carry out the request on it now '

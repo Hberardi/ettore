@@ -30,6 +30,8 @@ const DEFAULT_IGNORE = [
 // Files larger than this are almost never source, and reading them would cost
 // more than the match is worth.
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+// How many file reads the searcher keeps in flight at once.
+const READ_AHEAD = 16;
 
 function looksBinary(buffer) {
   // A NUL in the first block is what `grep` itself uses to decide.
@@ -101,17 +103,25 @@ export async function searchFiles({
   // the model and passed back to read/edit, so they have to be the platform's.
   files = files.map(file => resolvePath(file)).sort((a, b) => a.localeCompare(b));
 
+  // Reading one file at a time left the disk idle between reads, and on
+  // Windows — the platform this fallback exists for — each open is slow and
+  // passes through the antivirus. A small window of reads in flight hides
+  // that latency; matches are still reported in file order.
+  const read = file => readFileFn(file).catch(() => null);
+  const pending = files.slice(0, READ_AHEAD).map(read);
+  let next = pending.length;
+
   const lines = [];
-  for (const file of files) {
+  for (let f = 0; f < files.length; f++) {
     if (signal?.aborted) break;
     if (lines.length >= maxMatches) break;
 
-    let buffer;
-    try {
-      buffer = await readFileFn(file);
-    } catch {
-      continue; // unreadable (permissions, a race with a delete) — skip it
-    }
+    const file = files[f];
+    const buffer = await pending[f];
+    pending[f] = null;
+    if (next < files.length) pending[next] = read(files[next++]);
+    // unreadable (permissions, a race with a delete) — skip it
+    if (!buffer) continue;
     if (buffer.length > MAX_FILE_BYTES || looksBinary(buffer)) continue;
 
     // Split on \n and trim a trailing \r so a CRLF file reports the same text
