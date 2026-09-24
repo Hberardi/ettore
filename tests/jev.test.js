@@ -12,7 +12,9 @@ import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
 
 import { JevClient, JevError, readNoul, readChoice } from '../src/jev/index.js';
-import { judgeTurn, resolveVerdict, buildTurnState, TURN_QUESTIONS, PRETURN_FLAGS } from '../src/jev/turn-judge.js';
+import {
+  judgeTurn, resolveVerdict, buildTurnState, TURN_QUESTIONS, PRETURN_FLAGS, TOOL_FAMILY_QUESTIONS,
+} from '../src/jev/turn-judge.js';
 
 let dir;
 const previousConfigDir = process.env.ETTORE_CONFIG_DIR;
@@ -828,9 +830,11 @@ test('both decisions ride in one request, not two', async () => {
 
     const preTurn = bodies.filter(b => b.questions.approach);
     assert.equal(preTurn.length, 1, 'one pre-turn call, however many skills');
-    // The approach, the two request flags and one question per enabled
-    // skill, together.
-    assert.equal(Object.keys(preTurn[0].questions).length, 1 + Object.keys(PRETURN_FLAGS).length + SKILLS.length);
+    // Everything the turn is decided by, in one request: how to investigate,
+    // how hard it is, whether it splits into parts, the two request flags, one
+    // question per tool family and one per enabled skill.
+    const expected = 3 + Object.keys(PRETURN_FLAGS).length + Object.keys(TOOL_FAMILY_QUESTIONS).length + SKILLS.length;
+    assert.equal(Object.keys(preTurn[0].questions).length, expected);
     resetJevStats();
     assert.equal(getJevStats().calls, 0);
   } finally {

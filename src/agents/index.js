@@ -43,6 +43,7 @@ import {
   modelDeclaredCompletion,
   responseAnnouncesUnexecutedAction,
   responseLooksLikeUnappliedCode,
+  promptFileTargets,
   toolBatchExecutionGroups,
   unaddressedTargets,
   userLikelyRequestedWorkspaceEdit,
@@ -66,7 +67,11 @@ import { ReleaseGateCoordinator } from './release-gate-coordinator.js';
 import { commandWriteTargets, diffSnapshots, snapshotWorkspace } from './workspace-changes.js';
 import { getJevClient } from '../jev/index.js';
 import { shortenPath } from '../utils/platform.js';
+// At most this many sub-agents explore at once: three model streams is already
+// three times the tokens per second, and past that the reports stop fitting.
+const PARALLEL_EXPLORE_MAX = 3;
 import { judgePreTurn, judgeTurn, resolveVerdict } from '../jev/turn-judge.js';
+import { judgeContextKeep, MIN_CANDIDATES } from '../jev/context-keep.js';
 import {
   createProgressGuardState,
   decideProgressAction,
@@ -1043,8 +1048,16 @@ export class Agent {
    * opinion. An explicit setting wins in both, including a deliberate `max` in
    * plan mode.
    */
+  /**
+   * How much thinking to buy for this turn. A setting the user made wins; with
+   * none, Jev's read of the request decides — a one-line change does not need
+   * the reasoning budget of a refactor, and paying for it is time the user
+   * spends watching a spinner.
+   */
   _effortForMode() {
     if (this.config?.effort) return this.config.effort;
+    if (this._jevDifficulty === 'trivial') return 'low';
+    if (this._jevDifficulty === 'hard') return 'high';
     return this.mode === 'plan' ? 'medium' : null;
   }
 
@@ -1206,11 +1219,8 @@ export class Agent {
     const client = getJevClient();
     if (!client) return null;
     const skills = this.skillSystem.getAllSkills().filter(skill => skill.enabled);
-    const { approach, flags = {}, skills: verdicts, error, ms } = await judgePreTurn(
-      client,
-      { prompt: promptText, skills },
-      { signal },
-    );
+    const judged = await judgePreTurn(client, { prompt: promptText, skills }, { signal });
+    const { approach, flags = {}, skills: verdicts, error, ms } = judged;
     if (error) {
       this._debugLog(emitter, 'jev.preturn_unavailable', { error });
       emitter?.emit('jevError', { error });
@@ -1234,15 +1244,24 @@ export class Agent {
     const sure = verdict => verdict?.decisive === true && verdict.yes === true;
     const ambiguous = sure(flags.ambiguous);
     const multiStep = sure(flags.multi_step);
+    const difficulty = judged.difficulty?.decisive ? judged.difficulty.choice : null;
+    this._jevDifficulty = difficulty;
+    // Which tool families this turn gets — see selectToolDefinitions.
+    this._jevFamilies = judged.families || {};
     const actions = [];
     const overlays = [];
+    if (difficulty) actions.push(`effort:${this._effortForMode() || 'default'}`);
+    if (Object.keys(this._jevFamilies).length) actions.push('tools');
 
     if (ambiguous) {
       overlays.push(buildTurnOverlay('jev_clarify'));
       actions.push('clarify');
     } else if (approach.decisive && approach.choice === 'explore') {
+      // Parts that do not depend on each other can be looked into at the same
+      // time instead of one after the other.
+      const parallel = judged.independentParts?.decisive === true && judged.independentParts.yes === true;
       emitter?.emit('jevRoute', { choice: approach.choice, confidence: approach.confidence, decisive: true, ms, actions: ['explore'] });
-      const report = await this._jevExploreFirst(promptText, emitter, signal);
+      const report = await this._jevExploreFirst(promptText, emitter, signal, { parallel });
       if (report) {
         actions.push('explore');
       } else {
@@ -1257,11 +1276,24 @@ export class Agent {
 
     const planAllowed = this.config.requireExplicitPlan !== false
       && !['off', 'never'].includes(this.config.explicitPlan);
-    if (multiStep && !ambiguous && !planningEnabled && planAllowed) {
+    if ((multiStep || difficulty === 'hard') && !ambiguous && !planningEnabled && planAllowed) {
       this.messages.push({ role: 'user', content: PLANNING_REMINDER });
       this._planningActive = true;
       emitter?.emit('planningStarted', { prompt: promptText, source: 'jev' });
       actions.push('plan');
+    } else if (planningEnabled && difficulty === 'trivial' && !multiStep) {
+      // The heuristic asks for a plan by length and trigger words, so "rinomina
+      // la variabile x in y nel file z" buys a whole round trip of planning for
+      // a one-line change. Jev is the only reader here that can tell the two
+      // apart, and dropping the reminder is a turn the user does not wait for.
+      // The user's own `--plan` is not touched: planAllowed is false then.
+      const at = this.messages.findIndex(m => m.role === 'user' && m.content === PLANNING_REMINDER);
+      if (at !== -1 && planAllowed) {
+        this.messages.splice(at, 1);
+        this._planningActive = false;
+        emitter?.emit('planningSkipped', { prompt: promptText, source: 'jev' });
+        actions.push('no_plan');
+      }
     }
 
     if (overlays.length) this._queueTurnOverlay(overlays.join('\n\n'));
@@ -1292,21 +1324,42 @@ export class Agent {
    * overlay: an overlay lasts one provider call, and the report has to be
    * there for every step of the turn that builds on it.
    */
-  async _jevExploreFirst(promptText, emitter, signal) {
+  async _jevExploreFirst(promptText, emitter, signal, { parallel = false } = {}) {
     if (this._isSubagent) return null;
-    const id = `jev-explore-${Date.now()}`;
-    const args = { question: String(promptText).replace(/\s+/g, ' ').slice(0, 160), by: 'jev' };
-    const question = 'Investigate the codebase for the request below and report what the main agent needs in order to act on it: '
+    const request = String(promptText).slice(0, 4000);
+    const brief = target => 'Investigate the codebase for the request below and report what the main agent needs in order to act on it: '
       + 'where the relevant code lives (file:line), how the parts involved work together, and which files a change would have to touch. '
-      + `Do not propose the change itself.\n\nREQUEST: ${String(promptText).slice(0, 4000)}`;
-    emitter?.emit('toolStart', { id, name: 'explore', args, jev: true });
-    let report = null;
-    try {
-      report = await this._exploreWithSubagent({ question }, emitter, signal);
-    } finally {
-      emitter?.emit('toolEnd', { id, name: 'explore', args, output: report ?? 'Error: interrupted', jev: true });
-    }
-    if (!report || /^Error:/.test(report) || /came back with nothing/.test(report)) return null;
+      + `Do not propose the change itself.${target ? `\n\nLIMIT YOUR ANSWER TO: ${target}` : ''}\n\nREQUEST: ${request}`;
+
+    // Parts that do not depend on each other are explored at the same time:
+    // three sub-agents reading three files take as long as the slowest, not as
+    // long as all three. Only the files the request itself names — inventing
+    // the split would be writing, which Jev does not do.
+    const targets = parallel ? promptFileTargets(promptText).slice(0, PARALLEL_EXPLORE_MAX) : [];
+    const jobs = targets.length >= 2
+      ? targets.map(target => ({ label: target, question: brief(target) }))
+      : [{ label: String(promptText).replace(/\s+/g, ' ').slice(0, 160), question: brief(null) }];
+
+    const run = async (job) => {
+      const id = `jev-explore-${job.label}-${Date.now()}`;
+      const args = { question: job.label, by: 'jev' };
+      emitter?.emit('toolStart', { id, name: 'explore', args, jev: true });
+      let output = null;
+      try {
+        output = await this._exploreWithSubagent({ question: job.question }, emitter, signal);
+      } finally {
+        emitter?.emit('toolEnd', { id, name: 'explore', args, output: output ?? 'Error: interrupted', jev: true });
+      }
+      return { label: job.label, output };
+    };
+
+    const results = await Promise.all(jobs.map(run));
+    const usable = results.filter(r => r.output && !/^Error:/.test(r.output) && !/came back with nothing/.test(r.output));
+    if (!usable.length) return null;
+    const report = usable.length === 1
+      ? usable[0].output
+      : usable.map(r => `### ${r.label}\n${r.output}`).join('\n\n');
+    if (usable.length > 1) this._debugLog(emitter, 'jev.explored_parallel', { parts: usable.map(r => r.label) });
     this.messages.push({
       role: 'user',
       content: '[Jev — exploration already done]\n'
@@ -1316,6 +1369,43 @@ export class Agent {
     });
     this._debugLog(emitter, 'jev.explored', { reportChars: report.length });
     return report;
+  }
+
+  /**
+   * Which tool results the next elision must leave whole, or null.
+   *
+   * Asked only about results that are actually about to be cut, only once a
+   * batch of them has piled up, and each result at most once in a session —
+   * a verdict about "is this still needed" does not change while the result
+   * sits there unused. With Jev off this costs nothing and the heuristic
+   * decides alone, as it always did.
+   */
+  async _jevContextKeep(emitter, signal) {
+    const client = getJevClient();
+    if (!client) return null;
+    if (!this._jevKeepVerdicts) this._jevKeepVerdicts = new Map();
+    const candidates = this.compressor.elisionCandidates(this.messages)
+      .filter(candidate => !this._jevKeepVerdicts.has(candidate.id));
+    const known = new Set(
+      [...this._jevKeepVerdicts.entries()].filter(([, keep]) => keep).map(([id]) => id),
+    );
+    if (candidates.length < MIN_CANDIDATES) return known.size ? known : null;
+    const { ok, keep, judged, ms, error } = await judgeContextKeep(
+      client,
+      { goal: this.workingMemory.goal, candidates },
+      { signal },
+    );
+    if (!ok) {
+      this._debugLog(emitter, 'jev.keep_unavailable', { error });
+      return known.size ? known : null;
+    }
+    for (const id of judged) this._jevKeepVerdicts.set(id, keep.has(id));
+    for (const id of keep) known.add(id);
+    if (keep.size) {
+      emitter?.emit('jevKeep', { kept: keep.size, judged: judged.length, ms });
+      this._debugLog(emitter, 'jev.context_keep', { kept: keep.size, judged: judged.length, ms });
+    }
+    return known.size ? known : null;
   }
 
   /**
@@ -1410,6 +1500,12 @@ export class Agent {
     for (const name of ['toolStart', 'toolEnd']) {
       childEmitter.on(name, payload => emitter?.emit(name, { ...payload, subagent: true }));
     }
+    // The sub-agent's own model output never reaches the parent — it is the
+    // point of the sub-agent — but the parent's stall watchdog is counting
+    // from the moment the user pressed enter. Without a sign of life, a
+    // sub-agent thinking for long enough is killed as a stalled turn. The text
+    // is dropped; only the fact that something arrived is passed on.
+    childEmitter.on('token', () => emitter?.emit('subagentProgress'));
 
     const cancelSub = () => { try { sub.cancel(); } catch {} };
     parentSignal?.addEventListener?.('abort', cancelSub, { once: true });
@@ -1516,6 +1612,8 @@ export class Agent {
     // left set it kept the stream parser waiting for a plan nobody requested.
     this._planningActive = false;
     this._jevPreTurn = null;
+    this._jevDifficulty = null;
+    this._jevFamilies = null;
     if (planningEnabled) {
       this.messages.push({ role: 'user', content: PLANNING_REMINDER });
       this._planningActive = true;
@@ -1786,6 +1884,7 @@ export class Agent {
           // four tool schemas.
           verificationNeeded: editIntentLikely,
           maxTools: this.maxToolsPerRequest,
+          families: this._jevFamilies || null,
           includePluginTools: Boolean(this._pluginRegistry),
           editIntentSticky: this._editIntentActive,
         };
@@ -1825,7 +1924,9 @@ export class Agent {
         // first resort. Cuts the bulk of accumulated tool results while
         // preserving a hint of each one's content.
         if (this.compressor.autoEnabled) {
-          const shrunken = this.compressor.lossyShrink(this.messages);
+          const shrunken = this.compressor.lossyShrink(this.messages, {
+          keepIds: await this._jevContextKeep(emitter, controller.signal),
+        });
           if (shrunken !== this.messages) {
             this.messages = shrunken;
             emitter?.emit('tokenCount', estimateTokens(this.messages));
@@ -2964,7 +3065,9 @@ export class Agent {
       // big-tool-batch path doesn't burn an LLM call when head-tail elision
       // is enough.
       if (this.compressor.autoEnabled) {
-        const shrunken = this.compressor.lossyShrink(this.messages);
+        const shrunken = this.compressor.lossyShrink(this.messages, {
+          keepIds: await this._jevContextKeep(emitter, controller.signal),
+        });
         if (shrunken !== this.messages) {
           this.messages = shrunken;
           emitter?.emit('tokenCount', estimateTokens(this.messages));
@@ -2988,10 +3091,18 @@ export class Agent {
         break;
       }
     } catch (e) {
-      if (e.name === 'AbortError') {
+      // A provider SDK reports the cancel in its own words — the OpenAI client
+      // throws `APIUserAbortError: Request was aborted.` — which fell through to
+      // the generic error path and printed a second red line under the one that
+      // explained the cancel. The signal says what happened; the error's name
+      // is only one of the ways it says it.
+      if (e.name === 'AbortError' || controller?.signal?.aborted) {
         const reason = controller?.signal?.reason;
         const reasonText = String(reason?.message || reason || '');
-        if (/Agent turn timeout/i.test(reasonText)) {
+        // The harness's own deadlines — silence, and the ceiling on a model
+        // that streams forever without finishing — are faults to report, not a
+        // cancel the user asked for.
+        if (/Agent turn (timeout|ceiling)/i.test(reasonText)) {
           emitter?.emit('error', reasonText);
           emitTurnState('failed', { reason: 'timeout' });
           this._debugLog(emitter, 'turn.failed', { kind: 'timeout', reason: reasonText });

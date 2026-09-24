@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.10.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -27,7 +27,7 @@ What changed in each release is in the [changelog](https://github.com/Hberardi/e
 - ⚡ **Fast on every provider** - requests are shaped so the provider can reuse its prompt cache, context summaries are written by a fast model of the same provider, and `--verbose-tokens` reports time-to-first-token and cached tokens per call
 - 🔍 **Delegated search** - `explore` answers one question about the codebase in a separate read-only context and returns a short report with `file:line` references; the greps and full-file reads behind it never enter the main conversation
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn, and its steps drive the progress panel and the auto-continue, so a plan left half-done is resumed instead of dropped
-- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev reads each request before the turn (asks you first when it is ambiguous, starts a plan when it takes several steps, runs the `explore` sub-agent when it needs a codebase-wide search), watches the turn while it runs and steps in when it goes round in circles, asks before risky shell commands the regex does not know, and judges each finished turn — one line per turn in the chat; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
+- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev reads each request before the turn (asks you first when it is ambiguous, plans only when the work needs it, picks the tools and the reasoning effort the turn will actually use, and runs the `explore` sub-agent — several in parallel for independent parts — when a codebase-wide search is needed), watches the turn while it runs and steps in when it goes round in circles, keeps what the context compression was about to throw away, asks before risky shell commands the regex does not know, and judges each finished turn — one line per turn in the chat; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
 - 🧩 **Nine plugins included** - PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts, and a security-tool wrapper for authorised testing (`kali`) — installed with `/plugins install`, and you can write your own
 
 ## Installation
@@ -560,7 +560,36 @@ its report. If the sub-agent comes back empty, the turn falls back to a nudge.
 - *no code needed* — a concept question or a chat message is answered directly
   instead of opening with a tour of the codebase.
 
-**6. It watches the turn while it runs.** Every eight tool calls, after two
+**6. It decides what the turn costs.** Three choices that used to be made by
+word matching, in the same pre-turn call:
+
+- *Which tools the model is handed.* The router picks tool families with
+  regular expressions over the request, so "foto" reaches for the web tools and
+  "app" for the runtime ones — padding every request with schemas the turn
+  never uses, and sometimes leaving out the one it needed. Jev reads what the
+  request is for, and a decisive answer adds or removes a family. A turn that
+  has already edited keeps its edit tools regardless: what happened outranks a
+  prediction.
+- *How much thinking to buy.* A trivial request runs at low effort, a hard one
+  at high. An effort you set yourself always wins.
+- *Whether the plan is worth a round trip.* The heuristic asks for a `<plan>`
+  by length and trigger words, so a one-line rename buys a whole planning turn.
+  Jev drops the reminder when the work is trivial, and adds one when the work
+  is hard and the words did not notice.
+
+**7. It explores independent parts at the same time.** When the request names
+several files and Jev is sure what is found about one does not change what has
+to be found about another, up to three explore sub-agents run together instead
+of in sequence, and the turn opens with one report per part.
+
+**8. It says what to keep when the context is compressed.** Older tool results
+are cut to a one-line stump by age and shape, and the wrong cut is paid twice —
+in the tokens spent fetching it again, and in the step the user waits through.
+Jev is asked about the handful of results actually about to be cut, against the
+goal of the turn; a decisive "still needed" keeps one whole. Each result is
+judged at most once, and only once a batch has piled up.
+
+**9. It watches the turn while it runs.** Every eight tool calls, after two
 batches that all failed, or when one call keeps coming back, Jev is shown the
 last ten calls and asked whether the agent is going round in circles, stuck on
 the same error, or working on something the request did not ask for. The first
@@ -571,20 +600,20 @@ after that, the tools are taken away and the turn closes with what it has.
 ◆ Jev (380ms) — dopo 9 tool l'agente gira a vuoto: gli chiedo di cambiare strada
 ```
 
-**7. It reads shell commands before they run.** The `bash` tools already ask
+**10. It reads shell commands before they run.** The `bash` tools already ask
 before `rm -rf`, `git push --force`, `sudo` and the other spellings a regex
 knows. Jev reads what a command would *do*, so `Remove-Item -Recurse -Force`,
 `find … -delete`, `curl … | sh` or `> config.json` get the same question. It
 can only add a confirmation, never remove one, and commands that plainly only
 read — `ls`, `git status`, `Get-Content`, a test run — are never sent.
 
-Decisions 3, 4 and 5 are made before the first token, and they travel in a
-single request — Jev evaluates every question in parallel against one state, so
-asking about the approach, the request and six skills costs one round trip. The
-pre-turn call runs only for a fresh, non-trivial build request — never for a
-continuation, a short message, or a lite model.
+Decisions 3 to 7 are made before the first token, and they travel in a single
+request — Jev evaluates every question in parallel against one state, so asking
+about the approach, the request, seven tool families and six skills costs one
+round trip. The pre-turn call runs only for a fresh, non-trivial build request —
+never for a continuation, a short message, or a lite model.
 
-Items 2 to 7 exist only with Jev on. They are reached through a decisive
+Items 2 to 10 exist only with Jev on. They are reached through a decisive
 verdict, and there is no verdict when Jev is off, unreachable or unsure.
 
 ### Checking it is really working
@@ -614,6 +643,10 @@ check instead of doing the work.
 
 - **Jev decides, it never writes.** No text of its own ever reaches you or the
   transcript. It answers yes/no questions; what happens next is ETTORE's.
+- **It can make a turn cheaper, never less safe.** Where speed is the point —
+  the plan, the tool list, the effort, what survives compression — a decisive
+  verdict may also *remove* what a heuristic added. Confirmations are the
+  exception and stay one-way: Jev can add one, never take one away.
 - **It only acts when it is sure.** An answer near the middle — the model saying
   "could go either way" — is discarded, and the check ETTORE already had stands.
 - **Failure changes nothing.** No key, no network, a rate limit, a timeout: the

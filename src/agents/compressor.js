@@ -302,7 +302,38 @@ export class ContextCompressor {
   //
   // Activates at half the compression threshold — keeps the LLM-driven
   // compressor as the heavier hammer for when this isn't enough.
-  lossyShrink(messages, { keepLast = this.keepLast, maxChars = 200, headTail = 150 } = {}) {
+  /**
+   * The tool results this elision would cut to a stump, newest first, as the
+   * few facts needed to judge whether one is still worth keeping. Used to ask
+   * Jev before the cut is made — see src/jev/context-keep.js.
+   */
+  elisionCandidates(messages, { keepLast = this.keepLast, maxChars = 200 } = {}) {
+    const rest = messages.slice(1);
+    if (rest.length <= keepLast + 2) return [];
+    const head = rest.slice(0, rest.length - keepLast);
+    const protectedIds = workingSetToolIds(messages, head);
+    const origins = toolCallOrigins(messages);
+    const candidates = [];
+    for (let i = head.length - 1; i >= 0; i--) {
+      const m = head[i];
+      if (m.role !== 'tool' || m.__lossyShrunk) continue;
+      const text = String(m.content || '');
+      if (text.length <= maxChars * 2) continue;
+      if (protectedIds.has(m.tool_call_id)) continue;
+      const origin = String(origins.get(m.tool_call_id) || '');
+      const [tool, input = ''] = origin.includes('(') ? [origin.slice(0, origin.indexOf('(')), origin.slice(origin.indexOf('(') + 1, -1)] : [origin, ''];
+      candidates.push({
+        id: m.tool_call_id,
+        tool: tool || 'tool',
+        input: input.slice(0, 160),
+        size: text.length,
+        preview: text.replace(/\s+/g, ' ').slice(0, 240),
+      });
+    }
+    return candidates;
+  }
+
+  lossyShrink(messages, { keepLast = this.keepLast, maxChars = 200, headTail = 150, keepIds = null } = {}) {
     const halfThreshold = Math.max(2000, Math.floor(this.threshold / 2));
     const tokens = estimateTokens(messages);
     if (tokens <= halfThreshold) return messages;
@@ -329,7 +360,10 @@ export class ContextCompressor {
     }
 
     const origins = toolCallOrigins(messages);
+    // The heuristic's own set, plus anything a caller has been told to keep
+    // (Jev's reading of what the turn still needs).
     const protectedIds = workingSetToolIds(messages, head);
+    if (keepIds) for (const id of keepIds) protectedIds.add(id);
     const shrunkenHead = head.map((m) => {
       if (m.role !== 'tool') return m;
       const text = String(m.content || '');

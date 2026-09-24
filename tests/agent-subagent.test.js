@@ -142,3 +142,26 @@ test('a sub-agent run leaves the parent turn its abort signal and todo sink', as
   assert.doesNotMatch(todoResult, /only available during an agent turn/i);
   assert.deepEqual(todoLists.at(-1), ['uno', 'due']);
 });
+
+test('a sub-agent that is working keeps the parent turn looking alive', async () => {
+  // The stall watchdog counts from the moment the user pressed enter, and a
+  // sub-agent's output never reaches the parent. Without a sign of life, a
+  // long exploration was cancelled as a stalled turn.
+  const client = {
+    async turn(messages, tools, onToken) {
+      if (isSubagentTurn(messages)) {
+        onToken?.('sto ');
+        onToken?.('cercando…');
+        return { type: 'text', content: 'Sta in src/a.js:1.' };
+      }
+      return exploreCall({ question: 'dove sta il parser?' });
+    },
+  };
+  const emitter = new EventEmitter();
+  let alive = 0;
+  emitter.on('subagentProgress', () => { alive++; });
+
+  await makeAgent(client).run('dove sta il parser?', emitter);
+
+  assert.ok(alive > 0, 'the parent must hear that the sub-agent is getting somewhere');
+});

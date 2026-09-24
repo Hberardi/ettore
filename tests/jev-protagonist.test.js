@@ -50,7 +50,7 @@ function jsonResponse(body, status = 200) {
 }
 
 // One fake Jev for every kind of call, answering by which questions it got.
-function fakeJev({ approach = 'direct', confidence = 0.9, ambiguous = 0.1, multiStep = 0.1, progress = {}, destructive = 0.1, complete = 0.9 } = {}) {
+function fakeJev({ approach = 'direct', confidence = 0.9, ambiguous = 0.1, multiStep = 0.1, difficulty = null, families = {}, independent = 0.1, progress = {}, destructive = 0.1, complete = 0.9 } = {}) {
   const calls = [];
   const fn = async (_url, init) => {
     const body = JSON.parse(init.body);
@@ -61,6 +61,11 @@ function fakeJev({ approach = 'direct', confidence = 0.9, ambiguous = 0.1, multi
       answers.approach = { type: 'choice', choice: approach, confidence };
       answers.ambiguous = { type: 'noul', noul: ambiguous };
       answers.multi_step = { type: 'noul', noul: multiStep };
+      answers.independent_parts = { type: 'noul', noul: independent };
+      if (difficulty) answers.difficulty = { type: 'choice', choice: difficulty, confidence };
+      for (const [family, value] of Object.entries(families)) {
+        answers[`tools_${family}`] = { type: 'noul', noul: value };
+      }
     }
     if (q.looping) {
       for (const key of ['looping', 'stuck_on_error', 'off_track']) answers[key] = { type: 'noul', noul: progress[key] ?? 0.1 };
@@ -308,4 +313,196 @@ test('with Jev off a command the regex does not know runs without a question', a
   } finally {
     uiBridge.off('askUser', handler);
   }
+});
+
+// ── the operational decisions: which tools, how much effort, what to keep ──
+
+test('Jev adds the tool family the words missed and drops the one they imagined', async () => {
+  const { selectToolDefinitions } = await import('../src/agents/tool-router.js');
+  const defs = [
+    'read', 'write', 'edit', 'bash', 'grep', 'glob', 'repo_map', 'todo_write', 'git_status',
+    'websearch', 'webfetch', 'web_image', 'dev_server', 'browser_app', 'desktop_app',
+    'browser_check', 'read_server_console', 'read_pdf', 'read_doc', 'dep_inspect',
+    'run_tests', 'run_checks', 'bash_session',
+  ].map(name => ({ function: { name } }));
+  const names = context => selectToolDefinitions(defs, { mode: 'build', maxTools: 16, ...context }).map(t => t.function.name);
+
+  // "foto" and "app" reach for the web and runtime tools by wording alone.
+  const byWords = names({ prompt: 'sistema la foto storta nella app' });
+  assert.ok(byWords.includes('websearch') && byWords.includes('dev_server'));
+
+  const withJev = names({ prompt: 'sistema la foto storta nella app', families: { web: false, runtime: false } });
+  assert.ok(!withJev.includes('websearch'), 'a decisive no drops the family');
+  assert.ok(!withJev.includes('dev_server'));
+
+  const added = names({ prompt: 'sistema il bug', families: { runtime: true } });
+  assert.ok(added.includes('browser_app'), 'a decisive yes adds a family the words missed');
+
+  // A turn that has already edited keeps its edit tools whatever Jev thinks:
+  // what the turn has done outranks a prediction about what it would do.
+  const editing = names({ prompt: 'boh', families: { edit: false }, touchedFiles: 2 });
+  assert.ok(editing.includes('write'), 'an edit already made keeps the edit tools');
+  assert.ok(editing.includes('run_tests'), 'and the tools that check it');
+});
+
+test('a trivial request buys low effort and skips the plan the heuristic asked for', async () => {
+  await activate();
+  globalThis.fetch = fakeJev({ difficulty: 'trivial' });
+  const prompts = [];
+  const skipped = [];
+  const emitter = new EventEmitter();
+  emitter.on('planningSkipped', e => skipped.push(e));
+  let effortSeen;
+  const agent = agentInBuild({
+    async turn(messages, _tools, _onToken, _signal, opts) {
+      prompts.push(textOf(messages));
+      effortSeen = opts?.effort;
+      return { type: 'text', content: 'Fatto.' };
+    },
+  });
+  // "refactor" is a trigger word, so the heuristic asks for a plan even though
+  // this is a rename in one file.
+  await agent.run('refactor la variabile vecchioNome in nuovoNome in src/app/native-ui.js', emitter);
+
+  assert.equal(effortSeen, 'low');
+  assert.ok(skipped.some(e => e.source === 'jev'));
+  assert.doesNotMatch(prompts[0], /"steps": \[/, 'the planning reminder must be gone');
+});
+
+test('a hard request buys high effort and a plan', async () => {
+  await activate();
+  globalThis.fetch = fakeJev({ difficulty: 'hard' });
+  const prompts = [];
+  let effortSeen;
+  await agentInBuild({
+    async turn(messages, _tools, _onToken, _signal, opts) {
+      prompts.push(textOf(messages));
+      effortSeen = opts?.effort;
+      return { type: 'text', content: 'Fatto.' };
+    },
+  }).run('riscrivi il modulo di autenticazione', new EventEmitter());
+  assert.equal(effortSeen, 'high');
+  assert.match(prompts[0], /<plan>/);
+});
+
+test('an unsure difficulty leaves effort and planning exactly as they were', async () => {
+  await activate();
+  globalThis.fetch = fakeJev({ difficulty: 'trivial', confidence: 0.4 });
+  let effortSeen = 'untouched';
+  const skipped = [];
+  const emitter = new EventEmitter();
+  emitter.on('planningSkipped', e => skipped.push(e));
+  await agentInBuild({
+    async turn(_messages, _tools, _onToken, _signal, opts) {
+      effortSeen = opts?.effort ?? null;
+      return { type: 'text', content: 'Fatto.' };
+    },
+  }).run('refactor la variabile vecchioNome in nuovoNome in src/app/native-ui.js', emitter);
+  assert.equal(effortSeen, null, 'no effort of its own without a decisive verdict');
+  assert.deepEqual(skipped, [], 'the plan the heuristic asked for stays');
+});
+
+test('Jev keeps a tool result the compressor was about to cut', async () => {
+  const { judgeContextKeep, MIN_CANDIDATES } = await import('../src/jev/context-keep.js');
+  const { JevClient } = await import('../src/jev/index.js');
+  const candidates = Array.from({ length: MIN_CANDIDATES }, (_, i) => ({
+    id: `call_${i}`, tool: 'read', input: `src/file${i}.js`, size: 4000, preview: 'export function…',
+  }));
+
+  let asked = null;
+  const client = new JevClient({
+    apiKey: 'k',
+    fetchImpl: async (_url, init) => {
+      asked = JSON.parse(init.body);
+      const answers = {};
+      Object.keys(asked.questions).forEach((key, i) => { answers[key] = { type: 'noul', noul: i === 0 ? 0.95 : 0.03 }; });
+      return jsonResponse({ model: 'jev-1.13.0', answers, usage: {} });
+    },
+  });
+
+  const { ok, keep, judged } = await judgeContextKeep(client, { goal: 'sistema il bug in file0', candidates });
+  assert.equal(ok, true);
+  assert.deepEqual([...keep], ['call_0']);
+  assert.equal(judged.length, MIN_CANDIDATES, 'every decisive answer is remembered, so none is asked twice');
+  assert.equal(Object.keys(asked.questions).length, MIN_CANDIDATES);
+
+  // Below the batch size there is nothing worth a round trip.
+  const none = await judgeContextKeep(client, { goal: 'x', candidates: candidates.slice(0, 1) });
+  assert.equal(none.ok, false);
+  assert.equal(none.keep.size, 0);
+});
+
+test('the compressor keeps what it is told to, and cuts the rest', async () => {
+  const { ContextCompressor } = await import('../src/agents/compressor.js');
+  const compressor = new ContextCompressor(null, { contextWindow: 8000 });
+  const big = (n) => `line ${n}\n${'x'.repeat(3000)}`;
+  const messages = [{ role: 'system', content: 'sys' }];
+  for (let i = 0; i < 14; i++) {
+    messages.push({
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: `c${i}`, type: 'function', function: { name: 'grep', arguments: JSON.stringify({ pattern: `p${i}` }) } }],
+    });
+    messages.push({ role: 'tool', tool_call_id: `c${i}`, content: big(i) });
+  }
+
+  const candidates = compressor.elisionCandidates(messages);
+  assert.ok(candidates.length >= 4, `expected cuttable results, got ${candidates.length}`);
+  assert.ok(candidates.every(c => c.preview && c.size > 0 && c.id));
+
+  const target = candidates.at(-1).id;
+  const shrunk = compressor.lossyShrink(messages, { keepIds: new Set([target]) });
+  const kept = shrunk.find(m => m.tool_call_id === target);
+  assert.ok(!kept.__lossyShrunk, 'the protected result must survive whole');
+  assert.ok(shrunk.some(m => m.__lossyShrunk), 'the others are still cut');
+});
+
+test('independent parts are explored at the same time, not one after another', async () => {
+  await activate();
+  globalThis.fetch = fakeJev({ approach: 'explore', confidence: 0.9, independent: 0.93 });
+  const started = [];
+  let inFlight = 0;
+  let peak = 0;
+  const emitter = new EventEmitter();
+  emitter.on('toolStart', e => { if (e.name === 'explore' && e.jev) started.push(e.args.question); });
+
+  const prompts = [];
+  await agentInBuild({
+    async turn(messages) {
+      const text = textOf(messages);
+      prompts.push(text);
+      if (/exploration sub-agent/i.test(text) && !/exploration already done/.test(text)) {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise(r => { setTimeout(r, 30); });
+        inFlight--;
+        const target = text.match(/LIMIT YOUR ANSWER TO: (\S+)/)?.[1] || '?';
+        return { type: 'text', content: `${target} sta in src/${target}:1.` };
+      }
+      return { type: 'text', content: 'Ok.' };
+    },
+  }).run('aggiorna login.html, register.html e dashboard.html con il nuovo header', emitter);
+
+  assert.deepEqual(started, ['login.html', 'register.html', 'dashboard.html']);
+  assert.ok(peak > 1, `the parts must be explored together, peak was ${peak}`);
+  const main = prompts.find(t => /exploration already done/.test(t));
+  assert.match(main, /### login\.html[\s\S]*### dashboard\.html/, 'one report per part, in order');
+});
+
+test('parts that depend on each other stay one exploration', async () => {
+  await activate();
+  globalThis.fetch = fakeJev({ approach: 'explore', confidence: 0.9, independent: 0.5 });
+  const started = [];
+  const emitter = new EventEmitter();
+  emitter.on('toolStart', e => { if (e.name === 'explore' && e.jev) started.push(e.args.question); });
+  await agentInBuild({
+    async turn(messages) {
+      const text = textOf(messages);
+      if (/exploration sub-agent/i.test(text) && !/exploration already done/.test(text)) {
+        return { type: 'text', content: 'Sta in src/a.js:1.' };
+      }
+      return { type: 'text', content: 'Ok.' };
+    },
+  }).run('aggiorna login.html, register.html e dashboard.html con il nuovo header', emitter);
+  assert.equal(started.length, 1, 'an unsure verdict explores once, as before');
 });

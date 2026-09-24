@@ -158,6 +158,69 @@ export const PRETURN_FLAGS = {
   },
 };
 
+// How hard the request is, which decides how much thinking to buy for it and
+// whether a plan is worth a round trip of its own.
+export const DIFFICULTY_QUESTION = {
+  type: 'choice',
+  instructions: 'How much work does this request take? Judge the request itself, not any codebase you cannot see.',
+  criteria: {
+    trivial: 'One small step: a direct answer, or one obvious change in one place. Nothing to investigate and nothing to plan.',
+    normal: 'Ordinary work: a few steps in known territory.',
+    hard: 'Several parts, unfamiliar ground, or reasoning that has to hold together across files.',
+  },
+};
+
+// Whether the work splits into parts that can be looked into at the same time.
+export const INDEPENDENT_PARTS_QUESTION = {
+  type: 'noul',
+  instructions: 'The request covers parts that can be investigated separately, because what is found about one does not change what has to be found about another.',
+  criteria: {
+    true: 'The parts stand on their own — different files, features or questions.',
+    false: 'It is one thread: each step depends on what the previous one found.',
+  },
+};
+
+// Which families of tools the turn needs. The router picks these with regular
+// expressions over the request — "image" and "foto" pull in the web tools,
+// "app" and "ui" the runtime ones — which both adds schemas the turn never
+// uses (every one of them in every request the model makes) and leaves out
+// the tool the turn needed, which costs a whole wasted step. Jev reads what
+// the request is for instead, and a decisive answer settles it either way.
+export const TOOL_FAMILY_QUESTIONS = {
+  web: 'Carrying out the request needs something from the internet: a web page, a search, an online image.',
+  document: 'The request involves reading a PDF, Word or OpenDocument file.',
+  video: 'The request involves a video or its transcript.',
+  music_video: 'The request is about producing a music video from audio, images or lyrics.',
+  runtime: 'Carrying it out means running the software — a dev server, a page in a browser, a desktop window — rather than only reading and changing code.',
+  dependency: 'The request is about the project\'s dependencies or packages: versions, updates, vulnerabilities.',
+  edit: 'The request asks for files in the project to be changed, not only read or explained.',
+};
+
+export function buildToolFamilyQuestions() {
+  const questions = {};
+  for (const [family, instructions] of Object.entries(TOOL_FAMILY_QUESTIONS)) {
+    questions[`tools_${family}`] = {
+      type: 'noul',
+      instructions,
+      criteria: {
+        true: 'Yes — the turn will need those tools.',
+        false: 'No — those tools have nothing to do with this request.',
+      },
+    };
+  }
+  return questions;
+}
+
+/** The decisive family answers, as `{web: true, video: false}`. Unsure ones are left out. */
+export function readToolFamilies(answers = {}) {
+  const families = {};
+  for (const family of Object.keys(TOOL_FAMILY_QUESTIONS)) {
+    const verdict = readNoul(answers[`tools_${family}`]);
+    if (verdict.decisive) families[family] = verdict.yes;
+  }
+  return families;
+}
+
 // Question ids are ours to choose and are never shown to the model, so a skill
 // whose name is not a usable key gets a positional one.
 function skillQuestionId(index) {
@@ -190,23 +253,42 @@ export function buildSkillQuestions(skills = []) {
  * off, unreachable or unsure, every field comes back undecided and the agent
  * keeps the heuristics it already had.
  *
- * @returns {Promise<{approach: object, flags: Record<string, object>, skills: Record<string, object>, error: string|null, ms: number}>}
+ * @returns {Promise<{approach: object, difficulty: object, independentParts: object, families: Record<string, boolean>, flags: Record<string, object>, skills: Record<string, object>, error: string|null, ms: number}>}
  */
 export async function judgePreTurn(client, { prompt, skills = [] } = {}, { signal = null } = {}) {
-  const empty = { approach: { choice: null, confidence: null, decisive: false }, flags: {}, skills: {}, error: null, ms: 0 };
+  const empty = {
+    approach: { choice: null, confidence: null, decisive: false },
+    difficulty: { choice: null, confidence: null, decisive: false },
+    independentParts: { value: null, yes: false, decisive: false },
+    families: {},
+    flags: {},
+    skills: {},
+    error: null,
+    ms: 0,
+  };
   if (!client) return empty;
   const startedAt = Date.now();
   const { questions, byId } = buildSkillQuestions(skills);
   try {
     const { answers } = await client.evaluate({
       state: { user_request: String(prompt || '').slice(0, 8000) },
-      questions: { approach: APPROACH_QUESTION, ...PRETURN_FLAGS, ...questions },
+      questions: {
+        approach: APPROACH_QUESTION,
+        difficulty: DIFFICULTY_QUESTION,
+        independent_parts: INDEPENDENT_PARTS_QUESTION,
+        ...PRETURN_FLAGS,
+        ...buildToolFamilyQuestions(),
+        ...questions,
+      },
       signal,
     });
     const skillVerdicts = {};
     for (const [id, name] of byId) skillVerdicts[name] = readNoul(answers?.[id]);
     return {
       approach: readChoice(answers?.approach),
+      difficulty: readChoice(answers?.difficulty),
+      independentParts: readNoul(answers?.independent_parts),
+      families: readToolFamilies(answers),
       flags: Object.fromEntries(Object.keys(PRETURN_FLAGS).map(key => [key, readNoul(answers?.[key])])),
       skills: skillVerdicts,
       error: null,

@@ -8,6 +8,47 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-09-24
+
+### Added — Jev decides what a turn costs, not only whether it was done
+
+Four decisions that were made by word matching now go to Jev when it is sure,
+and where the point is speed a decisive verdict may also remove what the
+heuristic added. Safety confirmations stay one-way: Jev can add one, never take
+one away.
+
+- **Which tools the model is handed.** The router chose tool families with
+  regular expressions over the request, so "foto" pulled in the web tools and
+  "app" the runtime ones — schemas in every request the turn never used — while
+  a wording it did not know left out the tool the turn needed. Jev answers one
+  question per family in the pre-turn call it was already making. A turn that
+  has already edited keeps its edit tools regardless.
+- **How much thinking to buy.** Trivial requests run at low effort, hard ones
+  at high; an effort set by the user still wins.
+- **Whether to plan at all.** The planning reminder is dropped when the work is
+  trivial (a one-line rename used to buy a whole planning turn) and added when
+  the work is hard and the heuristic missed it.
+- **Independent parts explored together.** When the request names several files
+  and Jev is sure they can be looked into separately, up to three explore
+  sub-agents run at the same time and the turn opens with one report per part.
+- **What survives compression.** Older tool results are cut to a stump by age
+  and shape; Jev is asked about the handful actually about to be cut, against
+  the goal of the turn, and a decisive "still needed" keeps one whole. Each
+  result is judged at most once, and only once a batch has piled up.
+
+### Fixed
+
+- **A cancel reported in the provider's own words showed up as a second error.**
+  The stall watchdog's explanation was followed by a bare
+  `Error: Request was aborted.`; the turn now reads the abort signal rather than
+  the error's name. The harness's own deadlines — silence, and the ceiling on a
+  model that streams forever — are still reported as faults.
+- **A long exploration could be killed as a stalled turn.** The watchdog counts
+  from the moment the user presses enter, and a sub-agent's output never reaches
+  the parent, so a sub-agent that was working looked like silence. It now sends
+  the parent a sign of life, without its text.
+
+
 ## [1.9.0] — 2026-09-22
 
 ### Added — Jev takes part in the whole turn, not just its end

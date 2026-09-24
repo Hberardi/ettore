@@ -697,6 +697,18 @@ export async function startApp(options = {}) {
     }
   };
 
+  // A sub-agent is running and getting somewhere. It has no output of its own
+  // to show here, but the turn is alive and the stall watchdog must know it.
+  emitter.on('subagentProgress', () => {
+    if (tui.streaming) tui.streaming.lastActivityAt = Date.now();
+  });
+
+  emitter.on('subagentStart', () => {
+    ensureStreaming();
+    tui.streaming.waitKind = 'tool';
+    tui.streaming.lastActivityAt = Date.now();
+  });
+
   emitter.on('token', (text) => {
     ensureStreaming();
     tui.streaming.waitKind = 'model';
@@ -1332,9 +1344,18 @@ export async function startApp(options = {}) {
       explore_hint: 'ricerca estesa: explore non ha risposto, lo suggerisco al modello',
       answer: 'nessun codice da guardare: risposta diretta',
       plan: 'lavoro su più passi: chiedo un piano prima di iniziare',
+      no_plan: 'lavoro semplice: salto il piano e vado diretto',
+      tools: 'tool del turno scelti da Jev',
+      'effort:low': 'sforzo basso: richiesta semplice',
+      'effort:high': 'sforzo alto: richiesta difficile',
     };
     const shown = actions.filter(action => ACTION_LABELS[action]).map(action => ACTION_LABELS[action]);
     if (shown.length) pushJev(`(${ms}ms) — ${shown.join(' · ')}`);
+  });
+
+  // Jev kept some tool results whole that the compressor was about to cut.
+  emitter.on('jevKeep', ({ kept, judged, ms }) => {
+    pushJev(`(${ms}ms) — compressione: tengo ${kept} risultat${kept === 1 ? 'o' : 'i'} su ${judged} che servono ancora`);
   });
 
   // Jev checked the turn while it was running and did something about it.

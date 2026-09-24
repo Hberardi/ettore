@@ -168,3 +168,34 @@ test('every run() that returns has emitted a terminal event first', async () => 
     assert.ok(terminal.length >= 1, `"${label}" returned without a terminal event`);
   }
 });
+
+test('a provider that reports the cancel in its own words is a cancel, not an error', async () => {
+  // The OpenAI client throws `APIUserAbortError: Request was aborted.` when the
+  // signal fires. That fell through to the generic error path, so the stall
+  // watchdog's own explanation was followed by a second red line saying only
+  // "Error: Request was aborted.".
+  let agent;
+  const client = {
+    async turn() {
+      agent.cancel();
+      const error = new Error('Request was aborted.');
+      error.name = 'APIUserAbortError';
+      throw error;
+    },
+  };
+  agent = new Agent(client, {
+    provider: 'test', model: 'gpt-4o', modelCapability: 'full',
+    workdir: process.cwd(), contextWindow: 128000, verifyAfterEdit: false,
+  }, 'build');
+
+  const emitter = new EventEmitter();
+  const errors = [];
+  let cancelled = 0;
+  emitter.on('error', msg => errors.push(msg));
+  emitter.on('cancelled', () => { cancelled++; });
+
+  await agent.run('fai qualcosa', emitter);
+
+  assert.equal(cancelled, 1);
+  assert.deepEqual(errors, []);
+});

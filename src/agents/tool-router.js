@@ -223,6 +223,16 @@ export function rankPluginTools(definitions, names, prompt) {
 export function selectToolDefinitions(definitions = [], context = {}) {
   if (context.isLite) return [];
 
+  // Jev's reading of what the turn needs, where it has one. The regex families
+  // below say what a prompt *looks* like — "image" and "foto" reach for the
+  // web tools, "app" and "ui" for the runtime ones — which both pads every
+  // request with schemas the turn never uses and, when the wording misses,
+  // leaves out the tool the turn needed. A decisive answer settles it in
+  // either direction; an unsure one, or no Jev at all, leaves the regex in
+  // charge exactly as before. See src/jev/turn-judge.js.
+  const families = context.families || {};
+  const needs = (family, byWords) => (typeof families[family] === 'boolean' ? families[family] : byWords);
+
   const mode = context.mode === 'plan' ? 'plan' : 'build';
   const prompt = String(context.prompt || '');
   const overlay = String(context.overlay || '');
@@ -248,13 +258,13 @@ export function selectToolDefinitions(definitions = [], context = {}) {
       .filter(Boolean)
     : [];
   for (const name of pluginToolNames) selected.add(name);
-  const editIntent = mode === 'build' && (
-    EDIT_INTENT_RE.test(prompt) ||
-    EDIT_OVERLAY_RE.test(overlay) ||
-    context.editIntentSticky === true ||
-    context.mutationToolUsed ||
-    context.touchedFiles > 0
-  );
+  // The turn's own history wins over any prediction: a turn that has already
+  // edited something keeps the tools it edited with.
+  const editUnderway = EDIT_OVERLAY_RE.test(overlay)
+    || context.editIntentSticky === true
+    || context.mutationToolUsed
+    || context.touchedFiles > 0;
+  const editIntent = mode === 'build' && (editUnderway || needs('edit', EDIT_INTENT_RE.test(prompt)));
 
   if (editIntent) {
     addMany(selected, EXEC_TOOLS);
@@ -267,28 +277,28 @@ export function selectToolDefinitions(definitions = [], context = {}) {
     addMany(selected, VERIFY_TOOLS);
   }
   if (/repo_map first/i.test(overlay)) selected.add('repo_map');
-  if (WEB_INTENT_RE.test(prompt)) {
+  if (needs('web', WEB_INTENT_RE.test(prompt))) {
     addMany(selected, WEB_TOOLS);
     contextualPriority.push(...WEB_TOOLS);
   }
-  if (DOCUMENT_INTENT_RE.test(prompt)) {
+  if (needs('document', DOCUMENT_INTENT_RE.test(prompt))) {
     addMany(selected, DOCUMENT_TOOLS);
     contextualPriority.push(...DOCUMENT_TOOLS);
   }
-  if (VIDEO_INTENT_RE.test(prompt)) {
+  if (needs('video', VIDEO_INTENT_RE.test(prompt))) {
     selected.add('video_transcript');
     selected.add('video_describe');
     contextualPriority.push('video_transcript', 'video_describe');
   }
   // Build only: these write files and bill per generated clip.
-  if (mode === 'build' && MUSIC_VIDEO_INTENT_RE.test(prompt)) {
+  if (mode === 'build' && needs('music_video', MUSIC_VIDEO_INTENT_RE.test(prompt))) {
     addMany(selected, MUSIC_VIDEO_TOOLS);
     // Ahead of the other prompt families: a music-video request also reads
     // as "video" and often as "foto", and those schemas must not crowd out
     // the pipeline's last step under the tool cap.
     contextualPriority.unshift(...MUSIC_VIDEO_TOOLS);
   }
-  if (RUNTIME_INTENT_RE.test(prompt)) {
+  if (needs('runtime', RUNTIME_INTENT_RE.test(prompt))) {
     // Starting a dev server or driving a real app is not reading, so plan mode
     // gets only the two that observe something already running — the same two
     // its system prompt tells the model it has.
@@ -296,7 +306,7 @@ export function selectToolDefinitions(definitions = [], context = {}) {
     addMany(selected, runtime);
     contextualPriority.push(...runtime);
   }
-  if (DEPENDENCY_INTENT_RE.test(prompt)) {
+  if (needs('dependency', DEPENDENCY_INTENT_RE.test(prompt))) {
     // `dep_inspect` reads; the `bash` beside it does not, and asking about npm
     // packages is not consent to run them.
     const dependency = mode === 'build' ? DEPENDENCY_TOOLS : ['dep_inspect'];
