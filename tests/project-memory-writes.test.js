@@ -7,6 +7,9 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+// Cleanup retries: on Windows a journal write finishing its rename can still
+// hold `.ettore/` for a moment, and rmdir fails with ENOTEMPTY/EBUSY.
+
 import {
   projectMemoryDisabled,
   saveEcosystemMemory,
@@ -34,7 +37,7 @@ test('concurrent writes leave one whole file, never a mix of two', async () => {
     assert.ok(versions.includes(written), 'the file is exactly one of the versions written');
     assert.deepEqual(readdirSync(dir).filter(name => name.endsWith('.tmp')), [], 'no temp file left behind');
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -70,7 +73,7 @@ test('a sub-agent\'s turn is never filed as an experience of the project', async
   } finally {
     if (previous === undefined) delete process.env.ETTORE_PROJECT_MEMORY;
     else process.env.ETTORE_PROJECT_MEMORY = previous;
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
 
@@ -94,6 +97,6 @@ test('a turn that ran no tool and taught nothing leaves the journal alone', asyn
   } finally {
     if (previous === undefined) delete process.env.ETTORE_PROJECT_MEMORY;
     else process.env.ETTORE_PROJECT_MEMORY = previous;
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
