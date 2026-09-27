@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { emitKeypressEvents } from 'readline';
 import { TUI, THEMES, setTheme, sidebarWidthFor } from './tui-native.js';
+import { applyAskUserKey, pasteIntoAskUser } from './ask-user-input.js';
 import { connectionManager, ConnectionManager } from '../providers/index.js';
 import { PROVIDER_REGISTRY } from '../providers/registry.js';
 import { loadConfig, getConfig } from '../config/index.js';
@@ -1583,7 +1584,7 @@ uiBridge.on('fileChanged', ({ type, path, lines, oldLines, newLines, diff }) => 
   tui.needsRender = true;
 });
 
-uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
+uiBridge.on('askUser', ({ question, options, resolve, sensitive = false, freeText = false }) => {
   // Defense in depth: even though every internal emitter passes string arrays,
   // an LLM-driven ask_user tool call can hand us objects. Normalize so the TUI
   // never renders "[object Object]" as an option label.
@@ -1600,7 +1601,7 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false }) => {
         })
         .filter(Boolean)
     : [];
-  tui.askUser = { question, options: safeOptions, resolve, sensitive: Boolean(sensitive) };
+  tui.askUser = { question, options: safeOptions, resolve, sensitive: Boolean(sensitive), freeText: Boolean(freeText) };
   tui.askUserIdx = 0;
   tui.askUserInput = '';
   tui.needsRender = true;
@@ -2347,7 +2348,9 @@ if (cmdName === 'connect') {
       if (!compact) return;
       for (const ch of compact) tui.addApiKeyChar(ch);
     } else if (tui.askUser) {
-      tui.askUserInput = (tui.askUserInput || '') + normalized.replace(/\n/g, '');
+      const pasted = pasteIntoAskUser(tui.askUser, { idx: tui.askUserIdx, input: tui.askUserInput || '' }, normalized);
+      tui.askUserIdx = pasted.idx;
+      tui.askUserInput = pasted.input;
       tui.needsRender = true;
     } else if (tui.commandPaletteOpen) {
       // Keep pasted slash commands in the palette state. Otherwise the first
@@ -2447,60 +2450,31 @@ if (cmdName === 'connect') {
       return;
     }
 
-    // Ask user mode - separate modal for both multiple-choice and free-text
+    // Ask user mode: the options, the write-in line, or both — see
+    // src/app/ask-user-input.js for what each key does.
     if (tui.askUser) {
-      const hasOptions = Array.isArray(tui.askUser.options) && tui.askUser.options.length > 0;
-      if (hasOptions) {
-        if (key?.name === 'up') {
-          tui.askUserIdx = Math.max(0, tui.askUserIdx - 1);
-          tui.needsRender = true;
-          return;
-        }
-        if (key?.name === 'down') {
-          tui.askUserIdx = Math.min(tui.askUser.options.length - 1, tui.askUserIdx + 1);
-          tui.needsRender = true;
-          return;
-        }
-        if (key?.name === 'return' || key?.name === 'enter') {
-          const choice = tui.askUser.options[tui.askUserIdx];
-          const resolve = tui.askUser.resolve;
-          tui.messages.push({ role: 'system', text: `✓ Selected: ${choice}`, tools: [], id: Date.now() });
-          tui.askUser = null;
-          tui.askUserInput = '';
-          tui.needsRender = true;
-          resolve(choice);
-          return;
-        }
-        return;
-      }
-
-      if (key?.name === 'return' || key?.name === 'enter') {
-        const answer = (tui.askUserInput || '').trim();
-        if (!answer) return;
+      const next = applyAskUserKey(
+        tui.askUser,
+        { idx: tui.askUserIdx, input: tui.askUserInput || '' },
+        { str, key },
+      );
+      tui.askUserIdx = next.idx;
+      tui.askUserInput = next.input;
+      if (next.submit) {
+        const { answer, custom } = next.submit;
         const sensitive = Boolean(tui.askUser.sensitive);
         const resolve = tui.askUser.resolve;
         tui.messages.push({
           role: 'system',
-          text: sensitive ? '✓ Answered securely' : `✓ Answered: ${answer}`,
+          text: sensitive ? '✓ Answered securely' : custom ? `✓ Answered: ${answer}` : `✓ Selected: ${answer}`,
           tools: [],
           id: Date.now(),
         });
         tui.askUser = null;
         tui.askUserInput = '';
-        tui.needsRender = true;
-        resolve(answer);
-        return;
+        resolve(answer, { custom });
       }
-      if (key?.name === 'backspace') {
-        tui.askUserInput = (tui.askUserInput || '').slice(0, -1);
-        tui.needsRender = true;
-        return;
-      }
-      if (str && !key?.ctrl && !key?.meta && str.codePointAt(0) >= 32) {
-        tui.askUserInput = (tui.askUserInput || '') + str;
-        tui.needsRender = true;
-        return;
-      }
+      tui.needsRender = true;
       return;
     }
 

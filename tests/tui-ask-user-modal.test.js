@@ -148,3 +148,23 @@ test('an idle CLI with nothing to show does not repaint', () => {
   tui.needsRender = false;
   assert.equal(tui.shouldRenderOnTick(), false);
 });
+
+test('an agent question shows a write-in line under its options; a confirmation does not', async () => {
+  const { stripAllAnsi } = await import('../src/utils/ansi.js');
+  const tui = new TUI();
+  tui.cols = 90;
+  tui.rows = 24;
+  tui.askUser = { question: 'Quale database?', options: ['PostgreSQL', 'SQLite'], freeText: true, resolve() {} };
+  tui.askUserIdx = 0;
+  tui.askUserInput = '';
+  assert.match(stripAllAnsi(tui._renderAskUser()), /✎ or type your own answer/);
+
+  tui.askUserIdx = 2;
+  tui.askUserInput = 'MariaDB';
+  assert.match(stripAllAnsi(tui._renderAskUser()), /▸ ✎ MariaDB/, 'the typed answer is on the selected row');
+
+  tui.askUser = { question: 'Procedo?', options: ['Sì, procedi', 'No, annulla'], resolve() {} };
+  tui.askUserIdx = 0;
+  tui.askUserInput = '';
+  assert.doesNotMatch(stripAllAnsi(tui._renderAskUser()), /✎/);
+});

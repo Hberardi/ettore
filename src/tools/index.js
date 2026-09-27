@@ -2716,11 +2716,20 @@ export const toolHandlers = {
       uiBridge.emit('askUser', {
         question: String(question),
         options: opts,
-        resolve: (answer) => {
+        // The options are suggestions, not the only answers: the user can
+        // always write their own below them.
+        freeText: true,
+        resolve: (answer, meta = {}) => {
           if (answer === '__cancelled__') {
             resolve('User cancelled the selection.');
+          } else if (opts.length === 0) {
+            resolve(answer);
+          } else if (meta.custom) {
+            // Said plainly, so the model does not map it back onto the
+            // nearest option — the user chose none of them on purpose.
+            resolve(`User answered in their own words (none of the offered options): ${answer}`);
           } else {
-            resolve(opts.length === 0 ? answer : `User selected: ${answer}`);
+            resolve(`User selected: ${answer}`);
           }
         },
       });
@@ -3448,7 +3457,7 @@ export const toolDefinitions = [
     type: 'function',
     function: {
       name: 'ask_user',
-      description: 'Ask the user a multiple-choice question and wait for their answer. Use this whenever you need the user to pick between concrete alternatives before you can proceed — e.g. programming language, framework, database, UI library, architectural approach, etc. Never invent answers or assume preferences: if the task has meaningful choices, ASK. Provide a clear question and 2–6 distinct options.',
+      description: 'Ask the user a question and wait for their answer. Use this whenever you need the user to pick between concrete alternatives before you can proceed — e.g. programming language, framework, database, UI library, architectural approach, etc. Never invent answers or assume preferences: if the task has meaningful choices, ASK. Provide a clear question and 2–6 distinct options. The user can always write their own answer instead of picking one — you do not need an "Other" option — and the result then says it was their own words: take it as given rather than matching it to the closest option.',
       parameters: {
         type: 'object',
         properties: {

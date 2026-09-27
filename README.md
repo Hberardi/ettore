@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.11.2-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.12.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -244,6 +244,13 @@ and WebP files up to 5 MiB are supported; the selected model must support vision
 For web pages, the agent can discover image URLs with `webfetch` and inspect them
 through its protected `web_image` tool. Redirects and resolved addresses are
 validated to block private-network access.
+
+When the agent needs a decision from you it asks in a small window with its
+suggested answers. Pick one with the arrows and Enter, or just start typing:
+the last line, *✎ or type your own answer*, takes an answer in your words, and
+the agent is told it is yours rather than one of its options. Esc cancels.
+Confirmations ETTORE asks on its own — before a destructive command, an
+install — stay a plain yes/no.
 
 ## Commands
 

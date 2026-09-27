@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { toolHandlers, normalizeAskUserOption } from '../src/tools/index.js';
 import { uiBridge } from '../src/tools/bridge.js';
+import { applyAskUserKey, askUserRowCount, pasteIntoAskUser } from '../src/app/ask-user-input.js';
 
 // Unit tests for the option normalizer. Regression: prior `String(o)` produced
 // "[object Object]" when an LLM passed options as {label, description} objects.
@@ -78,4 +79,64 @@ test('ask_user: free-text mode (empty options array) does not crash on object pa
   } finally {
     uiBridge.off('askUser', handler);
   }
+});
+
+// ── an answer of the user's own ─────────────────────────────────────────────
+
+test('ask_user offers a write-in line, and says plainly when the user used it', async () => {
+  let payload = null;
+  const handler = (p) => { payload = p; p.resolve('MariaDB, ce l\'ho già', { custom: true }); };
+  uiBridge.on('askUser', handler);
+  try {
+    const result = await toolHandlers.ask_user({ question: 'Quale database?', options: ['PostgreSQL', 'SQLite'] });
+    assert.equal(payload.freeText, true, 'the agent\'s options are suggestions, not the only answers');
+    assert.match(result, /own words/);
+    assert.match(result, /none of the offered options/, 'so the model does not map it onto the nearest option');
+    assert.match(result, /MariaDB/);
+  } finally {
+    uiBridge.off('askUser', handler);
+  }
+});
+
+const question = { options: ['PostgreSQL', 'SQLite', 'MongoDB'], freeText: true };
+const press = (state, str, name = null) => applyAskUserKey(question, state, { str, key: name ? { name } : {} });
+
+test('typing in the list jumps to the write-in line and fills it', () => {
+  let state = { idx: 0, input: '' };
+  for (const ch of 'Maria') state = press(state, ch);
+  assert.equal(state.idx, 3, 'the selection moves to the write-in line');
+  assert.equal(state.input, 'Maria');
+  state = press(state, '', 'backspace');
+  assert.equal(state.input, 'Mari');
+  const sent = press(state, '', 'return');
+  assert.deepEqual(sent.submit, { answer: 'Mari', custom: true });
+});
+
+test('the arrows still pick an option, and reach the write-in line past the last one', () => {
+  let state = { idx: 0, input: '' };
+  state = press(state, '', 'down');
+  assert.deepEqual(press(state, '', 'return').submit, { answer: 'SQLite', custom: false });
+  for (let i = 0; i < 5; i++) state = press(state, '', 'down');
+  assert.equal(state.idx, askUserRowCount(question) - 1, 'the write-in line is the last row');
+  assert.equal(press(state, '', 'return').submit, null, 'an empty write-in answers nothing');
+});
+
+test('a confirmation keeps its closed list: typing does not turn it into a write-in', () => {
+  const confirm = { options: ['Sì, procedi', 'No, annulla'] };
+  let state = applyAskUserKey(confirm, { idx: 0, input: '' }, { str: 'x', key: {} });
+  assert.deepEqual(state, { idx: 0, input: '', submit: null });
+  assert.equal(askUserRowCount(confirm), 2);
+  state = applyAskUserKey(confirm, state, { str: '', key: { name: 'return' } });
+  assert.deepEqual(state.submit, { answer: 'Sì, procedi', custom: false });
+});
+
+test('a question with no options is all write-in, as before', () => {
+  let state = { idx: 0, input: '' };
+  for (const ch of 'ok') state = applyAskUserKey({ options: [] }, state, { str: ch, key: {} });
+  assert.deepEqual(applyAskUserKey({ options: [] }, state, { str: '', key: { name: 'return' } }).submit, { answer: 'ok', custom: true });
+});
+
+test('pasted text goes to the write-in line, never into a confirmation', () => {
+  assert.deepEqual(pasteIntoAskUser(question, { idx: 1, input: '' }, 'una\nriga'), { idx: 3, input: 'una riga' });
+  assert.deepEqual(pasteIntoAskUser({ options: ['Sì', 'No'] }, { idx: 0, input: '' }, 'x'), { idx: 0, input: '' });
 });

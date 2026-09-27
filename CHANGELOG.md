@@ -8,6 +8,21 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-09-27
+
+### Added — answer the agent's questions in your own words
+
+A question from the agent was a closed list: when none of its options fitted,
+the only way out was Esc, which the agent read as a refusal. Under the options
+there is now a write-in line — start typing anywhere in the list and the
+selection moves there — and the agent is told the answer is the user's own
+("none of the offered options"), so it does not map it back onto the nearest
+one. The tool description tells the model it no longer needs an "Other"
+option. Confirmations the harness asks itself ("Sì, procedi" / "No, annulla")
+keep the closed list, because their answer is matched word for word. The key
+handling moved out of the TUI's input loop into `src/app/ask-user-input.js`,
+where it is tested on its own.
+
 ## [1.11.2] — 2026-09-27
 
 ### Fixed — the project journal recorded sub-agents and tests, and could be garbled

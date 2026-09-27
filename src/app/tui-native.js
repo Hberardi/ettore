@@ -2399,8 +2399,11 @@ class TUI {
   // ─── Ask User rendering ───────────────────────────────────────────────────
   _renderAskUser() {
     if (!this.askUser) return '';
-    const { question, options, sensitive } = this.askUser;
+    const { question, options, sensitive, freeText } = this.askUser;
     const hasOptions = Array.isArray(options) && options.length > 0;
+    // Below the options, a line to write an answer of one's own.
+    const hasWriteIn = hasOptions && Boolean(freeText);
+    const onWriteIn = hasWriteIn && this.askUserIdx >= options.length;
     const BG_DIM = '\x1b[48;5;233m';
     const BG_MODAL = '\x1b[48;5;238m';
     const BG_HEADER = '\x1b[48;5;236m';
@@ -2435,12 +2438,14 @@ class TUI {
     }
 
     const maxModalRows = Math.max(5, this.rows - 2);
-    const baseRows = questionLines.length + (hasOptions ? 4 : 5);
+    const baseRows = questionLines.length + (hasOptions ? 4 : 5) + (hasWriteIn ? 1 : 0);
     const maxVisibleOptions = hasOptions
       ? Math.max(1, Math.min(options.length, maxModalRows - baseRows))
       : 0;
+    // On the write-in line the list stays scrolled to its end, next to it.
+    const focusIdx = Math.min(this.askUserIdx, options.length - 1);
     const optionStart = hasOptions
-      ? Math.min(Math.max(0, this.askUserIdx - maxVisibleOptions + 1), Math.max(0, options.length - maxVisibleOptions))
+      ? Math.min(Math.max(0, focusIdx - maxVisibleOptions + 1), Math.max(0, options.length - maxVisibleOptions))
       : 0;
     const visibleOptions = hasOptions ? options.slice(optionStart, optionStart + maxVisibleOptions) : [];
     const modalRows = Math.min(maxModalRows, baseRows + visibleOptions.length);
@@ -2466,10 +2471,21 @@ class TUI {
         const optionText = fit(String(visibleOptions[i] || ''), innerWidth - 5);
         out += ANSI.move(left, row++) + line(` ${marker} ${isSelected ? C.bold : C.dim}${C.text}${optionText}${C.reset}`, bg);
       }
+      if (hasWriteIn) {
+        const bg = onWriteIn ? BG_SELECTED : BG_MODAL;
+        const marker = onWriteIn ? `${C.bold}${C.ok}▸${C.reset}` : ' ';
+        const typed = this.askUserInput || '';
+        const body = typed
+          ? `${C.text}${fit(this._sanitizeForRender(typed), innerWidth - 9)}${C.reset}`
+          : `${C.dim}${onWriteIn ? 'type your answer…' : 'or type your own answer'}${C.reset}`;
+        const cursor = onWriteIn ? `${C.dim}▋${C.reset}` : '';
+        out += ANSI.move(left, row++) + line(` ${marker} ${C.accent}✎${C.reset} ${body}${cursor}`, bg);
+      }
       const position = options.length > visibleOptions.length
-        ? ` ${C.dim}${this.askUserIdx + 1}/${options.length}${C.reset}`
+        ? ` ${C.dim}${Math.min(this.askUserIdx, options.length - 1) + 1}/${options.length}${C.reset}`
         : '';
-      out += ANSI.move(left, row++) + line(` ${C.dim}↑↓ navigate${C.reset} ${C.dim}↵ select${C.reset} ${C.dim}esc cancel${C.reset}${position}`, BG_HEADER);
+      const writeHint = hasWriteIn ? ` ${C.dim}· type: own answer${C.reset}` : '';
+      out += ANSI.move(left, row++) + line(` ${C.dim}↑↓ navigate${C.reset} ${C.dim}↵ select${C.reset} ${C.dim}esc cancel${C.reset}${writeHint}${position}`, BG_HEADER);
     } else {
       const answer = this.askUserInput || '';
       const maxAnswerLen = Math.max(8, innerWidth - 14);
