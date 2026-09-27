@@ -593,7 +593,15 @@ export function runUpdate({ target = 'latest', stream = true, force = false } = 
  * something else and the next launch is the new version — automatic, one
  * session later than on POSIX.
  *
- * @returns {{scheduled: boolean, reason?: string}}
+ * It used to run `npm`, which in PowerShell is npm.ps1 — a script, refused
+ * under Windows' default execution policy ("running scripts is disabled on
+ * this system"). With stdio ignored nobody saw it: every launch announced the
+ * update and none installed it. It now calls npm.cmd with the policy bypassed
+ * for this one process, retries a lock from an ETTORE opened again too soon,
+ * and writes what happened to `update.log` in the config directory, which the
+ * next launch reads (see readDeferredUpdate).
+ *
+ * @returns {{scheduled: boolean, reason?: string, log?: string}}
  */
 export function scheduleDetachedUpdate({
   name = readLocalPackage().name,
@@ -601,6 +609,9 @@ export function scheduleDetachedUpdate({
   pid = process.pid,
   spawnFn = spawn,
   platform = process.platform,
+  logPath = getDeferredLogPath(),
+  now = Date.now(),
+  from = readLocalPackage().version,
 } = {}) {
   if (platform !== 'win32') return { scheduled: false, reason: 'only Windows needs the deferred install' };
   const wanted = String(target || 'latest').trim();
@@ -609,26 +620,139 @@ export function scheduleDetachedUpdate({
   if (!SAFE_TARGET_RE.test(wanted)) return { scheduled: false, reason: `invalid target "${wanted}"` };
   if (!SAFE_PACKAGE_RE.test(String(name || ''))) return { scheduled: false, reason: `invalid package "${name}"` };
 
+  // Written before the child starts, so the next launch knows an install is
+  // on its way even if PowerShell has not got that far yet.
+  try {
+    mkdirSync(dirname(logPath), { recursive: true });
+    writeFileSync(logPath, `START ${wanted} ${new Date(now).toISOString()} ${String(from || '').replace(/\s/g, '') || '?'}\n`);
+  } catch {
+    // Without the log the install still runs; only its report is lost.
+  }
+
   // Wait-Process returns as soon as our pid is gone; the extra pause covers
   // the cmd.exe that launched us, which exits just after we do and is the one
-  // actually holding ettore.cmd open.
+  // actually holding ettore.cmd open. The log path travels in the
+  // environment, so no quoting of a user's folder name reaches the script.
   const script = [
     `Wait-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
     'Start-Sleep -Milliseconds 1500',
-    `npm install -g ${name}@${wanted}`,
-  ].join('; ');
+    '$code = 1',
+    'for ($i = 1; $i -le 3; $i++) {',
+    `  & npm.cmd install -g ${name}@${wanted} *>> $env:ETTORE_UPDATE_LOG`,
+    '  $code = $LASTEXITCODE',
+    '  if ($code -eq 0) { break }',
+    '  Start-Sleep -Seconds 10',
+    '}',
+    '"EXIT $code" | Out-File -FilePath $env:ETTORE_UPDATE_LOG -Append -Encoding utf8',
+  ].join('\n');
 
   try {
     const child = spawnFn(
       'powershell',
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-      { detached: true, stdio: 'ignore', windowsHide: true },
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, ETTORE_UPDATE_LOG: logPath } },
     );
     child.unref?.();
-    return { scheduled: true };
+    return { scheduled: true, log: logPath };
   } catch (error) {
     return { scheduled: false, reason: String(error?.message || error) };
   }
+}
+
+/** Where the deferred Windows install writes what happened. */
+export function getDeferredLogPath() {
+  return join(getCacheDir(), 'update.log');
+}
+
+/** Forget the last deferred install, so its report is not repeated. */
+export function clearDeferredUpdate({ logPath = getDeferredLogPath() } = {}) {
+  try {
+    unlinkSync(logPath);
+  } catch {
+    // Nothing to forget.
+  }
+}
+
+// An install that started this long ago and never wrote its exit code died
+// with its PowerShell (a reboot, a killed process) rather than still running.
+const DEFERRED_STALE_MS = 10 * 60 * 1000;
+
+/**
+ * What the last deferred install did, from its log:
+ * - `null` — there is no log;
+ * - `{ state: 'running', target, startedAt }` — still installing;
+ * - `{ state: 'done', target }` — npm exited 0;
+ * - `{ state: 'failed', target, code, detail }` — npm failed, `detail` being
+ *   the line of its output that says why;
+ * - `{ state: 'lost', target }` — started long ago, never finished.
+ */
+export function readDeferredUpdate({ logPath = getDeferredLogPath(), now = Date.now() } = {}) {
+  let text;
+  try {
+    text = readFileSync(logPath, 'utf8');
+  } catch {
+    return null;
+  }
+  // PowerShell 5 appends UTF-16 in places; the markers survive as ASCII once
+  // the NULs are gone.
+  const clean = text.replace(/[\uFEFF\uFFFD\u0000]/g, '');
+  const start = /START (\S+) (\S+)(?: (\S+))?/.exec(clean);
+  if (!start) return null;
+  const target = start[1];
+  const startedAt = Date.parse(start[2]) || 0;
+  // The version that scheduled it: a report only concerns a launch of that
+  // same version, not one after the user updated some other way.
+  const from = start[3] && start[3] !== '?' ? start[3] : null;
+  const exit = /EXIT (-?\d+)\s*$/.exec(clean.trim());
+  if (!exit) {
+    return now - startedAt > DEFERRED_STALE_MS ? { state: 'lost', target, from } : { state: 'running', target, from, startedAt };
+  }
+  const code = Number(exit[1]);
+  if (code === 0) return { state: 'done', target, from };
+  const lines = clean.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^(START|EXIT) /.test(l));
+  const detail = lines.find((l) => /npm (ERR!|error)|EBUSY|EPERM|EACCES|disabled on this system|not recognized/i.test(l))
+    || lines.at(-1) || '';
+  return { state: 'failed', target, from, code, detail: detail.slice(0, 200) };
+}
+
+/**
+ * What a Windows launch that found a newer release should do, given the last
+ * deferred install (`readDeferredUpdate`): `{ schedule, notice }`. A running
+ * install is left alone rather than raced by a second one; a failed or lost
+ * one is said out loud — with npm's own reason and the command that does it
+ * by hand — and tried again; one that reported success while this is still
+ * the old version is a second copy on PATH, and trying again would not help.
+ */
+export function planDeferredUpdate({ deferred = null, from, to, name = readLocalPackage().name, now = Date.now() } = {}) {
+  const manual = `close ETTORE and run: npm install -g ${name}@latest`;
+  // Scheduled by another version: whatever it did is not about this launch.
+  if (deferred?.from && deferred.from !== from) deferred = null;
+  if (deferred?.state === 'running') {
+    const secs = Math.max(0, Math.round((now - (deferred.startedAt || now)) / 1000));
+    return {
+      schedule: false,
+      notice: `↻ ETTORE ${from} → ${deferred.target === 'latest' ? to : deferred.target}: still installing in the background (started ${secs}s ago); the next launch will have it.`,
+    };
+  }
+  if (deferred?.state === 'failed' || deferred?.state === 'lost') {
+    const why = deferred.state === 'lost'
+      ? 'it never finished'
+      : `npm exited with ${deferred.code}${deferred.detail ? ` — ${deferred.detail}` : ''}`;
+    return {
+      schedule: true,
+      notice: `⚠ The background update to ${to} did not install (${why}). Trying again when you exit; if it keeps failing, ${manual}`,
+    };
+  }
+  if (deferred?.state === 'done') {
+    // A success already reported, and this is still the old build: npm wrote
+    // somewhere this launch did not come from.
+    return {
+      schedule: false,
+      notice: `⚠ npm installed ETTORE ${to}, but this launch is still ${from}: another copy of ettore comes first on PATH (check with: where ettore). To reinstall, ${manual}`,
+      clear: true,
+    };
+  }
+  return { schedule: true, notice: `↻ ETTORE ${from} → ${to}: installing in the background after you exit; the next launch will be ${to}.` };
 }
 
 // Decide whether the CLI should install a new release before the agent

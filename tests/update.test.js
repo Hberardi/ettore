@@ -510,13 +510,17 @@ test('bin/cli.js shows the banner for a deprecated version, not only an outdated
 // to our parent, so no ordering inside this process avoids it — which is why
 // auto-update worked on Linux from day one and never once on Windows.
 
+
+// Every schedule below writes its log here, never to the real config dir.
+const DEFERRED_LOG = join(mkdtempSync(join(tmpdir(), 'ettore-deferred-')), 'update.log');
+
 test('on Windows the install is handed to a process that outlives us', () => {
   const calls = [];
   const out = update.scheduleDetachedUpdate({
     name: 'ettore-ai-assistant',
     target: 'latest',
     pid: 4242,
-    platform: 'win32',
+    platform: 'win32', logPath: DEFERRED_LOG,
     spawnFn: (file, args, opts) => { calls.push({ file, args, opts }); return { unref() {} }; },
   });
 
@@ -527,11 +531,11 @@ test('on Windows the install is handed to a process that outlives us', () => {
   const script = calls[0].args.at(-1);
   assert.match(script, /Wait-Process -Id 4242/, 'it must wait for this process to exit first');
   assert.ok(
-    script.indexOf('Wait-Process') < script.indexOf('npm install'),
+    script.indexOf('Wait-Process') < script.indexOf('npm.cmd install'),
     'installing before the wait is exactly the bug being fixed',
   );
   assert.match(script, /Start-Sleep/, 'cmd.exe exits just after us and holds the shim');
-  assert.match(script, /npm install -g ettore-ai-assistant@latest/);
+  assert.match(script, /npm\.cmd install -g ettore-ai-assistant@latest/);
 
   // It has to survive our exit, and must not flash a console window.
   assert.equal(calls[0].opts.detached, true);
@@ -542,7 +546,7 @@ test('on Windows the install is handed to a process that outlives us', () => {
 test('the child is unref-ed, or the CLI cannot exit', () => {
   let unrefed = false;
   update.scheduleDetachedUpdate({
-    name: 'p', target: 'latest', platform: 'win32',
+    name: 'p', target: 'latest', platform: 'win32', logPath: DEFERRED_LOG,
     spawnFn: () => ({ unref() { unrefed = true; } }),
   });
   assert.equal(unrefed, true);
@@ -551,7 +555,7 @@ test('the child is unref-ed, or the CLI cannot exit', () => {
 test('POSIX does not defer: it replaces a running file happily', () => {
   let spawned = false;
   const out = update.scheduleDetachedUpdate({
-    name: 'p', target: 'latest', platform: 'linux',
+    name: 'p', target: 'latest', platform: 'linux', logPath: DEFERRED_LOG,
     spawnFn: () => { spawned = true; return { unref() {} }; },
   });
   assert.equal(out.scheduled, false);
@@ -561,24 +565,24 @@ test('POSIX does not defer: it replaces a running file happily', () => {
 test('nothing unvalidated reaches the shell', () => {
   const spawnFn = () => ({ unref() {} });
   for (const target of ['latest; rm -rf /', '../evil', '$(whoami)', '']) {
-    const out = update.scheduleDetachedUpdate({ name: 'p', target, platform: 'win32', spawnFn });
+    const out = update.scheduleDetachedUpdate({ name: 'p', target, platform: 'win32', logPath: DEFERRED_LOG, spawnFn });
     if (target === '') continue; // empty falls back to the default tag
     assert.equal(out.scheduled, false, `accepted target: ${target}`);
   }
   for (const name of ['pkg; calc.exe', 'pkg && del', '../../etc']) {
-    const out = update.scheduleDetachedUpdate({ name, target: 'latest', platform: 'win32', spawnFn });
+    const out = update.scheduleDetachedUpdate({ name, target: 'latest', platform: 'win32', logPath: DEFERRED_LOG, spawnFn });
     assert.equal(out.scheduled, false, `accepted package: ${name}`);
   }
   // A scoped package is a legitimate name and must still work.
   assert.equal(
-    update.scheduleDetachedUpdate({ name: '@scope/pkg', target: '1.2.3', platform: 'win32', spawnFn }).scheduled,
+    update.scheduleDetachedUpdate({ name: '@scope/pkg', target: '1.2.3', platform: 'win32', logPath: DEFERRED_LOG, spawnFn }).scheduled,
     true,
   );
 });
 
 test('a spawn that fails is reported, not thrown', () => {
   const out = update.scheduleDetachedUpdate({
-    name: 'p', target: 'latest', platform: 'win32',
+    name: 'p', target: 'latest', platform: 'win32', logPath: DEFERRED_LOG,
     spawnFn: () => { throw new Error('no powershell'); },
   });
   assert.equal(out.scheduled, false);
@@ -592,4 +596,129 @@ test('bin/cli.js takes the deferred path on Windows and the direct one elsewhere
   // The POSIX branch must still install and restart in place.
   assert.match(text, /\} else if \(autoPlan\.run\) \{/);
   assert.match(text, /runUpdate\(\{ target: 'latest', stream: true \}\)/);
+});
+
+// ─── What the deferred install did ───────────────────────────────────────────
+// It used to run with stdio ignored and `npm` resolving to npm.ps1, which
+// Windows' default execution policy refuses: every launch said "installing in
+// the background" and nothing was ever installed, with no trace of why.
+
+test('the deferred install bypasses the execution policy, calls npm.cmd and retries', () => {
+  const calls = [];
+  const log = join(mkdtempSync(join(tmpdir(), 'ettore-deferred-')), 'update.log');
+  const out = update.scheduleDetachedUpdate({
+    name: 'ettore-ai-assistant', target: 'latest', pid: 7, platform: 'win32', logPath: log,
+    from: '1.14.0', now: Date.parse('2026-09-27T10:00:00Z'),
+    spawnFn: (file, args, opts) => { calls.push({ file, args, opts }); return { unref() {} }; },
+  });
+  assert.equal(out.scheduled, true);
+  assert.equal(out.log, log);
+  const args = calls[0].args;
+  assert.deepEqual(args.slice(args.indexOf('-ExecutionPolicy'), args.indexOf('-ExecutionPolicy') + 2), ['-ExecutionPolicy', 'Bypass']);
+  const script = args.at(-1);
+  assert.match(script, /& npm\.cmd install -g ettore-ai-assistant@latest \*>> \$env:ETTORE_UPDATE_LOG/);
+  assert.doesNotMatch(script.replace(/npm\.cmd/g, ''), /\bnpm install/, 'plain npm is npm.ps1 in PowerShell');
+  assert.match(script, /for \(\$i = 1; \$i -le 3/);
+  assert.match(script, /"EXIT \$code"/);
+  assert.equal(calls[0].opts.env.ETTORE_UPDATE_LOG, log, 'the path travels in the environment, not the script');
+  assert.equal(readFileSync(log, 'utf8'), 'START latest 2026-09-27T10:00:00.000Z 1.14.0\n');
+});
+
+function deferredLog(text) {
+  const log = join(mkdtempSync(join(tmpdir(), 'ettore-deferred-')), 'update.log');
+  writeFileSync(log, text);
+  return log;
+}
+
+test('readDeferredUpdate tells running, done, failed and lost apart', () => {
+  const now = Date.parse('2026-09-27T10:01:00Z');
+  assert.equal(update.readDeferredUpdate({ logPath: join(tmpdir(), 'no-such-ettore-log') }), null);
+  assert.deepEqual(
+    update.readDeferredUpdate({ logPath: deferredLog('START latest 2026-09-27T10:00:00.000Z 1.14.0\n'), now }),
+    { state: 'running', target: 'latest', from: '1.14.0', startedAt: Date.parse('2026-09-27T10:00:00Z') },
+  );
+  assert.deepEqual(
+    update.readDeferredUpdate({ logPath: deferredLog('START latest 2026-09-27T10:00:00.000Z 1.14.0\nadded 1 package\nEXIT 0\n'), now }),
+    { state: 'done', target: 'latest', from: '1.14.0' },
+  );
+  assert.equal(
+    update.readDeferredUpdate({ logPath: deferredLog('START latest 2026-09-27T09:00:00.000Z 1.14.0\n'), now }).state,
+    'lost',
+  );
+  // PowerShell 5 appends UTF-16: NULs between the letters.
+  const utf16 = (t) => t.split('').join('\u0000');
+  const failed = update.readDeferredUpdate({
+    logPath: deferredLog(`START latest 2026-09-27T10:00:00.000Z 1.14.0\n${utf16('npm error code EBUSY\nnpm error busy')}\n\uFEFFEXIT 1\n`),
+    now,
+  });
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.code, 1);
+  assert.match(failed.detail, /EBUSY/);
+});
+
+test('planDeferredUpdate: a running install is not raced', () => {
+  const plan = update.planDeferredUpdate({
+    deferred: { state: 'running', target: 'latest', from: '1.14.0', startedAt: 1000 },
+    from: '1.14.0', to: '1.15.0', name: 'ettore-ai-assistant', now: 31000,
+  });
+  assert.equal(plan.schedule, false);
+  assert.match(plan.notice, /still installing in the background \(started 30s ago\)/);
+});
+
+test('planDeferredUpdate: a failure is reported with the reason and the manual command, then retried', () => {
+  const plan = update.planDeferredUpdate({
+    deferred: { state: 'failed', target: 'latest', from: '1.14.0', code: 1, detail: 'npm error code EBUSY' },
+    from: '1.14.0', to: '1.15.0', name: 'ettore-ai-assistant',
+  });
+  assert.equal(plan.schedule, true);
+  assert.match(plan.notice, /did not install \(npm exited with 1 — npm error code EBUSY\)/);
+  assert.match(plan.notice, /npm install -g ettore-ai-assistant@latest/);
+});
+
+test('planDeferredUpdate: success while still on the old build points at PATH', () => {
+  const plan = update.planDeferredUpdate({
+    deferred: { state: 'done', target: 'latest', from: '1.14.0' },
+    from: '1.14.0', to: '1.15.0', name: 'ettore-ai-assistant',
+  });
+  assert.equal(plan.schedule, false);
+  assert.equal(plan.clear, true);
+  assert.match(plan.notice, /where ettore/);
+});
+
+test('planDeferredUpdate: a report from another version is ignored', () => {
+  const plan = update.planDeferredUpdate({
+    deferred: { state: 'failed', target: 'latest', from: '1.13.0', code: 1, detail: 'old' },
+    from: '1.15.0', to: '1.16.0', name: 'ettore-ai-assistant',
+  });
+  assert.equal(plan.schedule, true);
+  assert.match(plan.notice, /1\.15\.0 → 1\.16\.0: installing in the background after you exit/);
+});
+
+test('on Windows the deferred script really runs npm.cmd and logs its exit code', { skip: process.platform !== 'win32' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ettore-deferred-run-'));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  // A fake npm.cmd, first on PATH: it prints its arguments and succeeds.
+  writeFileSync(join(bin, 'npm.cmd'), '@echo fake npm %*\r\n@exit /b 0\r\n');
+  const log = join(dir, 'update.log');
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin};${oldPath}`;
+  try {
+    // A pid that is already gone: Wait-Process returns at once.
+    const gone = execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+    const out = update.scheduleDetachedUpdate({
+      name: 'ettore-ai-assistant', target: 'latest', pid: Number(gone), platform: 'win32', logPath: log, from: '1.14.0',
+    });
+    assert.equal(out.scheduled, true);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+  let state = null;
+  for (let i = 0; i < 60 && state?.state !== 'done' && state?.state !== 'failed'; i++) {
+    await new Promise((r) => { setTimeout(r, 500); });
+    state = update.readDeferredUpdate({ logPath: log });
+  }
+  const text = readFileSync(log, 'utf8').replace(/\u0000/g, '');
+  assert.equal(state?.state, 'done', `log was:\n${text}`);
+  assert.match(text, /fake npm install -g ettore-ai-assistant@latest/);
 });

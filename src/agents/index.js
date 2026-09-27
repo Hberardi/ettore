@@ -179,6 +179,15 @@ const MAX_TEXT_TOOL_CALL_RECOVERIES = 4;
 // model already did its diligence.
 const VERIFIER_RE = /\b(?:node\s+(?:-c|--check|-e)|python3?\s+(?:-m\s+(?:py_compile|pyflakes|mypy|unittest|pytest)|-c)|tsc\b|--noEmit|eslint\b|prettier\s+(?:--check|-c)\b|ruff\s+(?:check|format)|pylint\b|pyflakes\b|flake8\b|mypy\b|black\s+--check|pytest\b|jest\b|vitest\b|mocha\b|cargo\s+(?:check|test|clippy|build)|rustc\b|go\s+(?:vet|test|build)|npm\s+(?:test|run\s+(?:test|lint|typecheck|build|check|format))|yarn\s+(?:test|lint|typecheck|build)|pnpm\s+(?:test|lint|typecheck|build)|rspec\b|phpstan\b|gcc\s+-fsyntax-only)\b/i;
 
+// Did this call check the work? Used to decide what lesson a turn teaches
+// itself — see `_learnFromTurn`. `run_tests`/`run_checks` are the dedicated
+// pair; a shell call counts when its command is a verifier, so a turn that
+// lints or type-checks is not recorded as an unverified one.
+function countsAsVerification(name, args) {
+  if (name === 'run_tests' || name === 'run_checks') return true;
+  if (name !== 'bash' && name !== 'bash_session') return false;
+  return VERIFIER_RE.test(String(args?.command || ''));
+}
 
 // Context room for one tool result. See `_summarizeToolOutputForContext`.
 const READ_CONTEXT_CHARS = 24_000;
@@ -567,31 +576,68 @@ export class Agent {
     // into every later session's system prompt — as if the user had asked it.
     if (this._isSubagent || projectMemoryDisabled()) return;
     try {
-      const toolMsgs = this.messages.filter(m => m.role === 'tool');
-      const assistantMsgs = this.messages.filter(m => m.role === 'assistant');
-      const recentAssistant = assistantMsgs[assistantMsgs.length - 1]?.content || finalText || '';
-      const files = [];
-      for (const t of toolMsgs.slice(-20)) {
-        const c = String(t.content || '');
-        const matches = c.match(/(?:\/|\b)(?:[\w.-]+\/)*[\w.-]+\.[A-Za-z0-9]+/g) || [];
-        matches.forEach(p => files.push(p));
+      // What this turn did, read from the per-call ledger rather than scraped
+      // out of the transcript. `_turnCallBaseline` is where the turn's counts
+      // start (see `_mostRepeatedToolCall`), so the delta is exactly this
+      // turn's calls. The old version took the last 20 tool *results* and
+      // regexed them for anything filename-shaped, which reached back into
+      // previous turns and could not tell a source file from a version
+      // number.
+      const baseline = this._turnCallBaseline || new Map();
+      const tools = [];
+      const files = new Set();
+      let callCount = 0;
+      let mutated = false;
+      let verified = false;
+      for (const [key, entry] of Object.entries(this.workingMemory.toolCalls || {})) {
+        const delta = (Number(entry?.count) || 0) - (baseline.get(key) || 0);
+        if (delta <= 0 || !entry?.name) continue;
+        callCount += delta;
+        for (let i = 0; i < delta; i++) tools.push(entry.name);
+        if (MUTATION_TOOL_NAMES.has(entry.name)) mutated = true;
+        if (countsAsVerification(entry.name, entry.args)) verified = true;
+        // The path the tool was *asked* to touch, straight out of its parsed
+        // arguments. This is the difference between "the task edited
+        // src/foo.js" and "the word 1.2.3 appeared in a test runner's
+        // output" — the old regex filed both as touched files, and the next
+        // session read that back as project experience.
+        const path = entry.args?.file_path;
+        if (typeof path === 'string' && path.trim()) files.add(path.trim());
       }
-      const uniqueFiles = [...new Set(files)].slice(0, 12);
-      const toolsUsed = toolMsgs
-        .map(t => String(t.tool_call_id || 'tool'))
-        .filter(Boolean);
+      const uniqueFiles = [...files].slice(0, 12);
 
-      const lessonHints = [];
-      if (/Error:/i.test(recentAssistant)) lessonHints.push('Detect and surface actionable errors early.');
-      if (uniqueFiles.length > 0) lessonHints.push('Track touched files for faster follow-up tasks.');
-      if (toolMsgs.length > 0) lessonHints.push('Prefer tool-driven verification before final response.');
+      // What the assistant actually delivered this turn, which is also what
+      // the lessons are judged against.
+      const assistantTail = this.messages.filter(m => m.role === 'assistant').pop()?.content;
+      const summary = String(finalText || assistantTail || '').replace(/\s+/g, ' ').trim();
+
+      // Lessons, each one a fact this turn actually established. The old
+      // three were constants emitted unconditionally, so they carried no
+      // information and were indistinguishable from a placeholder.
+      const lessons = [];
+      if (mutated && !verified) {
+        lessons.push('Files were changed and no check was run; a green suite or a targeted verifier is what makes the change claimable.');
+      }
+      const repeated = this._mostRepeatedToolCall();
+      if (repeated && repeated.count >= 3) {
+        lessons.push(`\`${repeated.name}\` ran ${repeated.count} times in this turn; repeating an unchanged read or the same command cannot return anything new.`);
+      }
+      if (/(?:^|\s)(?:Error|FAILED)\b|tests? (?:failed|are failing)|npm ERR!/i.test(summary)) {
+        lessons.push('The turn ended on a failing run; that failure is open work, not something to summarise away.');
+      }
+
+      // Nothing worth remembering: do not write an entry. The system prompt
+      // says not to save trivia, and one entry per turn is exactly how the
+      // journal fills with noise that later sessions read back as if it were
+      // hard-won experience.
+      if (callCount === 0 && lessons.length === 0) return;
 
       await appendEcosystemExperience(this._workdir, {
-        title: String(userPrompt || '').slice(0, 100),
-        summary: String(recentAssistant || '').replace(/\s+/g, ' ').slice(0, 220),
-        tools: toolsUsed,
+        title: String(userPrompt || '').replace(/\s+/g, ' ').trim().slice(0, 100),
+        summary: summary.slice(0, 220),
+        tools: [...new Set(tools)],
         files: uniqueFiles,
-        lessons: lessonHints,
+        lessons,
       });
     } catch {
       // best effort

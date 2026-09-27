@@ -7,6 +7,7 @@ import { connectionManager, ConnectionManager } from '../providers/index.js';
 import { PROVIDER_REGISTRY } from '../providers/registry.js';
 import { loadConfig, getConfig, saveConfig } from '../config/index.js';
 import { whatsNewOnStartup } from './whats-new.js';
+import { conversationLanguage, continuationPrompt } from './user-language.js';
 import { createClient } from '../llm/client.js';
 import { Agent } from '../agents/index.js';
 import { createSession, saveSession, sessionHasContent } from '../sessions/index.js';
@@ -495,7 +496,9 @@ export async function startApp(options = {}) {
     }
     mission.startTurn(text, { continuation });
     syncMission();
-    tui.messages.push({ role: 'user', text: displayText, tools: [], id: Date.now() });
+    // `auto`: sent by ETTORE in the user's name, so it does not count when
+    // working out which language the user writes in.
+    tui.messages.push({ role: 'user', text: displayText, tools: [], id: Date.now(), auto: continuation });
     tui.isRunning = true;
     tui.turnState = 'started';
     tui.streaming = { text: '', tools: [], reasoning: '', waitKind: 'model', lastActivityAt: Date.now(), stallMs: STALL_MS };
@@ -1038,8 +1041,10 @@ export async function startApp(options = {}) {
         id: Date.now(),
       });
       setImmediate(() => {
+        // In the user's language: it shows as their message, and a prompt in
+        // another language turns the model's answers into that language too.
         runAgent(
-          'continue with the next step. If the task is really complete, reply only "task complete" and stop.',
+          continuationPrompt('resume', conversationLanguage(tui.messages)),
           [],
           undefined,
           { continuation: true },
@@ -1053,7 +1058,7 @@ export async function startApp(options = {}) {
     if (decision.reason === 'budget_exhausted' || decision.reason === 'repeated_without_progress') {
       tui.messages.push({
         role: 'system',
-        text: `⚠ Mi fermo qui: ${decision.why}.`
+        text: `⚠ Stopping here: ${decision.why}.`
           + `\n   Type "continue" to resume, or say what the next step is.`,
         tools: [],
         id: Date.now(),
@@ -1220,8 +1225,8 @@ export async function startApp(options = {}) {
       const list = pending.slice(0, 5).map(step => `   ${step}`).join('\n');
       tui.messages.push({
         role: 'system',
-        text: `⚠ Piano incompleto: ${remaining} step ancora aperti (${why}).\n${list}`
-          + `${pending.length > 5 ? `\n   … e altri ${pending.length - 5}` : ''}`
+        text: `⚠ Plan incomplete: ${remaining} step(s) still open (${why}).\n${list}`
+          + `${pending.length > 5 ? `\n   … and ${pending.length - 5} more` : ''}`
           + `\n   Auto-resume used up (${MAX_AUTO_RESUMES}). Type "continue" to resume by hand, or say what the next step is.`,
         tools: [],
         id: Date.now(),
@@ -1237,7 +1242,7 @@ export async function startApp(options = {}) {
       tools: [],
       id: Date.now(),
     });
-    pendingAutoResume = 'continue with the next step of the plan — do it, do not announce it';
+    pendingAutoResume = continuationPrompt('plan', conversationLanguage(tui.messages));
     tui.needsRender = true;
   });
 
@@ -1263,7 +1268,7 @@ export async function startApp(options = {}) {
       tools: [],
       id: Date.now(),
     });
-    pendingAutoResume = 'carry out the next concrete step with a tool — stop announcing what you will do';
+    pendingAutoResume = continuationPrompt('act', conversationLanguage(tui.messages));
     tui.needsRender = true;
   });
 

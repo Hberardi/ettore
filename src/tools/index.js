@@ -631,7 +631,7 @@ async function confirmIfJevFlags(command, workdir) {
   uiBridge.emit('jevCommand', { command, value: verdict.value, flagged: verdict.flagged, ms: verdict.ms, cached: Boolean(verdict.cached) });
   if (!verdict.flagged) return null;
   const ok = await requestConfirmation({
-    title: `◆ Jev: questo comando potrebbe fare danni difficili da annullare (${Number(verdict.value).toFixed(2)})`,
+    title: `◆ Jev: this command could do damage that is hard to undo (${Number(verdict.value).toFixed(2)})`,
     detail: `$ ${command}`,
     allowNonInteractive: false,
   });
@@ -2220,8 +2220,17 @@ export const toolHandlers = {
           return `${partial.output}\n[cancelled]`.trim();
         }
         // A non-zero exit is a result, not an exception: the command ran and
-        // what it printed is what the model needs to see.
-        const body = result.stdout || result.stderr || '(no output)';
+        // what it printed is what the model needs to see — both streams. This
+        // used to be `stdout || stderr`, so a script that printed anything
+        // before failing lost its error: `print('ok'); raise ValueError` came
+        // back as "ok [exit code 1]", the traceback gone, and the model was
+        // left guessing why. stderr now follows stdout, labelled as
+        // bash_session labels it.
+        const stdout = String(result.stdout || '');
+        const stderr = String(result.stderr || '');
+        const body = stdout && stderr.trim()
+          ? `${stdout.replace(/\n*$/, '')}\n[stderr]\n${stderr}`
+          : (stdout || stderr || '(no output)');
         const suffix = result.code ? `\n[exit code ${result.code}]` : '';
         // Cap and clean so chat clients don't truncate silently. The bash
         // tool is the most common source of runaway output (e.g. a `cat` on
@@ -2229,8 +2238,10 @@ export const toolHandlers = {
         // truncated "Need to re-run" message downstream is confusing.
         const cleaned = sanitizeOutput(body, { maxBytes: 50_000 });
         if (cleaned.truncated || result.truncated) {
+          // The exit code is kept: a long log that failed must still read as
+          // a failure.
           return cleaned.output +
-            `\n\n[bash output was ${cleaned.originalBytes} bytes; cap is 50KB — see "Run command directly" hint]`;
+            `\n\n[bash output was ${cleaned.originalBytes} bytes; cap is 50KB — see "Run command directly" hint]${suffix}`;
         }
         return cleaned.output + suffix;
       } finally {

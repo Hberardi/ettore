@@ -113,7 +113,7 @@ const EDIT_INTENT_RE = /\b(edit|modify|change|update|fix|create|write|implement|
 const EDIT_OVERLAY_RE = /\bwrite\b|\bedit\b|carry out the announced action/i;
 // "continua" and friends carry no intent of their own: they continue whatever
 // the previous prompt asked for, so the caller's sticky intent must survive.
-const CONTINUATION_PROMPT_RE = /^\s*(?:continua|prosegui|vai(?:\s+avanti)?|avanti|procedi|dai|ok(?:ay)?|va\s+bene|continue|go\s+on|keep\s+going|next|proceed|resume)\b/i;
+const CONTINUATION_PROMPT_RE = /^\s*(?:contin[uú]a|mach\s+weiter|weiter|prosegui|vai(?:\s+avanti)?|avanti|procedi|dai|ok(?:ay)?|va\s+bene|continue|go\s+on|keep\s+going|next|proceed|resume)\b/i;
 
 const WEB_INTENT_RE = /\b(latest|current|today|news|web|online|website|url|docs?|documentation|internet|image|images|photo|picture|aggiornat[oaie]|oggi|notizie|sito|pagina|immagin[ei]|foto)\b/i;
 const DOCUMENT_INTENT_RE = /\b(pdf|docx?|odt|document[oi]?)\b/i;

@@ -50,7 +50,7 @@ export function turnSignature({ text = '', toolCount = 0, pendingTodos = 0 } = {
 
 /**
  * @returns {{ resume: boolean, reason: string, why: string, signature: string }}
- *   `reason` is a stable machine tag; `why` is the Italian sentence the TUI
+ *   `reason` is a stable machine tag; `why` is the sentence the TUI
  *   shows, so the user always learns why the run kept going — or stopped.
  */
 export function autoResumeDecision({
@@ -93,13 +93,13 @@ export function autoResumeDecision({
   }
 
   if (!planMode && pendingTodos > 0) {
-    return { resume: true, reason: 'pending_todos', why: `${pendingTodos} step dal piano aperti`, signature };
+    return { resume: true, reason: 'pending_todos', why: `${pendingTodos} plan step(s) still open`, signature };
   }
   if (!planMode && toolCount > 0) {
-    return { resume: true, reason: 'tool_activity', why: `${toolCount} tool eseguiti, proseguo automaticamente`, signature };
+    return { resume: true, reason: 'tool_activity', why: `${toolCount} tool call(s) run, continuing automatically`, signature };
   }
   if (announced) {
-    return { resume: true, reason: 'announced_action', why: 'azione annunciata ma non eseguita', signature };
+    return { resume: true, reason: 'announced_action', why: 'an action was announced but not carried out', signature };
   }
   return { resume: true, reason: 'declared_pending_work', why: 'the model said there is work still to do', signature };
 }

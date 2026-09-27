@@ -13,6 +13,9 @@ import {
   describeInstall,
   formatBanner,
   scheduleDetachedUpdate,
+  readDeferredUpdate,
+  planDeferredUpdate,
+  clearDeferredUpdate,
   planAutoUpdate,
   runUpdate,
   describeCheckout,
@@ -169,17 +172,17 @@ program
       // cmd.exe holds it open for as long as this process lives — so an
       // in-process install can only ever fail here. Hand it to a detached
       // PowerShell that waits for us to exit, and let the next launch be the
-      // new version. See scheduleDetachedUpdate.
-      const scheduled = scheduleDetachedUpdate({ target: 'latest' });
-      if (scheduled.scheduled) {
-        notify(
-          `${dim}↻ ETTORE ${autoPlan.from} → ${autoPlan.to}: installing in the background; `
-          + `the next launch will be ${autoPlan.to}.${reset}\n`,
-          'stdout',
-        );
-      } else {
-        notify(`${dim}auto-update could not be scheduled: ${scheduled.reason}${reset}\n`);
+      // new version. See scheduleDetachedUpdate. What the previous one did
+      // decides whether to start another and what to say.
+      const plan = planDeferredUpdate({ deferred: readDeferredUpdate(), from: autoPlan.from, to: autoPlan.to });
+      if (plan.clear) clearDeferredUpdate();
+      if (plan.schedule) {
+        const scheduled = scheduleDetachedUpdate({ target: 'latest' });
+        if (!scheduled.scheduled) {
+          notify(`${dim}auto-update could not be scheduled: ${scheduled.reason}${reset}\n`);
+        }
       }
+      if (plan.notice) notify(`${dim}${plan.notice}${reset}\n`, 'stdout');
     } else if (autoPlan.run) {
       process.stdout.write(`↻ ETTORE ${autoPlan.from} → ${autoPlan.to}: installing…\n`);
       try {
@@ -380,6 +383,19 @@ program
       const red = process.stdout.isTTY ? '\x1b[31m' : '';
       process.stderr.write(`\n${red}✗ update failed: ${error.message}${reset}\n`);
       const { name } = readLocalPackage();
+      // Launched from cmd.exe, ettore.cmd is locked for as long as this
+      // command runs, and npm cannot rewrite it. Finish the job once we are
+      // gone, the same way the automatic update does.
+      if (process.platform === 'win32') {
+        const scheduled = scheduleDetachedUpdate({ target: options.target || 'latest' });
+        if (scheduled.scheduled) {
+          process.stderr.write(
+            `On Windows the running ettore.cmd can block npm: the install will be retried in the background as soon as this command exits.\n`
+            + `${dim}Check in a minute with \`ettore --version\`; its log is ${scheduled.log}.${reset}\n`,
+          );
+          process.exit(1);
+        }
+      }
       process.stderr.write(`Tip: try \`npm install -g ${name}@latest\` directly.\n`);
       process.exit(1);
     }

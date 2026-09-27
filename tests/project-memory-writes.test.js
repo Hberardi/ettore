@@ -56,9 +56,41 @@ test('a sub-agent\'s turn is never filed as an experience of the project', async
     const journal = () => { try { return readFileSync(join(root, '.ettore', 'ecosystem.md'), 'utf8'); } catch { return ''; } };
     assert.doesNotMatch(journal(), /exploration sub-agent/, 'the brief must not become a "request" in the journal');
 
+    // A turn that did nothing is not worth an entry (see the next test), so
+    // the main agent's turn here edits a file and runs the tests, as a real
+    // one would.
     const main = make();
+    main.workingMemory.toolCalls = {
+      'edit:1': { name: 'edit', args: { file_path: 'src/parser.js' }, count: 1 },
+      'bash:2': { name: 'bash', args: { command: 'npm test' }, count: 1 },
+    };
     await main._learnFromTurn('sistema il parser', 'Fatto.');
     assert.match(journal(), /sistema il parser/, 'the main agent still learns from its own turns');
+    assert.match(journal(), /src\/parser\.js/, 'with the file the turn touched');
+  } finally {
+    if (previous === undefined) delete process.env.ETTORE_PROJECT_MEMORY;
+    else process.env.ETTORE_PROJECT_MEMORY = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a turn that ran no tool and taught nothing leaves the journal alone', async () => {
+  // One entry per turn is how the journal filled with noise that every later
+  // session read back as experience: "Fatto." after a question is not one.
+  const { Agent } = await import('../src/agents/index.js');
+  const previous = process.env.ETTORE_PROJECT_MEMORY;
+  const root = mkdtempSync(join(tmpdir(), 'ettore-learn-'));
+  process.env.ETTORE_PROJECT_MEMORY = 'on';
+  try {
+    const client = { async turn() { return { type: 'text', content: 'Fatto.' }; } };
+    const agent = new Agent(client, {
+      provider: 'test', model: 'gpt-4o', modelCapability: 'full',
+      workdir: root, contextWindow: 128000, verifyAfterEdit: false,
+    }, 'build');
+    await agent._learnFromTurn('che ore sono?', 'Fatto.');
+    let journal = '';
+    try { journal = readFileSync(join(root, '.ettore', 'ecosystem.md'), 'utf8'); } catch { /* no journal at all */ }
+    assert.doesNotMatch(journal, /che ore sono/);
   } finally {
     if (previous === undefined) delete process.env.ETTORE_PROJECT_MEMORY;
     else process.env.ETTORE_PROJECT_MEMORY = previous;

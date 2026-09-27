@@ -558,3 +558,19 @@ test('dep_inspect: reports unsupported ecosystem on empty repo', async () => {
     assert.match(r, /no supported dependency ecosystem/i);
   });
 });
+
+// `stdout || stderr` dropped the error of any command that printed something
+// before failing: a script's progress lines came back, its traceback did not.
+test('bash returns stderr as well as stdout, and the exit code', async () => {
+  const r = await toolHandlers.bash({ command: 'node -e "console.log(\'step 1 ok\'); console.error(\'boom: it failed\'); process.exit(3)"' });
+  assert.match(r, /step 1 ok/);
+  assert.match(r, /\[stderr\]\n[\s\S]*boom: it failed/);
+  assert.match(r, /\[exit code 3\]/);
+});
+
+test('bash with only stderr, or only stdout, returns it unlabelled', async () => {
+  assert.match(await toolHandlers.bash({ command: 'node -e "console.error(\'only err\')"' }), /^only err/);
+  const out = await toolHandlers.bash({ command: 'node -e "console.log(\'only out\')"' });
+  assert.match(out, /^only out/);
+  assert.doesNotMatch(out, /\[stderr\]/);
+});

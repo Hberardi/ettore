@@ -414,19 +414,35 @@ class TUI {
     const glowIdx = Math.floor(this.animationFrame / 20) % GLOW_COLORS.length;
     const glowColor = GLOW_COLORS[glowIdx];
 
-    const leftPlain = ` ETTORE · ${session}`;
-    const rightPlain = `${provider}/${model} · ${modeLabel}`;
-    const pad = Math.max(0, this.cols - leftPlain.length - rightPlain.length);
+    // The ▌ counts too: leaving it out made the line one column wider than
+    // the terminal, and the mode at its right end was cut to "BU…". One
+    // column is kept free on the right.
+    const leftPlain = `▌ ETTORE · ${session}`;
+    const rightPlain = `${provider}/${model} · ${modeLabel} `;
+    const pad = Math.max(0, this.cols - this._visualLen(leftPlain) - this._visualLen(rightPlain));
 
     const bg = HEADER_BG;
     const left = `${bg}${C.bold}${glowColor}▌${C.reset}${bg}${C.bold}${C.text} ETTORE${C.reset}${bg}${C.dim} · ${session}${C.reset}`;
     const providerColor = provider === 'no provider' ? C.warn : C.dim;
-    const right = `${bg}${providerColor}${provider}${C.reset}${bg}/${C.text}${model}${C.reset}${bg} ${C.dim}·${C.reset}${bg} ${modeColor}${C.bold}${modeLabel}${C.reset}`;
+    const right = `${bg}${providerColor}${provider}${C.reset}${bg}/${C.text}${model}${C.reset}${bg} ${C.dim}·${C.reset}${bg} ${modeColor}${C.bold}${modeLabel}${C.reset}${bg} `;
     return left + bg + ' '.repeat(pad) + right + C.reset;
   }
 
+  /**
+   * How wide the conversation is laid out: the main panel, one column short
+   * of it. It used to be the whole terminal (`cols - 3`) while the panel
+   * beside the sidebar is far narrower, so every bubble border, every wrapped
+   * line and every "YOU" message wider than the panel was cut to it with "…"
+   * — wrapped for a width nobody could see.
+   */
+  messagesWidth() {
+    const sidebarWidth = sidebarWidthFor(this.cols, this.sidebarPreference);
+    const mainWidth = Math.max(20, this.cols - sidebarWidth - 1);
+    return Math.max(19, mainWidth - 1);
+  }
+
   _renderMessages() {
-    const maxWidth = this.cols - 3;
+    const maxWidth = this.messagesWidth();
 
     if (this.messages.length === 0 && !this.streaming) {
       const isConnected = Boolean(connectionManager.getActive());
@@ -479,7 +495,11 @@ class TUI {
     const provider = connectionManager.activeProvider || 'no provider';
     const mode = this.mode.toUpperCase();
     const workdir = shortenPath(process.cwd());
-    const line = ` ${C.accent}${C.bold}▌${C.reset} ${C.bold}${C.text}${mode}${C.reset} ${C.dim}workspace${C.reset} ${C.text}${workdir}${C.reset} ${C.dim}· llm:${C.reset}${provider === 'no provider' ? C.warn : C.accent}${provider}${C.reset} ${C.dim}· / commands · 📎 attach · ! shell${C.reset}`;
+    const base = ` ${C.accent}${C.bold}▌${C.reset} ${C.bold}${C.text}${mode}${C.reset} ${C.dim}workspace${C.reset} ${C.text}${workdir}${C.reset} ${C.dim}· llm:${C.reset}${provider === 'no provider' ? C.warn : C.accent}${provider}${C.reset}`;
+    // The key hints are repeated in the input bar: on a narrow panel they are
+    // dropped whole rather than cut to "/ comma…".
+    const withHints = `${base} ${C.dim}· / commands · 📎 attach · ! shell${C.reset}`;
+    const line = this._visualLen(withHints) <= maxWidth ? withHints : base;
     return [this._truncateVisual(line, maxWidth), ''];
   }
 

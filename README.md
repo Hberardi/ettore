@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.15.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.15.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -77,7 +77,11 @@ but two of them are worth knowing about.
 The `bash` and `bash_session` tools run commands through the platform's shell:
 **bash** on Linux and macOS, **PowerShell** on Windows. The model is told which
 one it has, so it writes `Select-String` rather than `grep` and `;` rather than
-`&&` when it is on Windows.
+`&&` when it is on Windows. Both return what the command wrote on stdout and on stderr
+(labelled `[stderr]`) with its exit code, so a failing script comes back with
+its error, not just the lines it printed before failing. `bash` runs each
+command on its own; `bash_session` keeps one shell alive, so `cd`, exports and
+functions carry over to the next call.
 
 PowerShell is preferred over Git Bash even when Git Bash is installed: a `bash`
 found on a Windows `PATH` is often WSL's, and that one cannot see `C:\…` the
@@ -183,6 +187,19 @@ ettore 1.2.4
 
 `ettore update` does the same thing on demand, and `--no-update-check` skips
 the npm call altogether.
+
+On **Windows** the install cannot happen while ETTORE runs — cmd.exe keeps
+`ettore.cmd` locked — so it is handed to a hidden PowerShell that waits for you
+to exit, installs, and the next launch is the new version:
+
+```
+↻ ETTORE 1.14.0 → 1.15.0: installing in the background after you exit; the next launch will be 1.15.0.
+```
+
+What it did is written to `~/.config/ettore/update.log`, and the next launch
+reads it: an install still running is not started twice, and one that failed
+is reported with npm's reason and tried again. If it keeps failing, close
+ETTORE and run `npm install -g ettore-ai-assistant@latest` yourself.
 
 The first time you open the TUI on a new version, it tells you what came with
 it: a *✨ What's new* message listing the headings of every release since the
@@ -292,6 +309,11 @@ the whole description. Type to filter, ↑↓ to move, Enter to run.
 
 The whole interface — commands, prompts, confirmations, the music video
 studio — is in English. You can still write to the agent in any language.
+When a turn stops mid-work, ETTORE sends the next prompt for you ("continue
+with the next step…") and it shows as your message; it is written in the
+language you are writing in — Italian, English, Spanish, French, German or
+Portuguese, English for anything else — so neither you nor the model is
+switched to another language halfway through.
 
 When the agent needs a decision from you it asks in a small window with its
 suggested answers. Pick one with the arrows and Enter, or just start typing:

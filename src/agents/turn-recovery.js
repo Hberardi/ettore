@@ -102,6 +102,10 @@ const COMPLETION_PATTERNS = [
   /\bho\s+(?:finito|completato|concluso|terminato)\b/i,
   /\b(?:tutto|e[' ]?\s*tutto)\s+(?:fatto|pronto|completato|a\s+posto|sistemato)\b/i,
   /\ball\s+done\b|\bthat'?s\s+it\b|\bwork\s+complete\b|\bnothing\s+(?:else\s+)?left\b/i,
+  // The answer the continuation prompt asks for, in each language it is sent
+  // in (see src/app/user-language.js DONE_PHRASES). Letter lookarounds rather
+  // than \b, which does not see "é" or "í" as letters.
+  /(?:^|[^\p{L}])(?:compito\s+completat[oa]|tarea\s+completada|t[âa]che\s+termin[ée]e|aufgabe\s+erledigt|tarefa\s+conclu[íi]da)(?![\p{L}])/iu,
 ];
 
 // A standalone "Fatto." on its own line is a real completion signal; the same

@@ -1797,7 +1797,7 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
           ...notes,
         ].join('\n');
       } catch (e) {
-        return `Errore nell'avvio dello studio: ${e.message}`;
+        return `Could not start the studio: ${e.message}`;
       }
     }
   },

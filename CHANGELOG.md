@@ -8,6 +8,64 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.15.1] — 2026-09-27
+
+### Changed — the prompts sent in your name speak your language
+
+When a turn stopped mid-work, the TUI sent the next prompt itself and showed
+it as a *YOU* message: *continue with the next step…*, in English even to a
+user writing Italian — and the model, prompted in English, went on in English.
+These prompts (continue, continue the plan, stop announcing and act) now follow
+the language of your own latest messages: Italian, English, Spanish, French,
+German or Portuguese, English otherwise (`src/app/user-language.js`). The
+answer they ask for when the work is over (*compito completato*, *task
+complete*, *tarea completada*…) is recognised in each of them, and each is
+read by the tool router as a continuation, so the resumed turn keeps its plan.
+
+### Fixed — the conversation was cut to the left panel
+
+- **The project journal filed every turn, and guessed what it touched.**
+  `.ettore/ecosystem.md` goes into every session's system prompt, and each
+  turn added an entry: its "files" regexed out of the last twenty tool results
+  (so a version number counted as a file), its tools listed by call id, and
+  three fixed lessons written whatever happened. An entry now takes the tools
+  and files from the turn's own calls, and lessons only from what the turn
+  showed — files changed with no check run, the same call repeated, a failing
+  run at the end; a turn that ran no tool and taught nothing writes nothing.
+- **`bash` hid the error of a command that printed anything first.** It
+  returned `stdout || stderr`, so `print('ok'); raise ValueError(...)` came back
+  as `ok [exit code 1]` with the traceback gone — the agent saw that the
+  command failed and not why. It now returns both streams, stderr labelled
+  `[stderr]` as `bash_session` already did, and keeps the exit code when a long
+  output is capped.
+- **Messages were laid out for the whole terminal** and then cut to the panel
+  beside the sidebar: a *YOU* bubble lost its right border and its text ended
+  in "…", and long answer lines were cut mid-word before wrapping ("il
+  codic…" / "compilare."). The transcript is now wrapped for the width it is
+  shown in.
+- **The mode in the top bar read "BU…"**: the bar was one column wider than
+  the terminal.
+- **The workspace line** drops its key hints on a narrow panel instead of
+  ending in "/ comma…".
+- **Italian left in the interface**: the auto-resume reasons ("23 tool
+  eseguiti, proseguo automaticamente"), "Mi fermo qui", "Piano incompleto",
+  the studio start error and a Jev confirmation title are now English.
+
+### Fixed — on Windows the automatic update never installed
+
+Every launch said *installing in the background; the next launch will be
+1.15.0*, and the next launch was still 1.14.0. The deferred install ran `npm`
+in PowerShell, where it is `npm.ps1` — a script, which Windows' default
+execution policy refuses — and with its output thrown away, nothing said so.
+It now calls `npm.cmd` with the policy bypassed for that one process, retries
+three times when an ETTORE opened again too soon still holds the shim, and
+writes what happened to `~/.config/ettore/update.log`. The next launch reads
+it: an install still running is not raced by a second one, a failed one is
+reported with npm's own reason and the command to do it by hand, and a
+success while the old build still starts points at a second copy on PATH.
+`ettore update` falls back to the same deferred install when npm fails on
+Windows.
+
 ## [1.15.0] — 2026-09-27
 
 ### Added — what's new after an update, and `/changelog`
