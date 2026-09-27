@@ -8,6 +8,53 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.11.1] — 2026-09-27
+
+### Fixed — Opus 5.5 through Claude Code: a silent wait instead of an answer
+
+- **The CLI's refusal was thrown away.** Claude Code refuses a model it is too
+  old for in its result event — "Claude Code 2.1.152 does not support this
+  model; version 2.1.280 or newer is required. Run 'claude update'" — and then
+  exits 1. ETTORE read only the exit code and reported `Claude Code exited with
+  code 1`. The CLI's own message is now the error, with its HTTP status.
+- **A model thinking before it wrote looked like a hung one.** Every watchdog
+  counted text tokens, and a reasoning model can think for minutes before the
+  first — with nothing streamed at all when the thinking text is not sent. The
+  bridge now reports every non-text stream event (a thinking block starting, a
+  signature, a ping) as a sign of life, and the TUI's stall watchdog gives
+  `claude-code` the long window the bridge itself already used: it had been the
+  shortest fuse in the chain, warning at 60s and cancelling at 90s.
+- **`/use claude-code <id>` refused ids not in the list**, despite the README
+  saying any id works: Claude Code forwards the name to the API, so a model
+  released after this build could not be picked. The list is a menu for
+  `claude-code` now, and it includes `claude-opus-5-5`.
+
+### Fixed — `/connect claude-code` did not work
+
+- **Typed at the shell, it went to the model as a question.** `ettore /connect
+  claude-code` — the form the README shows — ran as a one-shot prompt, so the
+  configured model received "/connect claude-code" and answered with an
+  unexplained `400 status code (no body)`; with nothing configured it refused
+  with "Not connected … use /connect", the very command just typed. A built-in
+  command given on the command line now runs as that command, before any
+  connection is needed, and prints what the TUI would have printed. A prompt
+  that merely starts with a slash (`/tmp/app.log spiegami`) still goes to the
+  model. From a terminal, a keyless provider with nobody signed in hands over
+  to its sign-in (`claude auth login`) and connects again, as the TUI does.
+- **On Windows the CLI was never found.** npm installs Claude Code as
+  `claude.cmd`, and Node will not spawn a batch file without a shell, so
+  `execFile('claude')` failed with ENOENT and ETTORE reported "Claude Code CLI
+  not found" beside a working install. The shim is now read and the program it
+  runs — the native `claude.exe`, or `node cli.js` for older releases — is
+  started directly; the native installer's `%USERPROFILE%\.local\bin` is
+  checked when PATH has nothing. The sign-in handoff uses the same resolution.
+- **The system prompt no longer rides on the command line.** With its tool list
+  it is about 30,000 characters, against a 32,767-character limit for a whole
+  Windows command line: one skill or plugin more and the CLI would not start. It
+  is written to a private temp file for `--system-prompt-file` and removed when
+  the turn ends, including a cancelled one — which also keeps it out of every
+  process listing on the machine.
+
 ## [1.11.0] — 2026-09-27
 
 ### Added — Jev swaps a blocked tool for one that works

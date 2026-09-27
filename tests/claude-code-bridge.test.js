@@ -1,7 +1,7 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync as realExists, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -18,6 +18,7 @@ import {
   describeAccount,
   detectClaudeAuth,
   parseAuthStatus,
+  resolveClaudeCommand,
 } from '../src/providers/claude-code.js';
 import { isKeylessProvider } from '../src/providers/index.js';
 
@@ -422,4 +423,176 @@ test('ClaudeCodeClient carries the API error status onto the thrown error', asyn
       return true;
     },
   );
+});
+
+// ── Windows: the program behind npm's claude.cmd ─────────────────────────────
+//
+// `execFile('claude')` failed with ENOENT on every Windows machine: npm installs
+// the CLI as a .cmd shim, which Node will not spawn without a shell. These run
+// on Linux against real files for the PATH lookup and a fake filesystem for the
+// Windows paths behind it.
+
+const madeDirs = [];
+after(() => { for (const dir of madeDirs) rmSync(dir, { recursive: true, force: true }); });
+
+function windowsPathWith(files) {
+  const dir = mkdtempSync(join(tmpdir(), 'ettore-claude-bin-'));
+  madeDirs.push(dir);
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+  return dir;
+}
+const slashes = p => String(p).replace(/\\/g, '/');
+
+test('Windows: a native claude.exe on PATH is used as it is', () => {
+  const dir = windowsPathWith({ 'claude.exe': '' });
+  const cmd = resolveClaudeCommand({ os: 'win32', env: { PATH: dir, PATHEXT: '.EXE;.CMD' } });
+  assert.equal(cmd.file, join(dir, 'claude.exe'));
+  assert.deepEqual(cmd.args, []);
+  assert.ok(!cmd.shell);
+});
+
+test('Windows: npm\'s claude.cmd is unwrapped to the executable it runs', () => {
+  const shim = '@ECHO off\r\nGOTO start\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n'
+    + '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n';
+  const dir = windowsPathWith({ 'claude.cmd': shim });
+  const target = `${dir}/node_modules/@anthropic-ai/claude-code/bin/claude.exe`;
+  const cmd = resolveClaudeCommand({
+    os: 'win32',
+    env: { PATH: dir, PATHEXT: '.EXE;.CMD' },
+    exists: p => slashes(p) === target || realExists(p),
+  });
+  assert.equal(slashes(cmd.file), target);
+  assert.ok(!cmd.shell, 'never through cmd.exe, which mangles the arguments');
+});
+
+test('Windows: an older JS entry point is run with node, not the shell', () => {
+  const shim = 'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
+    + '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n';
+  const dir = windowsPathWith({ 'claude.cmd': shim });
+  const target = `${dir}/node_modules/@anthropic-ai/claude-code/cli.js`;
+  const cmd = resolveClaudeCommand({
+    os: 'win32',
+    env: { PATH: dir, PATHEXT: '.EXE;.CMD' },
+    exists: p => slashes(p) === target,
+    readFile: p => readFileSync(p, 'utf8'),
+    nodePath: 'C:\\node\\node.exe',
+  });
+  assert.equal(cmd.file, 'C:\\node\\node.exe');
+  assert.deepEqual(cmd.args.map(slashes), [target]);
+});
+
+test('Windows: a shim it cannot read falls back to the shell rather than ENOENT', () => {
+  const dir = windowsPathWith({ 'claude.cmd': '@echo off\r\nsomething else %*\r\n' });
+  const cmd = resolveClaudeCommand({ os: 'win32', env: { PATH: dir, PATHEXT: '.EXE;.CMD' }, exists: () => false });
+  assert.equal(cmd.file, join(dir, 'claude.cmd'));
+  assert.equal(cmd.shell, true);
+});
+
+test('Windows: the native installer location is found when PATH has nothing', () => {
+  const cmd = resolveClaudeCommand({
+    os: 'win32',
+    env: { PATH: '', PATHEXT: '.EXE', USERPROFILE: 'C:\\Users\\me' },
+    exists: p => p === 'C:\\Users\\me\\.local\\bin\\claude.exe',
+  });
+  assert.equal(cmd.file, 'C:\\Users\\me\\.local\\bin\\claude.exe');
+});
+
+test('elsewhere it is simply `claude`, and ETTORE_CLAUDE_BIN always wins', () => {
+  assert.deepEqual(resolveClaudeCommand({ os: 'linux', env: {} }), { file: 'claude', args: [] });
+  assert.deepEqual(resolveClaudeCommand({ os: 'darwin', env: { ETTORE_CLAUDE_BIN: '/opt/c' } }), { file: '/opt/c', args: [] });
+  const dir = windowsPathWith({ 'claude.exe': '' });
+  assert.equal(resolveClaudeCommand({ os: 'win32', env: { ETTORE_CLAUDE_BIN: 'D:\\c\\claude.exe', PATH: dir } }).file, 'D:\\c\\claude.exe');
+});
+
+// ── the system prompt travels in a file ─────────────────────────────────────
+
+test('the system prompt goes in a file, not on the command line', () => {
+  const args = buildClaudeCodeArgs('opus', 'SYSTEM', null, { systemPromptFile: '/tmp/x/system-prompt.txt' });
+  const at = args.indexOf('--system-prompt-file');
+  assert.equal(args[at + 1], '/tmp/x/system-prompt.txt');
+  assert.ok(!args.includes('--system-prompt'), 'Windows caps a command line at 32,767 characters');
+  assert.ok(!args.includes('SYSTEM'));
+});
+
+test('ClaudeCodeClient hands the CLI a prompt file with the system prompt, and removes it after', async () => {
+  let seenPath = null;
+  let seenContent = null;
+  const { spawn } = fakeClaude([textDelta('ok'), resultEvent()]);
+  const spying = (bin, args, options) => {
+    seenPath = args[args.indexOf('--system-prompt-file') + 1];
+    seenContent = readFileSync(seenPath, 'utf8');
+    assert.equal(options.windowsHide, true);
+    return spawn(bin, args, options);
+  };
+  const client = new ClaudeCodeClient('sonnet', { spawn: spying, bin: '/usr/bin/claude' });
+  const system = `regole di sistema ${'x'.repeat(40_000)}`;
+  await client.turn([{ role: 'system', content: system }, { role: 'user', content: 'hi' }], [], () => {}, null);
+
+  assert.ok(seenContent.startsWith('regole di sistema'), 'the whole prompt, however long, reaches the CLI');
+  assert.equal(realExists(seenPath), false, 'nothing is left behind in the temp dir');
+});
+
+test('the prompt file is removed even when the turn is cancelled', async () => {
+  let seenPath = null;
+  const spawn = (bin, args) => {
+    seenPath = args[args.indexOf('--system-prompt-file') + 1];
+    // A child that never reports back: only the abort ends this turn.
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stdout.setEncoding = () => {};
+    child.stderr = new EventEmitter();
+    child.stderr.setEncoding = () => {};
+    child.stdin = new EventEmitter();
+    child.stdin.end = () => {};
+    child.kill = () => {};
+    return child;
+  };
+  const controller = new AbortController();
+  const client = new ClaudeCodeClient('sonnet', { spawn, bin: '/usr/bin/claude' });
+  const turn = client.turn([{ role: 'system', content: 'sys' }, { role: 'user', content: 'hi' }], [], () => {}, controller.signal);
+  setImmediate(() => controller.abort());
+  await assert.rejects(turn, /Aborted/);
+  assert.equal(realExists(seenPath), false);
+});
+
+// ── a model the CLI refuses, and a model that thinks before it writes ───────
+
+test('a request the CLI refuses reports the CLI\'s own reason, not "exited with code 1"', async () => {
+  const { spawn } = fakeClaude([{
+    type: 'result',
+    is_error: true,
+    api_error_status: 400,
+    result: 'API Error: 400 Claude Code 2.1.152 does not support this model; version 2.1.280 or newer is required. Run \'claude update\'',
+    usage: {},
+  }], { exitCode: 1 });
+  const client = new ClaudeCodeClient('claude-opus-5-5', { spawn, bin: '/usr/bin/claude' });
+  await assert.rejects(
+    client.turn([{ role: 'user', content: 'ciao' }], [], () => {}, null),
+    (error) => {
+      assert.match(error.message, /version 2\.1\.280 or newer is required/);
+      assert.match(error.message, /claude update/);
+      assert.equal(error.status, 400);
+      return true;
+    },
+  );
+});
+
+test('a model thinking without streaming text still shows it is alive', async () => {
+  const phases = [];
+  const { spawn } = fakeClaude([
+    { type: 'stream_event', event: { type: 'message_start', message: { model: 'claude-opus-5-5' } } },
+    { type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'thinking' } } },
+    { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'signature_delta', signature: 'x' } } },
+    { type: 'stream_event', event: { type: 'ping' } },
+    textDelta('fatto'),
+    resultEvent(),
+  ]);
+  const client = new ClaudeCodeClient('claude-opus-5-5', { spawn, bin: '/usr/bin/claude' });
+  const result = await client.turn([{ role: 'user', content: 'q' }], [], () => {}, null, {
+    onActivity: phase => phases.push(phase),
+  });
+  assert.equal(result.content, 'fatto');
+  assert.ok(phases.includes('thinking'), 'the start of a thinking block is reported');
+  assert.ok(phases.filter(p => p === 'stream').length >= 2, 'signatures and pings count as life too');
+  assert.equal(phases.length, 4, 'text is reported as tokens, not as activity');
 });

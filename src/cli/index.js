@@ -71,7 +71,86 @@ export function attachVerboseTokenLogger(em) {
   };
 }
 
+/**
+ * `ettore /connect claude-code` typed at the shell. The one-shot path used to
+ * hand "/connect claude-code" to whatever model was configured, as a question,
+ * which answered it with an unexplained `400 status code (no body)` — or, with
+ * nothing configured, refused with "Not connected. … use /connect", the very
+ * command just typed. A built-in command runs here instead, before any
+ * connection is needed, and prints what it would have printed in the TUI.
+ *
+ * Only commands ETTORE knows are taken: a prompt that happens to start with a
+ * slash — "/tmp/app.log spiegami questo errore" — still goes to the model.
+ *
+ * @returns {Promise<{handled: boolean, output?: string, ok?: boolean}>}
+ */
+/**
+ * Hand the terminal to a provider's own sign-in (`claude auth login`) and say
+ * whether it succeeded. Only with a person at the keyboard: a script or a pipe
+ * gets the "sign in, then retry" message instead of a browser flow nobody
+ * will finish.
+ */
+async function interactiveLogin(provider) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
+  const { getProviderMeta } = await import('../providers/registry.js');
+  const meta = getProviderMeta(provider);
+  const login = typeof meta?.Class === 'function' ? new meta.Class().loginCommand?.() : null;
+  if (!login) return false;
+  process.stdout.write(`↗ Signing in to ${meta.name} — follow the steps below…\n`);
+  const { spawn } = await import('child_process');
+  return new Promise(resolve => {
+    const child = spawn(login.bin, login.args, { stdio: 'inherit' });
+    child.on('error', () => resolve(false));
+    child.on('close', code => resolve(code === 0));
+  });
+}
+
+export async function runSlashCommand(prompt, { commands = null, manager = connectionManager, login = interactiveLogin } = {}) {
+  const match = /^\/([a-z][\w-]*)(?:\s+([\s\S]*))?$/i.exec(String(prompt || '').trim());
+  if (!match) return { handled: false };
+  const table = commands || (await import('../commands/index.js')).builtinCommands;
+  const name = match[1].toLowerCase();
+  const command = table[name]
+    || Object.values(table).find(entry => (entry.aliases || []).includes(name));
+  if (!command?.handler) return { handled: false };
+  const args = match[2] ? match[2].trim().split(/\s+/).filter(Boolean) : [];
+  let result;
+  try {
+    result = await command.handler(args, { connectionManager: manager, oneShot: true });
+    // What the TUI does, and what the README has always promised: a keyless
+    // provider with nobody signed in hands over to its sign-in and connects
+    // again, instead of telling the user to go and do it themselves.
+    if (name === 'connect' && args[0] && typeof result === 'string' && /Next: sign in/.test(result) && login) {
+      if (await login(args[0])) {
+        result = await command.handler(args, { connectionManager: manager, oneShot: true });
+      }
+    }
+  } catch (error) {
+    return { handled: true, ok: false, output: `Error: ${error?.message || error}` };
+  }
+  if (typeof result === 'string') {
+    return { handled: true, ok: !/^Error:/.test(result), output: result };
+  }
+  if (result && typeof result === 'object' && result.action) {
+    // Themes, the sidebar, clearing the screen: things that only mean
+    // something inside the TUI. Saved settings are already saved by now.
+    return {
+      handled: true,
+      ok: true,
+      output: `/${name} changes the interactive screen — run it inside \`ettore\` to see it.`,
+    };
+  }
+  return { handled: true, ok: true, output: '' };
+}
+
 export async function runPrompt(prompt, options = {}) {
+  const slash = await runSlashCommand(prompt);
+  if (slash.handled) {
+    if (slash.output) process[slash.ok ? 'stdout' : 'stderr'].write(`${slash.output}\n`);
+    if (!slash.ok) process.exitCode = 1;
+    return;
+  }
+
   if (options.apiKey) {
     console.error('Warning: --api-key can expose secrets in shell history and process lists. Prefer provider environment variables or interactive /connect.');
   }

@@ -671,7 +671,12 @@ ${setupHint()}`;
       const models = manager.listModels(provider);
       if (models.success && models.models.length > 0) {
         const match = models.models.find(m => modelId(m) === model);
-        if (!match) {
+        // Claude Code forwards any model id to the API, so its list is a menu,
+        // not a whitelist: a model released after this build of ETTORE (Opus
+        // 5.5, when it came out) has to be usable by name. The CLI itself says
+        // clearly when an id is wrong or needs a newer version.
+        const openEnded = String(provider).toLowerCase() === 'claude-code' && /^[\w.[\]-]+$/.test(model);
+        if (!match && !openEnded) {
           const first = models.models.slice(0, 5).map(modelId).join(', ');
           return `Model not found for ${provider}: ${model}\nAvailable: ${first}${models.models.length > 5 ? ', ...' : ''}\nRun /models ${provider} to list all models.`;
         }

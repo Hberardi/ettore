@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.11.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.11.1-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -896,25 +896,43 @@ usage draws on your Claude subscription instead of API credit.
 ```bash
 npm i -g @anthropic-ai/claude-code   # if not installed yet
 ettore /connect claude-code          # signs you in if you are not already
-ettore /use claude-code sonnet       # or opus, opusplan, claude-opus-5, ...
+ettore /use claude-code sonnet       # or opus, opusplan, claude-opus-5-5, ...
 ```
+
+Built-in commands work straight from the shell like this — `ettore /connect …`,
+`ettore /use …`, `ettore /sidebar wide` — and print what the TUI would. A
+prompt that merely starts with a slash (`ettore "/tmp/app.log spiegami"`) still
+goes to the model.
 
 If no Anthropic account is signed in yet, `/connect claude-code` hands the
 terminal to `claude auth login` and reconnects when the browser flow finishes.
 Once connected it prints which account and plan the session will draw on.
 
 Models: the aliases `sonnet`, `opus`, `haiku`, `opusplan` and `default` always
-resolve to the current model of that tier; pinned ids (`claude-opus-5`,
-`claude-sonnet-4-6`, …) are listed too, and `/use claude-code <id>` accepts any
-id the CLI knows, listed or not. Models billed against usage credits rather
-than the subscription (`claude-fable-5`, `sonnet[1m]`) are flagged in the
-picker.
+resolve to the current model of that tier; pinned ids (`claude-opus-5-5`,
+`claude-opus-5`, `claude-sonnet-4-6`, …) are listed too, and `/use claude-code
+<id>` accepts any id, listed or not, so a model released after your ETTORE is
+usable by name. Models billed against usage credits rather than the
+subscription (`claude-fable-5`, `sonnet[1m]`) are flagged in the picker.
+
+**A new model can need a newer Claude Code.** What an alias resolves to, and
+which pinned ids work at all, depends on the installed CLI: Opus 5.5 needs
+Claude Code 2.1.280 or newer, and on an older one `opus` still means Opus 4.7.
+When the CLI refuses a model, ETTORE shows its own reason — *"does not support
+this model; version … or newer is required"* — and the fix is `claude update`.
+
+Reasoning models can think for a long while before their first visible word.
+ETTORE counts any sign of life from the model — a thinking block starting, a
+ping — as progress, so a slow start is not mistaken for a stall; the stall
+warning for `claude-code` comes after the long window, not at 60 seconds.
 
 ETTORE drives `claude --print` as a bare model: its own tools, MCP servers,
 settings and slash commands are disabled, and ETTORE's system prompt and tools
 replace them. On a headless machine, `claude setup-token` or
 `CLAUDE_CODE_OAUTH_TOKEN` work too; point `ETTORE_CLAUDE_BIN` at the binary if
-it is not on `PATH`.
+it is not on `PATH`. On Windows the `claude.cmd` that npm installs is looked
+through to the `claude.exe` behind it, so a normal `npm i -g` install works as
+it is.
 
 Compared with an API key, this transport drops image attachments and offers no
 `temperature` control. Prompt caching does apply despite each turn being a

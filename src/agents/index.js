@@ -2096,7 +2096,14 @@ export class Agent {
           }
           emitTurnState('model', { iteration: iterations });
           result = await Promise.race([
-            this.client.turn(this._messagesForProvider(), tools, onToken, signal, { effort: this._effortForMode() }),
+            this.client.turn(this._messagesForProvider(), tools, onToken, signal, {
+              effort: this._effortForMode(),
+              // A model thinking without streaming text is working, not stuck.
+              onActivity: (phase) => {
+                lastProgressAt = Date.now();
+                emitter?.emit('modelActivity', { phase });
+              },
+            }),
             turnTimeout,
           ]);
         } finally {

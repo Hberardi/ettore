@@ -88,10 +88,14 @@ export function connectProviderToRoute(cmdArgs = [], registry = PROVIDER_REGISTR
   return registry.some(entry => entry.id === requested) ? requested : null;
 }
 
-function hasLongReasoningWindow(provider, modelId) {
+export function hasLongReasoningWindow(provider, modelId) {
   const p = String(provider || '').toLowerCase();
   const m = String(modelId || '').toLowerCase();
   if (p === 'minimax') return true;
+  // The Claude Code bridge starts a CLI process per turn and its models think
+  // at length before writing; the bridge's own idle limit is the long one, and
+  // a watchdog here that cut in at 90s was the shortest fuse in the chain.
+  if (p === 'claude-code') return true;
   // Kimi routed through NVIDIA NIM can have long silent reasoning stretches.
   if (p === 'nvidia' && (m.includes('kimi') || m.includes('moonshot'))) return true;
   return false;
@@ -696,6 +700,14 @@ export async function startApp(options = {}) {
       if (!tui.streaming.stallMs) tui.streaming.stallMs = STALL_MS;
     }
   };
+
+  // The model is working without writing yet — thinking, most often. Keeps
+  // the stall watchdog from reading effort as silence.
+  emitter.on('modelActivity', ({ phase } = {}) => {
+    if (!tui.streaming) return;
+    tui.streaming.lastActivityAt = Date.now();
+    if (phase === 'thinking') tui.streaming.thinking = true;
+  });
 
   // A sub-agent is running and getting somewhere. It has no output of its own
   // to show here, but the turn is alive and the stall watchdog must know it.

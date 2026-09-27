@@ -1,9 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { spawn } from 'child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { setMaxListeners as setTargetMaxListeners } from 'events';
 import { connectionManager } from '../providers/index.js';
 import { canonicalizeToolTurn } from '../agents/message-ledger.js';
 import { resolveOutputCap, effortFor, normalizeEffort } from './model-limits.js';
+import { resolveClaudeCommand } from '../providers/claude-code.js';
 
 // Content blocks of a message that lives for one request only (the agent's
 // recovery overlay). A cache breakpoint placed on one would write a cache entry
@@ -952,7 +956,15 @@ export function parseClaudeCodeToolCalls(text) {
   return { calls, content };
 }
 
-export function buildClaudeCodeArgs(model, systemPrompt, effort = null) {
+/**
+ * @param {string|null} systemPromptFile  when given, the system prompt is read
+ *   from this file (`--system-prompt-file`) instead of passed as an argument.
+ *   The prompt with its tool list is ~30k characters, and Windows caps a whole
+ *   command line at 32,767: one skill or plugin more and the CLI would not
+ *   start at all. A file has no such limit, and keeps the prompt out of every
+ *   process listing on the machine besides.
+ */
+export function buildClaudeCodeArgs(model, systemPrompt, effort = null, { systemPromptFile = null } = {}) {
   const level = effortFor(model, effort);
   return [
     ...(level ? ['--effort', level] : []),
@@ -969,7 +981,9 @@ export function buildClaudeCodeArgs(model, systemPrompt, effort = null) {
     '--mcp-config', '{"mcpServers":{}}',
     '--tools', '',
     '--model', String(model || 'sonnet'),
-    '--system-prompt', String(systemPrompt || ''),
+    ...(systemPromptFile
+      ? ['--system-prompt-file', systemPromptFile]
+      : ['--system-prompt', String(systemPrompt || '')]),
   ];
 }
 
@@ -992,7 +1006,10 @@ export function sanitizeClaudeEnv(env = process.env) {
 export class ClaudeCodeClient {
   constructor(model, options = {}) {
     this.model = model || 'sonnet';
-    this.bin = options.bin || process.env.ETTORE_CLAUDE_BIN || 'claude';
+    // On Windows `claude` is an npm .cmd shim that Node cannot spawn; see
+    // resolveClaudeCommand for how the real program behind it is found.
+    this.command = options.bin ? { file: options.bin, args: [] } : resolveClaudeCommand();
+    this.bin = this.command.file;
     this.cwd = options.cwd || process.cwd();
     this._idleMs = options.idleMs || CLAUDE_CODE_IDLE_MS;
     this._spawn = options.spawn || spawn;
@@ -1012,21 +1029,40 @@ export class ClaudeCodeClient {
       throw err;
     }
 
-    const child = this._spawn(this.bin, buildClaudeCodeArgs(this.model, system, options.effort), {
-      cwd: this.cwd,
-      // The CLI has no flag for the output ceiling, but it reads one from the
-      // environment — and it needs raising for the same reason the API path
-      // does: on a thinking model the budget covers reasoning and answer
-      // together. `sanitizeClaudeEnv` strips every CLAUDE_CODE_* variable as
-      // session state, so a value the user set has to be read before that and
-      // put back, or theirs would be dropped in favour of ours.
-      env: {
-        ...sanitizeClaudeEnv(),
-        CLAUDE_CODE_MAX_OUTPUT_TOKENS:
-          process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS || String(resolveOutputCap(this.model)),
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    // Written where only this user can read it, and gone when the CLI exits.
+    const promptDir = mkdtempSync(join(tmpdir(), 'ettore-sysprompt-'));
+    const systemPromptFile = join(promptDir, 'system-prompt.txt');
+    writeFileSync(systemPromptFile, system, { mode: 0o600 });
+    const cleanup = () => { try { rmSync(promptDir, { recursive: true, force: true }); } catch { /* best effort */ } };
+
+    let child;
+    try {
+      child = this._spawn(this.command.file, [
+        ...this.command.args,
+        ...buildClaudeCodeArgs(this.model, system, options.effort, { systemPromptFile }),
+      ], {
+        cwd: this.cwd,
+        windowsHide: true,
+        shell: Boolean(this.command.shell),
+        // The CLI has no flag for the output ceiling, but it reads one from the
+        // environment — and it needs raising for the same reason the API path
+        // does: on a thinking model the budget covers reasoning and answer
+        // together. `sanitizeClaudeEnv` strips every CLAUDE_CODE_* variable as
+        // session state, so a value the user set has to be read before that and
+        // put back, or theirs would be dropped in favour of ours.
+        env: {
+          ...sanitizeClaudeEnv(),
+          CLAUDE_CODE_MAX_OUTPUT_TOKENS:
+            process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS || String(resolveOutputCap(this.model)),
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+    child.once('close', cleanup);
+    child.once('error', cleanup);
 
     let content = '';
     let usage = null;
@@ -1039,10 +1075,22 @@ export class ClaudeCodeClient {
     let buffer = '';
 
     const emit = token => { if (token) onToken?.(token); };
+    // Proof of life that is not text. A reasoning model can think for minutes
+    // before its first visible token — and a thinking block whose text the API
+    // does not stream arrives as a start, a signature and silence. Every
+    // watchdog above this one counts tokens, so without this a model working
+    // hard looked exactly like a model that had hung, and was cancelled at 90s.
+    const activity = phase => { try { options.onActivity?.(phase); } catch { /* observer only */ } };
 
     const handleEvent = obj => {
       if (obj.type === 'stream_event') {
         const event = obj.event;
+        if (event?.type === 'content_block_start'
+          && /thinking/.test(String(event.content_block?.type || ''))) {
+          activity('thinking');
+        } else if (event?.type !== 'content_block_delta' || event.delta?.type !== 'text_delta') {
+          activity('stream');
+        }
         // The only authoritative name for the model answering this turn.
         // `modelUsage` in the result event is keyed by *every* model the CLI
         // touched, side tasks of its own included, so its first key is
@@ -1102,77 +1150,88 @@ export class ClaudeCodeClient {
       }
     };
 
-    await new Promise((resolve, reject) => {
-      let settled = false;
-      let idleTimer = null;
+    // A killed child does not always get as far as `close` before the turn
+    // gives up on it; the prompt file must not outlive the turn either way.
+    try {
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        let idleTimer = null;
 
-      const finish = (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(idleTimer);
-        signal?.removeEventListener('abort', onAbort);
-        if (error) reject(error); else resolve();
-      };
+        const finish = (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(idleTimer);
+          signal?.removeEventListener('abort', onAbort);
+          if (error) reject(error); else resolve();
+        };
 
-      const kill = () => { try { child.kill('SIGTERM'); } catch {} };
+        const kill = () => { try { child.kill('SIGTERM'); } catch {} };
 
-      const armIdle = () => {
-        clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => {
+        const armIdle = () => {
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => {
+            kill();
+            finish(new Error(`Streaming idle timeout — no token for ${this._idleMs / 1000}s`));
+          }, this._idleMs);
+          idleTimer.unref?.();
+        };
+
+        function onAbort() {
           kill();
-          finish(new Error(`Streaming idle timeout — no token for ${this._idleMs / 1000}s`));
-        }, this._idleMs);
-        idleTimer.unref?.();
-      };
+          const err = new Error('Aborted');
+          err.name = 'AbortError';
+          finish(err);
+        }
 
-      function onAbort() {
-        kill();
-        const err = new Error('Aborted');
-        err.name = 'AbortError';
-        finish(err);
-      }
+        signal?.addEventListener('abort', onAbort, { once: true });
 
-      signal?.addEventListener('abort', onAbort, { once: true });
+        child.stdout.setEncoding('utf-8');
+        child.stdout.on('data', chunk => {
+          armIdle();
+          buffer += chunk;
+          let newline;
+          while ((newline = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            if (!line) continue;
+            try { handleEvent(JSON.parse(line)); } catch { /* non-JSON noise */ }
+          }
+        });
 
-      child.stdout.setEncoding('utf-8');
-      child.stdout.on('data', chunk => {
+        child.stderr?.setEncoding('utf-8');
+        child.stderr?.on('data', chunk => {
+          stderrTail = (stderrTail + chunk).slice(-2000);
+        });
+
+        child.on('error', err => {
+          finish(new Error(
+            `Failed to run the Claude Code CLI ("${this.bin}"): ${err.message}. `
+            + 'Install it with `npm i -g @anthropic-ai/claude-code`, or set ETTORE_CLAUDE_BIN.',
+          ));
+        });
+
+        child.on('close', code => {
+          if (buffer.trim()) {
+            try { handleEvent(JSON.parse(buffer.trim())); } catch { /* partial line */ }
+          }
+          // The CLI reports a refused request — an unsupported model, a usage
+          // limit — in its result event and then exits 1. That message is the
+          // one worth showing: "Claude Code 2.1.152 does not support this
+          // model; version 2.1.280 or newer is required" used to arrive as the
+          // bare "Claude Code exited with code 1".
+          if (code === 0 || resultError) return finish();
+          finish(new Error(
+            `Claude Code exited with code ${code}${stderrTail ? `: ${stderrTail.trim()}` : ''}`,
+          ));
+        });
+
         armIdle();
-        buffer += chunk;
-        let newline;
-        while ((newline = buffer.indexOf('\n')) !== -1) {
-          const line = buffer.slice(0, newline).trim();
-          buffer = buffer.slice(newline + 1);
-          if (!line) continue;
-          try { handleEvent(JSON.parse(line)); } catch { /* non-JSON noise */ }
-        }
+        child.stdin.on('error', () => {}); // child may exit before the prompt lands
+        child.stdin.end(prompt);
       });
-
-      child.stderr?.setEncoding('utf-8');
-      child.stderr?.on('data', chunk => {
-        stderrTail = (stderrTail + chunk).slice(-2000);
-      });
-
-      child.on('error', err => {
-        finish(new Error(
-          `Failed to run the Claude Code CLI ("${this.bin}"): ${err.message}. `
-          + 'Install it with `npm i -g @anthropic-ai/claude-code`, or set ETTORE_CLAUDE_BIN.',
-        ));
-      });
-
-      child.on('close', code => {
-        if (buffer.trim()) {
-          try { handleEvent(JSON.parse(buffer.trim())); } catch { /* partial line */ }
-        }
-        if (code === 0) return finish();
-        finish(new Error(
-          `Claude Code exited with code ${code}${stderrTail ? `: ${stderrTail.trim()}` : ''}`,
-        ));
-      });
-
-      armIdle();
-      child.stdin.on('error', () => {}); // child may exit before the prompt lands
-      child.stdin.end(prompt);
-    });
+    } finally {
+      cleanup();
+    }
 
     if (inThinking) emit('</think>');
     if (resultError) {
