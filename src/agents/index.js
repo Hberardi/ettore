@@ -10,7 +10,8 @@ import {
   initEcosystemMemory,
   loadEcosystemMemory,
   injectEcosystemIntoPrompt,
-  appendEcosystemExperience
+  appendEcosystemExperience,
+  projectMemoryDisabled,
 } from '../memory/index.js';
 import { setRetryNotifier, createCompressionClient } from '../llm/client.js';
 import { ContextCompressor, estimateTokens } from './compressor.js';
@@ -452,6 +453,7 @@ export class Agent {
   }
 
   async _loadMemory() {
+    if (projectMemoryDisabled()) return null;
     try {
       const root = this._workdir;
       await initProjectMemory(root);
@@ -557,6 +559,10 @@ export class Agent {
   }
 
   async _learnFromTurn(userPrompt, finalText = '') {
+    // A sub-agent's "request" is the brief the main agent wrote for it. Filed
+    // as an experience, it went into the project's journal — and from there
+    // into every later session's system prompt — as if the user had asked it.
+    if (this._isSubagent || projectMemoryDisabled()) return;
     try {
       const toolMsgs = this.messages.filter(m => m.role === 'tool');
       const assistantMsgs = this.messages.filter(m => m.role === 'assistant');

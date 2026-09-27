@@ -8,6 +8,29 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.11.2] — 2026-09-27
+
+### Fixed — the project journal recorded sub-agents and tests, and could be garbled
+
+- **A sub-agent's brief was filed as a user request.** Every finished turn is
+  appended to `.ettore/ecosystem.md`, which is injected into every later
+  session's system prompt; the `explore` sub-agent's turns were filed there too,
+  with its brief as the "request". They no longer are.
+- **Concurrent writes left entries cut mid-word.** Two sessions on one project
+  each read, appended and rewrote the file, and their writes interleaved
+  (`Summary: Sta in sr Sta in sr…`). Memory files are now written beside the
+  original and renamed over it, so a reader sees the old file or the new one.
+- **The test suite read and wrote the checkout's own memory.** Every Agent a
+  test builds works in the repository, so tests loaded its real `.ettore/`
+  memory into their prompts and appended their fake conversations to it — the
+  cause of `agent-subagent.test.js` failing one run in a few, in CI too: a
+  sub-agent's brief from an earlier test reached a later parent's system prompt.
+  `ETTORE_PROJECT_MEMORY=off` switches project memory off, and the test setup
+  sets it.
+- **Two Windows-only tests for the `claude.cmd` lookup compared a path with
+  mixed separators**, so they failed on a real Windows runner while passing on
+  Linux. The code was right; both sides of the comparison are normalised now.
+
 ## [1.11.1] — 2026-09-27
 
 ### Fixed — Opus 5.5 through Claude Code: a silent wait instead of an answer

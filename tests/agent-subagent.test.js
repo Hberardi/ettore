@@ -18,8 +18,14 @@ function makeAgent(client, extra = {}) {
 
 // The sub-agent is told what it is in its prompt; that is how a shared fake
 // client tells the two loops apart.
+//
+// By the first user message, which for a sub-agent is its brief. Searching
+// every message matched the phrase wherever it happened to appear — in the
+// parent's system prompt, in an error string — and sent the parent's turn
+// down the sub-agent's script.
 function isSubagentTurn(messages) {
-  return messages.some(m => String(m?.content || '').includes('exploration sub-agent'));
+  const first = messages.find(m => m?.role === 'user');
+  return String(first?.content || '').startsWith('You are an exploration sub-agent');
 }
 
 function exploreCall(args) {

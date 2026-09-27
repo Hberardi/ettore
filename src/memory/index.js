@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, access } from 'fs/promises';
+import { readFile, writeFile, mkdir, access, rename, unlink } from 'fs/promises';
 import { join, dirname, resolve, sep } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
@@ -151,6 +151,35 @@ export async function loadEcosystemMemory(projectRoot) {
  * @param {string} projectRoot
  * @param {string} content
  */
+/**
+ * Replace a memory file in one step. Two ETTORE sessions on the same project —
+ * or a test suite running files in parallel — each read, append and write the
+ * file; with a plain writeFile their writes interleaved and left entries cut
+ * mid-word ("Summary: Sta in sr Sta in sr…") inside a file that goes into
+ * every later system prompt. Writing beside it and renaming over it means a
+ * reader sees the old file or the new one, never half of each.
+ */
+async function writeFileAtomic(path, content) {
+  const temp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    await writeFile(temp, content, 'utf-8');
+    await rename(temp, path);
+  } catch (error) {
+    try { await unlink(temp); } catch { /* never written */ }
+    throw error;
+  }
+}
+
+/**
+ * Whether project memory is switched off for this process: `ETTORE_PROJECT_MEMORY=off`.
+ * The test suite sets it, because every Agent a test builds works in the
+ * repository itself — and used to read that checkout's real memory into its
+ * prompt and append its fake conversations to it.
+ */
+export function projectMemoryDisabled(env = process.env) {
+  return /^(off|0|false|no)$/i.test(String(env.ETTORE_PROJECT_MEMORY || '').trim());
+}
+
 export async function saveProjectMemory(projectRoot, content) {
   const memPath = getMemoryPath(projectRoot);
 
@@ -158,14 +187,14 @@ export async function saveProjectMemory(projectRoot, content) {
   await mkdir(dirname(memPath), { recursive: true });
 
   const safe = redactSecrets(content).slice(0, 262144); // 256KB hard limit
-  await writeFile(memPath, safe, 'utf-8');
+  await writeFileAtomic(memPath, safe);
 }
 
 export async function saveEcosystemMemory(projectRoot, content) {
   const ecoPath = getEcosystemPath(projectRoot);
   await mkdir(dirname(ecoPath), { recursive: true });
   const safe = redactSecrets(content).slice(0, ECOSYSTEM_MAX_BYTES);
-  await writeFile(ecoPath, safe, 'utf-8');
+  await writeFileAtomic(ecoPath, safe);
 }
 
 export async function updateMemorySection(projectRoot, section, content, mode = 'append') {

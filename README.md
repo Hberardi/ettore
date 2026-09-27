@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.11.1-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.11.2-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -885,7 +885,16 @@ arguments can be exposed in shell history and process lists.
 Other variables ETTORE reads: `ETTORE_SHELL` (which shell the agent's commands
 run in — see [Platform support](#platform-support)), `ETTORE_WARM_SHELL`
 (`0` turns off the warm PowerShells on Windows), `ETTORE_CHROME_BIN`,
-`ETTORE_AUTO_UPDATE`.
+`ETTORE_AUTO_UPDATE`, `ETTORE_PROJECT_MEMORY` (`off` stops ETTORE reading and
+writing the project's `.ettore/` memory and learned playbook — the test suite
+runs that way, so it never touches the memory of the checkout it runs in).
+
+The learned playbook (`/ecosystem`) records the turns you ran in the project —
+not the ones the `explore` sub-agent ran on its behalf — and each update
+replaces the file in one step, so two sessions open on the same project cannot
+leave it half-written. If an older version left garbled entries in it, open
+the file `/ecosystem path` points to and delete them, or delete the file: it is
+started afresh on the next turn.
 
 ### Claude without an API key
 

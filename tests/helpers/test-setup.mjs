@@ -30,6 +30,14 @@ const CREDENTIAL_VARS = [
 
 for (const name of CREDENTIAL_VARS) delete process.env[name];
 
+// Every Agent a test builds works in the repository itself, so it read this
+// checkout's real project memory (.ettore/) into its prompt and appended its
+// fake conversations to the journal there — which the next test then read
+// back. That is how a sub-agent's brief ended up in a parent's system prompt
+// and made agent-subagent.test.js fail one run in a few. Tests about memory
+// call its functions with a root of their own.
+process.env.ETTORE_PROJECT_MEMORY ||= 'off';
+
 // Credentials do not only arrive through the environment. A developer who ran
 // `/jev active` has the key in the real encrypted store and the switch in the
 // real settings, so a test that builds an Agent would consult the live API

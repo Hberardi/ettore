@@ -455,7 +455,9 @@ test('Windows: npm\'s claude.cmd is unwrapped to the executable it runs', () => 
   const shim = '@ECHO off\r\nGOTO start\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n'
     + '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n';
   const dir = windowsPathWith({ 'claude.cmd': shim });
-  const target = `${dir}/node_modules/@anthropic-ai/claude-code/bin/claude.exe`;
+  // Both sides normalised: on a real Windows runner `dir` comes back with
+  // backslashes, and a half-normalised comparison never matches there.
+  const target = slashes(join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'));
   const cmd = resolveClaudeCommand({
     os: 'win32',
     env: { PATH: dir, PATHEXT: '.EXE;.CMD' },
@@ -469,7 +471,7 @@ test('Windows: an older JS entry point is run with node, not the shell', () => {
   const shim = 'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
     + '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n';
   const dir = windowsPathWith({ 'claude.cmd': shim });
-  const target = `${dir}/node_modules/@anthropic-ai/claude-code/cli.js`;
+  const target = slashes(join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'));
   const cmd = resolveClaudeCommand({
     os: 'win32',
     env: { PATH: dir, PATHEXT: '.EXE;.CMD' },
