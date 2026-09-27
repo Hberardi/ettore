@@ -57,7 +57,9 @@ Every launch said *installing in the background; the next launch will be
 1.15.0*, and the next launch was still 1.14.0. The deferred install ran `npm`
 in PowerShell, where it is `npm.ps1` — a script, which Windows' default
 execution policy refuses — and with its output thrown away, nothing said so.
-It now calls `npm.cmd` with the policy bypassed for that one process, retries
+It now calls `npm.cmd` with the policy bypassed for that one process — the
+script handed over as `-EncodedCommand`, since a multi-line one did not survive
+the Windows command line and npm was never reached — retries
 three times when an ETTORE opened again too soon still holds the shim, and
 writes what happened to `~/.config/ettore/update.log`. The next launch reads
 it: an install still running is not raced by a second one, a failed one is

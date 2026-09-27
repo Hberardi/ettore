@@ -647,9 +647,14 @@ export function scheduleDetachedUpdate({
   ].join('\n');
 
   try {
+    // -EncodedCommand, not -Command: a multi-line script with quotes in it
+    // did not survive the Windows command line intact — on the CI's Windows
+    // runner the log got its START line and npm was never called. Base64 of
+    // UTF-16LE is what PowerShell decodes, with nothing left to quote.
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
     const child = spawnFn(
       'powershell',
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
       { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, ETTORE_UPDATE_LOG: logPath } },
     );
     child.unref?.();

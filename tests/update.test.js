@@ -511,6 +511,12 @@ test('bin/cli.js shows the banner for a deprecated version, not only an outdated
 // auto-update worked on Linux from day one and never once on Windows.
 
 
+// The script travels as -EncodedCommand: base64 of UTF-16LE.
+function decodeScript(args) {
+  assert.equal(args.at(-2), '-EncodedCommand');
+  return Buffer.from(args.at(-1), 'base64').toString('utf16le');
+}
+
 // Every schedule below writes its log here, never to the real config dir.
 const DEFERRED_LOG = join(mkdtempSync(join(tmpdir(), 'ettore-deferred-')), 'update.log');
 
@@ -528,7 +534,7 @@ test('on Windows the install is handed to a process that outlives us', () => {
   assert.equal(calls.length, 1);
   assert.match(calls[0].file, /powershell/i);
 
-  const script = calls[0].args.at(-1);
+  const script = decodeScript(calls[0].args);
   assert.match(script, /Wait-Process -Id 4242/, 'it must wait for this process to exit first');
   assert.ok(
     script.indexOf('Wait-Process') < script.indexOf('npm.cmd install'),
@@ -615,7 +621,7 @@ test('the deferred install bypasses the execution policy, calls npm.cmd and retr
   assert.equal(out.log, log);
   const args = calls[0].args;
   assert.deepEqual(args.slice(args.indexOf('-ExecutionPolicy'), args.indexOf('-ExecutionPolicy') + 2), ['-ExecutionPolicy', 'Bypass']);
-  const script = args.at(-1);
+  const script = decodeScript(args);
   assert.match(script, /& npm\.cmd install -g ettore-ai-assistant@latest \*>> \$env:ETTORE_UPDATE_LOG/);
   assert.doesNotMatch(script.replace(/npm\.cmd/g, ''), /\bnpm install/, 'plain npm is npm.ps1 in PowerShell');
   assert.match(script, /for \(\$i = 1; \$i -le 3/);
