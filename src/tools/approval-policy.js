@@ -136,6 +136,6 @@ export function shellApprovalReason(command, { cwd = process.cwd(), root = cwd }
 export function approvalTitle(reason) {
   if (!reason) return '';
   return reason.kind === 'delete'
-    ? `🗑 Il comando cancella file (${reason.label})`
-    : `📁 Il comando modifica fuori dalla directory di lavoro (${reason.label})`;
+    ? `🗑 This command deletes files (${reason.label})`
+    : `📁 This command changes things outside the working directory (${reason.label})`;
 }

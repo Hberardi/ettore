@@ -229,7 +229,7 @@ test('through the registry, the agent\'s confirm reaches the plugin', async () =
   });
   const out = await handlers.gh_issue_create({ title: 'Bug nel parser', body: 'dettagli' });
   assert.equal(out, 'Opened: https://github.com/o/r/issues/9');
-  assert.match(asked[0][0], /issue su GitHub/);
+  assert.match(asked[0][0], /issue on GitHub/);
   assert.match(asked[0][1], /Bug nel parser/);
 });
 

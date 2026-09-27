@@ -58,8 +58,8 @@ export async function inspectAttachment(requestedPath, options = {}) {
   const cwd = options.cwd || process.cwd();
   const absolutePath = resolve(cwd, rawPath);
   const info = await stat(absolutePath).catch(() => null);
-  if (!info) throw new Error(`File non trovato: ${rawPath}`);
-  if (!info.isFile()) throw new Error(`Il percorso non è un file: ${rawPath}`);
+  if (!info) throw new Error(`File not found: ${rawPath}`);
+  if (!info.isFile()) throw new Error(`Not a file: ${rawPath}`);
 
   const maxBytes = isSupportedImagePath(absolutePath) ? MAX_IMAGE_BYTES : (options.maxBytes || MAX_FILE_BYTES);
   if (info.size > maxBytes) {
@@ -111,15 +111,15 @@ export function buildAttachmentPrompt(text, files = []) {
   const manifest = genericFiles
     .map(file => {
       const instruction = file.extension === '.pdf'
-        ? ' — PDF: usa read_pdf; OCR Super automatico se il testo nativo è assente o danneggiato'
+        ? ' — PDF: use read_pdf; Super OCR kicks in automatically when the native text is missing or damaged'
         : '';
       return `- ${file.name} (${file.kind}, ${file.mimeType}) — ${file.path}${instruction}`;
     })
     .join('\n');
   return [
     String(text || '').trim(),
-    'Allegati locali da usare come materiale di riferimento:',
+    'Local attachments to use as reference material:',
     manifest,
-    'Leggi o analizza gli allegati con il tool appropriato prima di rispondere.',
+    'Read or analyse the attachments with the right tool before answering.',
   ].filter(Boolean).join('\n\n');
 }

@@ -188,7 +188,7 @@ function getWhisperModelLadder() {
 // Throws if whisper produced no readable JSON (a genuine failure, distinct
 // from "ran fine but found no words" which yields an empty segments array).
 async function runWhisperToSegments({ tools, inputPath, model, outDir, preferLang, runner, signal, log }) {
-  log?.(`Trascrivo con ${tools.whisperFlavor || 'whisper'} (modello: ${model})…`);
+  log?.(`Transcribing with ${tools.whisperFlavor || 'whisper'} (model: ${model})…`);
   const langArg = preferLang && preferLang !== 'auto' ? ['--language', preferLang] : [];
   const wsReporter = makeProgressReporter({ log, phase: 'whisper' });
   try {
@@ -232,14 +232,14 @@ async function whisperWithEscalation({ tools, inputPath, outDir, preferLang, run
     }
     lastModel = model;
     if (i < models.length - 1) {
-      log?.(`Il modello ${model} non ha rilevato parole; riprovo con un modello più grande…`);
+      log?.(`The ${model} model found no words; retrying with a larger model…`);
     }
   }
   const hint = process.env.WHISPER_MODEL
-    ? 'Se la traccia contiene voce, prova un modello più grande (es. WHISPER_MODEL=medium) o specifica la lingua (es. language:"it").'
+    ? 'If the track has speech, try a larger model (e.g. WHISPER_MODEL=medium) or give the language (e.g. language:"it").'
     : `Se la traccia contiene voce, prova WHISPER_MODEL=medium o specifica la lingua (es. language:"it").`;
   return {
-    error: `local: whisper non ha rilevato parole (col modello ${lastModel}); l'audio potrebbe essere strumentale o silenzioso. ${hint}`,
+    error: `local: whisper found no words (with the ${lastModel} model); the audio may be instrumental or silent. ${hint}`,
     tried: 'local',
     installed: true,
   };

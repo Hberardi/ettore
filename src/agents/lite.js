@@ -162,12 +162,12 @@ export function buildFallbackMessage(modelId, detection, currentProvider) {
   const others = SUGGESTED_MODELS.filter(m => m.provider !== currentProvider).slice(0, 4);
   const suggestions = [...same, ...others].slice(0, 5);
   return [
-    `⚠ "${modelId}" ha generato output incoerente (confidenza: ${pct}%).`,
-    `  Motivo: ${detection.reason}`,
+    `⚠ "${modelId}" produced incoherent output (confidence: ${pct}%).`,
+    `  Reason: ${detection.reason}`,
     '',
-    'Il modello corrente non gestisce task complessi. Usa /use per cambiare modello.',
+    'The current model cannot handle complex tasks. Use /use to switch model.',
     '',
-    'Modelli consigliati con tool-use:',
+    'Recommended models with tool use:',
     ...suggestions.map(m => `  • ${m.label}  (${m.provider} / ${m.id})`),
   ].join('\n');
 }

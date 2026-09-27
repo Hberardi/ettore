@@ -38,10 +38,10 @@ const MAX_BODY = 80 * 1024 * 1024; // 80MB — a full song + photo, base64-infla
 // Both engines are MiniMax models and use the SAME MINIMAX_API_KEY — "Hailuo"
 // is MiniMax's video product name, not a separate provider/key.
 const VIDEO_MODELS = [
-  { id: 'S2V-01', label: 'MiniMax S2V-01 · stesso personaggio', hint: 'La foto resta lo stesso personaggio in tutte le scene (costo non a punti)', resolutions: ['768P'] },
-  { id: 'MiniMax-Hailuo-2.3', label: 'MiniMax Hailuo 2.3 · da fotogramma', hint: 'Anima la foto come primo frame · qualità alta', resolutions: ['768P', '1080P'] },
-  { id: 'MiniMax-Hailuo-2.3-Fast', label: 'MiniMax Hailuo 2.3 Fast · economico', hint: 'Più veloce ed economico · da fotogramma', resolutions: ['768P', '1080P'] },
-  { id: 'MiniMax-Hailuo-02', label: 'MiniMax Hailuo 02 · 512P il più economico', hint: 'Supporta 512P: il costo/clip più basso', resolutions: ['512P', '768P', '1080P'] },
+  { id: 'S2V-01', label: 'MiniMax S2V-01 · same character', hint: 'The photo stays the same character in every scene (not priced in points)', resolutions: ['768P'] },
+  { id: 'MiniMax-Hailuo-2.3', label: 'MiniMax Hailuo 2.3 · from a frame', hint: 'Animates the photo as the first frame · high quality', resolutions: ['768P', '1080P'] },
+  { id: 'MiniMax-Hailuo-2.3-Fast', label: 'MiniMax Hailuo 2.3 Fast · cheap', hint: 'Faster and cheaper · from a frame', resolutions: ['768P', '1080P'] },
+  { id: 'MiniMax-Hailuo-02', label: 'MiniMax Hailuo 02 · 512P, the cheapest', hint: 'Supports 512P: the lowest cost per clip', resolutions: ['512P', '768P', '1080P'] },
 ];
 const VIDEO_MODEL_IDS = new Set(VIDEO_MODELS.map(m => m.id));
 const VIDEO_RESOLUTIONS = new Set(['512P', '768P', '1080P']);
@@ -147,26 +147,26 @@ function buildLlmChain({ llmOverride, saved } = {}) {
 // just sees "400 status code (no body)" and doesn't know what to do.
 export function friendlyLlmError(err) {
   const msg = String(err?.message || err || '').toLowerCase();
-  if (!msg) return 'LLM non disponibile.';
+  if (!msg) return 'LLM not available.';
   if (msg.includes('no active connection')) {
-    return 'Nessuna connessione attiva. Usa /connect + /use per selezionare un provider, oppure inserisci una chiave nel pannello "API keys".';
+    return 'No active connection. Use /connect and /use to pick a provider, or add a key in the "API keys" panel.';
   }
   if (msg.includes('no llm available') || msg.includes('no active model')) {
-    return 'Nessun LLM disponibile per lo storyboard. Aggiungi una chiave nel pannello "API keys" o seleziona un modello attivo con /connect + /use.';
+    return 'No LLM available for the storyboard. Add a key in the "API keys" panel, or pick an active model with /connect and /use.';
   }
   if (msg.match(/\b(401|403)\b/) || msg.includes('unauthorized') || msg.includes('api key') || msg.includes('authentication')) {
-    return 'Chiave API non valida o scaduta. Aggiorna la chiave nel pannello "API keys" o con /connect.';
+    return 'Invalid or expired API key. Update it in the "API keys" panel or with /connect.';
   }
   if (msg.includes('model') && (msg.includes('not found') || msg.includes('not supported') || msg.includes('does not exist') || msg.includes('invalid'))) {
-    return 'Modello non disponibile per questo provider. Scegline un altro nel pannello "API keys" (campo LLM per lo storyboard).';
+    return 'Model not available for this provider. Pick another in the "API keys" panel (the storyboard LLM field).';
   }
   if (msg.includes('429') || msg.includes('rate limit') || msg.includes('quota')) {
-    return 'Limite di richieste raggiunto. Aspetta qualche secondo e riprova, oppure usa un altro provider.';
+    return 'Rate limit reached. Wait a few seconds and try again, or use another provider.';
   }
   if (msg.match(/\b(400|404|500|502|503|504)\b/) && msg.includes('status code')) {
-    return `Errore dal provider LLM (${msg.match(/\b\d{3}\b/)?.[0] || 'HTTP'}). Il modello potrebbe non essere supportato o la richiesta è stata rifiutata.`;
+    return `Error from the LLM provider (${msg.match(/\b\d{3}\b/)?.[0] || 'HTTP'}). The model may not be supported, or the request was refused.`;
   }
-  return err?.message || 'LLM non disponibile.';
+  return err?.message || 'LLM not available.';
 }
 
 // Build an LLM client for the studio WITHOUT mutating the user's CLI
@@ -180,7 +180,7 @@ function createStudioClient({ provider, model, apiKey }) {
   if (!ProviderClass) throw new Error(`Provider sconosciuto: ${provider}`);
   const instance = new ProviderClass(apiKey);
   const openaiClient = instance.getClient?.();
-  if (!openaiClient) throw new Error(`Il provider ${provider} non espone un client OpenAI-compat.`);
+  if (!openaiClient) throw new Error(`Provider ${provider} does not expose an OpenAI-compatible client.`);
   return new OpenAICompatClient(openaiClient, model);
 }
 
@@ -197,7 +197,7 @@ function createStudioClient({ provider, model, apiKey }) {
 async function draftStoryboard({ analysisText, lyrics, durationSeconds, clipLength, sceneCount, llm }) {
   const chain = buildLlmChain({ llmOverride: llm, saved: listSecrets() });
   if (chain.length === 0) {
-    throw new Error('No LLM available for the storyboard. Inserisci una chiave nel pannello "API keys" o usa /connect + /use per selezionare un modello.');
+    throw new Error('No LLM available for the storyboard. Add a key in the "API keys" panel, or use /connect and /use to pick a model.');
   }
 
   const sys = 'You are a music-video director. You output ONLY valid JSON, no prose, no markdown fences.';
@@ -282,12 +282,12 @@ const STUDIO_LLM_PROVIDERS = [
 const STUDIO_VIDEO_PROVIDERS = [
   {
     id: 'minimax', label: 'MiniMax (Hailuo / S2V-01)', env: 'MINIMAX_API_KEY', builtin: true,
-    note: 'Motore integrato · costo a video points · S2V-01 mantiene lo stesso personaggio.',
+    note: 'Built-in engine · priced in video points · S2V-01 keeps the same character.',
   },
   {
     id: 'runway', label: 'Runway (Gen-3)', env: 'RUNWAY_API_KEY',
     models: [{ id: 'gen3a_turbo', label: 'Gen-3 Alpha Turbo' }],
-    note: 'Image-to-video: usa la foto come primo fotogramma. Fatturato sul tuo account Runway.',
+    note: 'Image-to-video: uses the photo as the first frame. Billed to your Runway account.',
   },
   {
     id: 'replicate', label: 'Replicate', env: 'REPLICATE_API_TOKEN',
@@ -312,7 +312,7 @@ const STUDIO_VIDEO_PROVIDERS = [
       { id: 'ray-flash-2', label: 'Ray Flash 2 (veloce)' },
       { id: 'ray-1-6', label: 'Ray 1.6' },
     ],
-    note: 'Dream Machine (LUMAAI_API_KEY). Con foto locale genera text-to-video; per image-to-video serve un URL pubblico. Fatturato su Luma.',
+    note: 'Dream Machine (LUMAAI_API_KEY). With a local photo it makes text-to-video; image-to-video needs a public URL. Billed by Luma.',
   },
   {
     id: 'veo', label: 'Google Veo', env: 'GEMINI_API_KEY', keyProvider: 'gemini',
@@ -320,7 +320,7 @@ const STUDIO_VIDEO_PROVIDERS = [
       { id: 'veo-3.0-generate-preview', label: 'Veo 3' },
       { id: 'veo-2.0-generate-001', label: 'Veo 2' },
     ],
-    note: 'Veo via Gemini API — usa la stessa chiave Gemini (nessun campo extra). Fatturato su Google.',
+    note: 'Veo via the Gemini API — uses the same Gemini key (no extra field). Billed by Google.',
   },
   {
     id: 'kling', label: 'Kling (diretto)', env: 'KLING_API_KEY',
@@ -330,7 +330,7 @@ const STUDIO_VIDEO_PROVIDERS = [
       { id: 'kling-v1-6', label: 'Kling v1.6' },
       { id: 'kling-v2', label: 'Kling v2' },
     ],
-    note: 'Auth firmata: incolla le credenziali come "AccessKey:SecretKey" nel campo. Fatturato su Kling.',
+    note: 'Signed auth: paste the credentials as "AccessKey:SecretKey" in the field. Billed by Kling.',
   },
   {
     id: 'fal', label: 'fal.ai (Pika, Kling, Luma…)', env: 'FAL_KEY',
@@ -469,7 +469,7 @@ async function runAnalysis(job) {
   let lyrics = '';
   let durationSeconds = 0;
 
-  pushLog(job, '🎧 Analizzo la canzone (genere, mood, BPM, struttura)…');
+  pushLog(job, '🎧 Analysing the song (genre, mood, BPM, structure)…');
   try {
     const desc = await readAudio({ file_path: job.audioPath, mode: 'describe' }, audioOpts);
     describeText = renderAudioResult(desc);
@@ -477,32 +477,32 @@ async function runAnalysis(job) {
     pushLog(job, '✓ Analisi musicale completata.');
   } catch (e) {
     describeText = `(song description unavailable: ${e.message})`;
-    pushLog(job, `⚠ Analisi musicale non disponibile: ${e.message}`);
+    pushLog(job, `⚠ Music analysis not available: ${e.message}`);
   }
 
-  pushLog(job, '📝 Trascrivo il testo (lyrics con timestamp)…');
+  pushLog(job, '📝 Transcribing the lyrics (with timestamps)…');
   try {
     const tr = await readAudio({ file_path: job.audioPath, mode: 'transcribe' }, audioOpts);
     lyrics = renderAudioResult(tr);
     pushLog(job, '✓ Trascrizione completata.');
   } catch (e) {
     lyrics = '';
-    pushLog(job, `⚠ Trascrizione non disponibile: ${e.message}`);
+    pushLog(job, `⚠ Transcription not available: ${e.message}`);
   }
 
   if (!durationSeconds) durationSeconds = await probeDuration(job.audioPath).catch(() => 0);
   const sceneCount = Math.max(2, Math.min(40, Math.ceil((durationSeconds || job.clipLength * 4) / job.clipLength)));
-  pushLog(job, `⏱ Durata canzone ${Math.round(durationSeconds)}s → ${sceneCount} scene da ${job.clipLength}s.`);
+  pushLog(job, `⏱ Song length ${Math.round(durationSeconds)}s → ${sceneCount} scenes of ${job.clipLength}s.`);
 
-  pushLog(job, '🎬 Scrivo lo storyboard con il modello attivo…');
+  pushLog(job, '🎬 Writing the storyboard with the active model…');
   let storyboard = [];
   let storyboardError = null;
   try {
     storyboard = await draftStoryboard({ analysisText: describeText, lyrics, durationSeconds, clipLength: job.clipLength, sceneCount, llm: job.llm });
-    pushLog(job, `✓ Storyboard pronto: ${storyboard.length} scene.`);
+    pushLog(job, `✓ Storyboard ready: ${storyboard.length} scenes.`);
   } catch (e) {
     storyboardError = e.message;
-    pushLog(job, `⚠ Storyboard automatico non riuscito: ${e.message} — potrai scrivere le scene a mano.`);
+    pushLog(job, `⚠ Automatic storyboard failed: ${e.message} — you can write the scenes by hand.`);
   }
 
   job.lyrics = lyrics;
@@ -518,7 +518,7 @@ async function runAnalysis(job) {
     costEstimate: estimateVideoCost({ model: 'S2V-01', count: storyboard.length || sceneCount }),
   };
   job.state = 'analyzed';
-  pushLog(job, '✅ Pronto! Rivedi lo storyboard.');
+  pushLog(job, '✅ Ready! Review the storyboard.');
 }
 
 function probeDuration(audioPath) {
@@ -549,10 +549,10 @@ async function handleGenerate(req, res) {
 
   if (provider === 'minimax') {
     if (!getMinimaxApiKey({ apiKey: videoKey })) {
-      return sendJson(res, 400, { error: 'Nessuna MiniMax API key: inseriscila nel pannello “API keys” o impostala in MINIMAX_API_KEY.' });
+      return sendJson(res, 400, { error: 'No MiniMax API key: add it in the “API keys” panel or set MINIMAX_API_KEY.' });
     }
   } else if (!videoKey) {
-    return sendJson(res, 400, { error: `Nessuna API key per ${providerDef.label}: salvala nel pannello “API keys”.` });
+    return sendJson(res, 400, { error: `No API key for ${providerDef.label}: save it in the “API keys” panel.` });
   }
 
   const photo = decodeDataUrl(body.photo);
@@ -626,12 +626,12 @@ async function runJob(job) {
       pushLog(job, `🎟 Preventivo: ${job.total} clip × ${pts.perClip} = ~${pts.total} video points (${model} ${resolution}, ${duration}s).`);
     } else {
       const usd = estimateVideoCost({ model, resolution, count: job.total });
-      pushLog(job, `🎟 Preventivo: ${job.total} clip (${model} ${resolution}) — costo a punti non listato${usd != null ? `, stima ~$${usd.toFixed(2)}` : ''}.`);
+      pushLog(job, `🎟 Estimate: ${job.total} clips (${model} ${resolution}) — no points price listed${usd != null ? `, about ~$${usd.toFixed(2)}` : ''}.`);
     }
     const balance = await getMinimaxBalance({ apiKey: job.minimaxApiKey || undefined }).catch(() => null);
-    if (balance) pushLog(job, `ℹ Saldo piano (best-effort, non riflette i Credits video): ${JSON.stringify(balance).slice(0, 200)}`);
+    if (balance) pushLog(job, `ℹ Plan balance (best effort, does not reflect video Credits): ${JSON.stringify(balance).slice(0, 200)}`);
   } else {
-    pushLog(job, `🎬 Motore: ${provider}${job.videoModel ? ` · ${job.videoModel}` : ''}. Costo fatturato sul tuo account ${provider}.`);
+    pushLog(job, `🎬 Engine: ${provider}${job.videoModel ? ` · ${job.videoModel}` : ''}. Billed to your ${provider} account.`);
   }
 
   for (let i = 0; i < job.storyboard.length; i++) {
@@ -667,14 +667,14 @@ async function runJob(job) {
         const alt = cheaperOption(model, resolution, duration);
         const altPts = alt ? estimateVideoPoints({ model: alt.model, resolution: alt.resolution, duration, count: job.total }) : null;
         const lines = [
-          `Crediti/punti MiniMax insufficienti per il video. ${e.message}`,
+          `Not enough MiniMax Credits/points for the video. ${e.message}`,
           '',
           needCur
             ? `📊 Ti servono ~${needCur.total} video points: ${job.total} clip × ${needCur.perClip} (${model} ${resolution}, ${duration}s).`
-            : `📊 ${model} ${resolution} non è tariffato a punti (modello legacy).`,
+            : `📊 ${model} ${resolution} is not priced in points (legacy model).`,
         ];
         if (alt && altPts) {
-          lines.push(`💡 Soluzione più economica: «${alt.label}» a ${alt.resolution} → ~${altPts.total} video points (${altPts.perClip}/clip). Selezionala nel menù “Motore” e rilancia.`);
+          lines.push(`💡 Cheaper option: «${alt.label}» at ${alt.resolution} → ~${altPts.total} video points (${altPts.perClip}/clip). Pick it in the “Engine” menu and run again.`);
         }
         lines.push('', '👉 Ricarica i punti/Credits su platform.minimax.io → Billing, poi rilancia.');
         job.state = 'error';
@@ -898,25 +898,25 @@ const PAGE = /* html */ `<!doctype html>
 <body><div class="wrap">
 <header>
   <h1>🎬 Music Video Studio</h1>
-  <p>Carica una canzone e una foto del personaggio — genero il video musicale.</p>
+  <p>Upload a song and a photo of the character — I make the music video.</p>
 </header>
 <div class="steps">
-  <span id="s1" class="active">1 · Carica</span>
+  <span id="s1" class="active">1 · Upload</span>
   <span id="s2">2 · Storyboard</span>
-  <span id="s3">3 · Genera</span>
+  <span id="s3">3 · Generate</span>
 </div>
 
 <!-- STEP 1 -->
 <div class="card" id="step1">
   <div class="drops">
     <div class="drop" id="dropAudio">
-      <div class="ico">🎵</div><div class="lbl" id="audioLbl">Trascina l'MP3</div>
-      <div class="sub">o clicca per scegliere · mp3 / wav / m4a</div>
+      <div class="ico">🎵</div><div class="lbl" id="audioLbl">Drop the MP3</div>
+      <div class="sub">or click to choose · mp3 / wav / m4a</div>
       <input type="file" id="audioInput" accept="audio/*" class="hidden">
     </div>
     <div class="drop" id="dropPhoto">
-      <div class="ico">🧑‍🎤</div><div class="lbl" id="photoLbl">Trascina la foto</div>
-      <div class="sub">volto ben visibile · png / jpg</div>
+      <div class="ico">🧑‍🎤</div><div class="lbl" id="photoLbl">Drop the photo</div>
+      <div class="sub">face clearly visible · png / jpg</div>
       <input type="file" id="photoInput" accept="image/*" class="hidden">
     </div>
   </div>
@@ -926,10 +926,10 @@ const PAGE = /* html */ `<!doctype html>
     <div class="opt" id="activeModelInfo" style="margin-top:8px"></div>
   </div>
   <div class="row">
-    <label class="opt">Durata clip:
-      <select id="clipLen"><option value="6">6s (più scene)</option><option value="10">10s (meno scene)</option></select>
+    <label class="opt">Clip length:
+      <select id="clipLen"><option value="6">6s (more scenes)</option><option value="10">10s (fewer scenes)</option></select>
     </label>
-    <button id="analyzeBtn" disabled>Analizza la canzone →</button>
+    <button id="analyzeBtn" disabled>Analyse the song →</button>
     <span id="analyzeMsg" class="opt"></span>
   </div>
   <div class="logbox hidden" id="analyzeLog" style="margin-top:16px"></div>
@@ -937,34 +937,34 @@ const PAGE = /* html */ `<!doctype html>
 
 <!-- STEP 2 -->
 <div class="card hidden" id="step2">
-  <h3>Analisi della canzone</h3>
+  <h3>Song analysis</h3>
   <pre class="analysis" id="analysisOut"></pre>
-  <h3>Motore video & costo</h3>
+  <h3>Video engine & cost</h3>
   <div class="row" style="margin-top:0">
     <label class="opt">Provider: <select id="videoProvSel"></select></label>
-    <label class="opt" id="mmModelWrap">Motore: <select id="modelSel"></select></label>
-    <label class="opt" id="mmResWrap">Risoluzione: <select id="resSel"></select></label>
-    <label class="opt hidden" id="extModelWrap">Modello: <select id="videoModelSel"></select></label>
+    <label class="opt" id="mmModelWrap">Engine: <select id="modelSel"></select></label>
+    <label class="opt" id="mmResWrap">Resolution: <select id="resSel"></select></label>
+    <label class="opt hidden" id="extModelWrap">Model: <select id="videoModelSel"></select></label>
   </div>
   <div class="cost" id="costBox"></div>
   <div class="err hidden" id="storyboardErr"></div>
-  <h3>Storyboard — modifica pure le scene</h3>
+  <h3>Storyboard — edit the scenes freely</h3>
   <div id="scenes"></div>
   <div class="row">
-    <button class="ghost" id="backBtn">← Indietro</button>
-    <button id="genBtn">Genera il video 🎬</button>
+    <button class="ghost" id="backBtn">← Back</button>
+    <button id="genBtn">Generate the video 🎬</button>
   </div>
 </div>
 
 <!-- STEP 3 -->
 <div class="card hidden" id="step3">
-  <h3 id="genTitle">Generazione in corso…</h3>
+  <h3 id="genTitle">Generating…</h3>
   <div class="bar"><i id="barFill"></i></div>
   <div class="opt" id="genStatus"></div>
   <div class="logbox" id="logBox"></div>
   <div id="videoWrap" class="hidden">
     <video id="finalVideo" controls></video>
-    <div class="row"><a class="dl" id="dlLink" download="music-video.mp4">⬇ Scarica il video</a></div>
+    <div class="row"><a class="dl" id="dlLink" download="music-video.mp4">⬇ Download the video</a></div>
   </div>
   <div class="err hidden" id="genErr"></div>
 </div>
@@ -977,9 +977,9 @@ let audioData=null, photoData=null, state={}, config=null;
 // The HTML ships empty; this builder fills it from the live /api/config
 // (which already knows the registered providers and which env vars are set).
 const PANEL_MODEL = {
-  llm:    { label: '🧠 LLM per lo storyboard', desc: 'Scegli un provider e inserisci la chiave. Viene usata solo se la CLI non ha un modello attivo (/use).' },
-  video:  { label: '🎬 Video engine',          desc: 'Servono per generare le clip (MiniMax S2V-01 / Hailuo).' },
-  audio:  { label: '🎵 Audio / lyrics',         desc: 'Servono per analizzare la canzone e trascrivere il testo (Gemini).' },
+  llm:    { label: '🧠 Storyboard LLM', desc: 'Pick a provider and enter its key. It is used only when the CLI has no active model (/use).' },
+  video:  { label: '🎬 Video engine',          desc: 'Needed to generate the clips (MiniMax S2V-01 / Hailuo).' },
+  audio:  { label: '🎵 Audio / lyrics',         desc: 'Needed to analyse the song and transcribe the lyrics (Gemini).' },
 };
 
 function renderKeysPanel(){
@@ -997,19 +997,19 @@ function renderKeysPanel(){
   const llmRow = document.createElement('div');
   llmRow.className = 'keyrow full';
   llmRow.innerHTML = ''
-    + '<label>Provider & modello'
+    + '<label>Provider & model'
     + '  <div style="display:flex;gap:8px">'
     + '    <select id="llmProviderSel" style="flex:1">' + llmOptions + '</select>'
-    + '    <input id="llmModelInp" placeholder="modello (es. gpt-4o-mini)" style="flex:1">'
+    + '    <input id="llmModelInp" placeholder="model (e.g. gpt-4o-mini)" style="flex:1">'
     + '  </div>'
     + '</label>'
     + '<label style="margin-top:8px">API key'
-    + '  <input id="llmKeyInp" type="password" autocomplete="off" placeholder="Incolla qui la chiave — resta sul tuo PC">'
+    + '  <input id="llmKeyInp" type="password" autocomplete="off" placeholder="Paste the key here — it stays on your computer">'
     + '</label>'
     + '<div class="acts" style="margin-top:8px;align-items:flex-start">'
-    + '  <label class="savetog"><input type="checkbox" id="llmSaveTog"> Ricorda cifrata sul disco</label>'
+    + '  <label class="savetog"><input type="checkbox" id="llmSaveTog"> Remember it, encrypted on disk</label>'
     + '  <span id="llmStatus" class="savedhint"></span>'
-    + '  <button id="llmForgetBtn" type="button" style="display:none">Dimentica</button>'
+    + '  <button id="llmForgetBtn" type="button" style="display:none">Forget</button>'
     + '  <span id="llmMsg" class="keymsg"></span>'
     + '</div>';
   llmGrp.appendChild(llmRow);
@@ -1017,8 +1017,8 @@ function renderKeysPanel(){
 
   // --- Video + Audio sections ---
   const fixed = [
-    { kind: 'video', provider: 'minimax', label: PANEL_MODEL.video.label, desc: PANEL_MODEL.video.desc, placeholder: 'MINIMAX_API_KEY — genera le clip (S2V-01 e Hailuo)' },
-    { kind: 'audio', provider: 'gemini',  label: PANEL_MODEL.audio.label, desc: PANEL_MODEL.audio.desc, placeholder: 'GEMINI_API_KEY — analisi canzone & lyrics (opzionale)' },
+    { kind: 'video', provider: 'minimax', label: PANEL_MODEL.video.label, desc: PANEL_MODEL.video.desc, placeholder: 'MINIMAX_API_KEY — generates the clips (S2V-01 and Hailuo)' },
+    { kind: 'audio', provider: 'gemini',  label: PANEL_MODEL.audio.label, desc: PANEL_MODEL.audio.desc, placeholder: 'GEMINI_API_KEY — song analysis & lyrics (optional)' },
   ];
   // External video providers (Runway, Replicate…) from the config, so each gets
   // a save/forget key field like the built-ins.
@@ -1033,8 +1033,8 @@ function renderKeysPanel(){
     const savedEntry = config.keys.saved[f.provider];
     const hasKey = config.keys[f.provider];
     const statusHtml = hasKey
-      ? '<span class="savedhint">✓ ' + (savedEntry && savedEntry.masked ? savedEntry.masked + ' · salvata' : 'da ambiente') + '</span>'
-      : '<span style="color:var(--warn)">non configurata</span>';
+      ? '<span class="savedhint">✓ ' + (savedEntry && savedEntry.masked ? savedEntry.masked + ' · saved' : 'from the environment') + '</span>'
+      : '<span style="color:var(--warn)">not configured</span>';
     grp.innerHTML = '<h4>' + f.label + '</h4><div class="grpdesc">' + f.desc + '</div>';
     grp.innerHTML += ''
       + '<div class="keyrow full">'
@@ -1042,9 +1042,9 @@ function renderKeysPanel(){
       + '    <input id="key_' + f.provider + '" type="password" autocomplete="off" placeholder="' + f.placeholder + '">'
       + '  </label>'
       + '  <div class="acts" style="margin-top:8px;align-items:flex-start">'
-      + '    <label class="savetog"><input type="checkbox" id="save_' + f.provider + '"> Ricorda cifrata sul disco</label>'
+      + '    <label class="savetog"><input type="checkbox" id="save_' + f.provider + '"> Remember it, encrypted on disk</label>'
       + '    ' + statusHtml
-      + '    <button id="forget_' + f.provider + '" type="button" style="display:' + (savedEntry && savedEntry.hasKey ? 'inline-block' : 'none') + '">Dimentica</button>'
+      + '    <button id="forget_' + f.provider + '" type="button" style="display:' + (savedEntry && savedEntry.hasKey ? 'inline-block' : 'none') + '">Forget</button>'
       + '    <span id="msg_' + f.provider + '" class="keymsg"></span>'
       + '  </div>'
       + '</div>';
@@ -1067,10 +1067,10 @@ function renderKeysPanel(){
     modelInp.value = modelInp.value || p.defaultModel;
     if (p.saved) {
       const masked = config.keys.saved[p.id] && config.keys.saved[p.id].masked;
-      status.textContent = masked ? '✓ salvata · ' + masked : '✓ salvata';
+      status.textContent = masked ? '✓ saved · ' + masked : '✓ saved';
       forgetBtn.style.display = 'inline-block';
     } else if (p.envPresent) {
-      status.textContent = "✓ da variabile d'ambiente";
+      status.textContent = '✓ from an environment variable';
       forgetBtn.style.display = 'none';
     } else {
       status.textContent = '';
@@ -1102,8 +1102,8 @@ async function forgetKey(provider, msgEl){
   try{
     const r = await fetch('/api/keys/' + encodeURIComponent(provider), { method: 'DELETE' });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.error || 'cancellazione fallita');
-    msgEl.textContent = '✓ chiave rimossa';
+    if (!r.ok) throw new Error(d.error || 'could not delete it');
+    msgEl.textContent = '✓ key removed';
     await reloadConfig();
   }catch(e){ msgEl.textContent = '⚠ ' + e.message; }
 }
@@ -1124,8 +1124,8 @@ async function saveKeyIfNeeded(provider, secret, shouldSave, msgEl){
       body: JSON.stringify({ provider, secret }),
     });
     const d = await r.json();
-    if (!r.ok) throw new Error(d.error || 'salvataggio fallito');
-    msgEl.textContent = '✓ salvata cifrata (' + d.masked + ')';
+    if (!r.ok) throw new Error(d.error || 'could not save it');
+    msgEl.textContent = '✓ saved, encrypted (' + d.masked + ')';
     await reloadConfig();
   }catch(e){ msgEl.textContent = '⚠ ' + e.message; }
 }
@@ -1135,8 +1135,8 @@ async function loadConfig(){
     config = await (await fetch('/api/config')).json();
     renderKeysPanel();
     $('activeModelInfo').innerHTML = config.activeModel
-      ? ('Modello CLI per lo storyboard: <b>' + config.activeModel + '</b>')
-      : '⚠ Nessun modello CLI attivo — lo storyboard automatico userà una chiave dal pannello "API keys" (LLM per lo storyboard).';
+      ? ('CLI model for the storyboard: <b>' + config.activeModel + '</b>')
+      : '⚠ No active CLI model — the automatic storyboard will use a key from the "API keys" panel (storyboard LLM).';
   }catch(e){/* studio still usable with defaults */}
 }
 loadConfig();
@@ -1210,8 +1210,8 @@ function updateCost(){
     const modelId=$('videoModelSel')?.value||'';
     const keyOk=(config&&config.keys[provider])||(readKeys()[provider]||'');
     let h='🎬 <b>'+n+'</b> clip · <span class="opt">'+(def?def.label:provider)+(modelId?(' · '+modelId):'')+'</span><br>';
-    h+='<span class="opt">'+(def&&def.note?def.note:'Costo fatturato sul tuo account '+provider)+'</span>';
-    if(!keyOk)h+='<br><span class="badge-no">⚠ Inserisci la API key '+(def?def.label:provider)+' nel pannello “API keys”.</span>';
+    h+='<span class="opt">'+(def&&def.note?def.note:'Billed to your '+provider+' account')+'</span>';
+    if(!keyOk)h+='<br><span class="badge-no">⚠ Add the '+(def?def.label:provider)+' API key in the “API keys” panel.</span>';
     $('costBox').innerHTML=h;
     return;
   }
@@ -1220,16 +1220,16 @@ function updateCost(){
   const keyOk=(config&&config.keys.minimax)||readKeys().minimax;
   let html='🎬 <b>'+n+'</b> clip · <span class="opt">'+model+' '+res+' · '+dur()+'s</span><br>';
   if(pp!=null){
-    html+='Ti servono: <span class="costbig">'+(pp*n).toFixed(1)+' video points</span> <span class="opt">('+pp+'/clip'+(usd!=null?(' · ~$'+(usd*n).toFixed(2)):'')+')</span>';
+    html+='You need: <span class="costbig">'+(pp*n).toFixed(1)+' video points</span> <span class="opt">('+pp+'/clip'+(usd!=null?(' · ~$'+(usd*n).toFixed(2)):'')+')</span>';
   }else{
-    html+='<span class="costbig">'+(usd!=null?('~$'+(usd*n).toFixed(2)):'costo n/d')+'</span> <span class="opt">(modello non tariffato a punti)</span>';
+    html+='<span class="costbig">'+(usd!=null?('~$'+(usd*n).toFixed(2)):'cost n/a')+'</span> <span class="opt">(model not priced in points)</span>';
   }
   const cheap=cheapestByPoints();
   if(cheap&&!(cheap.id===model&&cheap.res===res)){
-    html+='<br>💡 Più economico: <b>'+cheap.label+'</b> a '+cheap.res+' → <b>'+(cheap.pp*n).toFixed(1)+' video points</b> ('+cheap.pp+'/clip). '+
-      '<a href="#" id="useCheap" style="color:var(--acc2)">usa questo</a>';
+    html+='<br>💡 Cheaper: <b>'+cheap.label+'</b> at '+cheap.res+' → <b>'+(cheap.pp*n).toFixed(1)+' video points</b> ('+cheap.pp+'/clip). '+
+      '<a href="#" id="useCheap" style="color:var(--acc2)">use this</a>';
   }
-  if(!keyOk)html+='<br><span class="badge-no">⚠ Inserisci la MiniMax API key per poter generare.</span>';
+  if(!keyOk)html+='<br><span class="badge-no">⚠ Add the MiniMax API key to generate.</span>';
   $('costBox').innerHTML=html;
   const uc=$('useCheap');
   if(uc)uc.onclick=(e)=>{e.preventDefault();$('modelSel').value=cheap.id;populateResolutions();$('resSel').value=cheap.res;updateCost();};
@@ -1288,13 +1288,13 @@ wireDrop('dropPhoto','photoInput',async f=>{photoData=await fileToDataUrl(f);$('
 function checkReady(){$('analyzeBtn').disabled=!(audioData&&photoData);}
 
 $('analyzeBtn').onclick=async()=>{
-  $('analyzeBtn').disabled=true;$('analyzeMsg').innerHTML='<span class="spin"></span>Analisi in corso…';
-  const box=$('analyzeLog');box.classList.remove('hidden');box.innerHTML='<div>Avvio analisi…</div>';
+  $('analyzeBtn').disabled=true;$('analyzeMsg').innerHTML='<span class="spin"></span>Analysing…';
+  const box=$('analyzeLog');box.classList.remove('hidden');box.innerHTML='<div>Starting the analysis…</div>';
   try{
     const keys = readKeys();
     const r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:audioData,clipLength:+$('clipLen').value,apiKeys:{gemini:keys.gemini, llm:keys.llm}})});
     const d=await r.json();
-    if(!r.ok)throw new Error(d.error||'Analisi fallita');
+    if(!r.ok)throw new Error(d.error||'Analysis failed');
     pollAnalysis(d.jobId);
   }catch(e){$('analyzeMsg').textContent='⚠ '+e.message;$('analyzeBtn').disabled=false;}
 };
@@ -1306,7 +1306,7 @@ async function pollAnalysis(jobId){
     const box=$('analyzeLog');
     box.innerHTML=(d.log||[]).slice(-40).map(l=>'<div>'+l.msg.replace(/</g,'&lt;')+'</div>').join('');
     box.scrollTop=box.scrollHeight;
-    if(d.state==='error'){$('analyzeMsg').textContent='⚠ '+(d.error||'Analisi fallita');$('analyzeBtn').disabled=false;return;}
+    if(d.state==='error'){$('analyzeMsg').textContent='⚠ '+(d.error||'Analysis failed');$('analyzeBtn').disabled=false;return;}
     if(d.state==='analyzed'&&d.analysis){
       state=Object.assign({jobId},d.analysis);
       $('analyzeMsg').innerHTML='';$('analyzeBtn').disabled=false;
@@ -1324,7 +1324,7 @@ function renderStep2(d){
   const list=d.storyboard.length?d.storyboard:Array.from({length:d.sceneCount},(_,i)=>({title:'Scene '+(i+1),prompt:'',duration:d.clipLength}));
   list.forEach((s,i)=>{
     const el=document.createElement('div');el.className='scene';
-    el.innerHTML='<div class="st"><b>#'+(i+1)+'</b><input data-t="'+i+'" value="'+(s.title||'').replace(/"/g,'&quot;')+'"></div><textarea data-p="'+i+'" placeholder="Descrizione scena + movimento camera">'+(s.prompt||'')+'</textarea>';
+    el.innerHTML='<div class="st"><b>#'+(i+1)+'</b><input data-t="'+i+'" value="'+(s.title||'').replace(/"/g,'&quot;')+'"></div><textarea data-p="'+i+'" placeholder="Scene description + camera movement">'+(s.prompt||'')+'</textarea>';
     box.appendChild(el);
   });
   document.querySelectorAll('[data-p]').forEach(t=>t.addEventListener('input',updateCost));
@@ -1334,13 +1334,13 @@ function renderStep2(d){
   if (d.storyboardError) {
     errEl.classList.remove('hidden');
     errEl.innerHTML = ''
-      + '<b>⚠ Storyboard automatico non riuscito</b><br>'
+      + '<b>⚠ Automatic storyboard failed</b><br>'
       + '<span style="white-space:pre-wrap">' + (d.storyboardError || '').replace(/</g,'&lt;') + '</span>'
       + '<div style="font-size:12.5px;color:var(--dim);margin-top:6px">'
-      +   'Compila le scene sotto a mano, oppure aggiungi una chiave per un altro LLM nel pannello "API keys" e riprova.'
+      +   'Fill in the scenes below by hand, or add a key for another LLM in the "API keys" panel and try again.'
       + '</div>'
       + '<div class="acts">'
-      +   '<button id="retryStoryboardBtn" type="button">↻ Riprova con un altro LLM</button>'
+      +   '<button id="retryStoryboardBtn" type="button">↻ Try again with another LLM</button>'
       +   '<button id="backStep1Btn" type="button">← Torna allo step 1</button>'
       + '</div>';
     $('retryStoryboardBtn').onclick = () => rerunAnalysis();
@@ -1365,7 +1365,7 @@ async function rerunAnalysis(){
   // state object still has jobId, but a new request creates a new one.
   const r = await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:audioData,clipLength:state.clipLength,apiKeys:{gemini:keys.gemini, llm:keys.llm}})});
   const d = await r.json();
-  if (!r.ok) { alert(d.error || 'Riprova fallita'); return; }
+  if (!r.ok) { alert(d.error || 'Retry failed'); return; }
   state.jobId = d.jobId;
   setStep(3);
   $('genTitle').textContent='Riprovo…';
@@ -1378,14 +1378,14 @@ $('genBtn').onclick=async()=>{
   const titles=[...document.querySelectorAll('[data-t]')];
   const proms=[...document.querySelectorAll('[data-p]')];
   const storyboard=proms.map((p,i)=>({title:titles[i].value,prompt:p.value,duration:state.clipLength})).filter(s=>s.prompt.trim());
-  if(!storyboard.length){alert('Aggiungi almeno una scena con descrizione.');return;}
+  if(!storyboard.length){alert('Add at least one scene with a description.');return;}
   const keys=readKeys();
   const provider=currentVideoProvider();
   const def=videoProviderDef(provider);
   const keyPid=(def&&def.keyProvider)||provider;
   const provKeyOk=(config&&config.keys[provider])||keys[provider]||keys[keyPid];
   if(!provKeyOk){
-    alert('Inserisci la API key '+(def?def.label:provider)+' nel pannello “API keys” dello step 1.');setStep(1);return;
+    alert('Add the '+(def?def.label:provider)+' API key in the “API keys” panel of step 1.');setStep(1);return;
   }
   const apiKeys={minimax:keys.minimax, gemini:keys.gemini, llm:keys.llm};
   (config&&config.videoProviders||[]).forEach(p=>{if(p.id!=='minimax'&&!p.keyProvider)apiKeys[p.id]=keys[p.id]||'';});
@@ -1393,12 +1393,12 @@ $('genBtn').onclick=async()=>{
   try{
     const r=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobId:state.jobId,photo:photoData,storyboard,provider,videoModel:$('videoModelSel')?.value||null,model:$('modelSel').value,resolution:$('resSel').value,apiKeys})});
     const d=await r.json();
-    if(!r.ok)throw new Error(d.error||'Avvio fallito');
+    if(!r.ok)throw new Error(d.error||'Could not start');
     poll();
   }catch(e){showErr(e.message);}
 };
 
-function showErr(m){$('genErr').textContent='⚠ '+m;$('genErr').classList.remove('hidden');$('genTitle').textContent='Generazione interrotta';}
+function showErr(m){$('genErr').textContent='⚠ '+m;$('genErr').classList.remove('hidden');$('genTitle').textContent='Generation stopped';}
 
 async function poll(){
   try{
@@ -1406,12 +1406,12 @@ async function poll(){
     const d=await r.json();
     const pct=d.total?Math.round(d.done/d.total*100):0;
     $('barFill').style.width=(d.state==='done'?100:pct)+'%';
-    $('genStatus').innerHTML=(d.state==='running'?'<span class="spin"></span>':'')+'Clip '+d.done+'/'+d.total+(d.state==='done'?' · montaggio completato':'');
+    $('genStatus').innerHTML=(d.state==='running'?'<span class="spin"></span>':'')+'Clip '+d.done+'/'+d.total+(d.state==='done'?' · editing complete':'');
     $('logBox').innerHTML=(d.log||[]).slice(-40).map(l=>'<div>'+l.msg.replace(/</g,'&lt;')+'</div>').join('');
     $('logBox').scrollTop=$('logBox').scrollHeight;
     if(d.error){showErr(d.error);return;}
     if(d.state==='done'&&d.videoUrl){
-      $('genTitle').textContent='🎉 Video pronto!';
+      $('genTitle').textContent='🎉 Video ready!';
       $('finalVideo').src=d.videoUrl;$('dlLink').href=d.videoUrl;$('videoWrap').classList.remove('hidden');
       return;
     }

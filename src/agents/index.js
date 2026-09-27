@@ -700,11 +700,11 @@ export class Agent {
     const repeated = this._mostRepeatedToolCall();
     const looping = repeated && repeated.count >= 3 && repeated.count >= toolCallCount * 0.25;
     if (looping) {
-      return `La stessa chiamata è stata ripetuta ${repeated.count} volte: ${repeated.name}${repeated.preview ? ` (${repeated.preview})` : ''}.`
-        + ' È un loop, e un limite più alto lo allungherebbe soltanto: riformula la richiesta, oppure esegui tu quel comando e incolla il risultato.';
+      return `The same call was repeated ${repeated.count} times: ${repeated.name}${repeated.preview ? ` (${repeated.preview})` : ''}.`
+        + ' That is a loop, and a higher limit would only make it longer: rephrase the request, or run that command yourself and paste the result.';
     }
-    return 'Il compito è semplicemente grande: scrivi "continua" per riprendere da qui, dividilo in richieste più piccole,'
-      + ` oppure alza il limite aggiungendo "maxToolCallsPerTurn": ${limit * 2} a .ettore/config.json.`;
+    return 'The task is simply large: type "continue" to pick up from here, split it into smaller requests,'
+      + ` or raise the limit by adding "maxToolCallsPerTurn": ${limit * 2} to .ettore/config.json.`;
   }
 
   // Where this turn's counts start from; see _mostRepeatedToolCall.
@@ -2188,17 +2188,17 @@ export class Agent {
         // says far more than "stopped here" would.
         if (forceTextOnlyNextTurn && result.type === 'tool_calls' && turnRecoveryState.invalidToolCallStreak < 2) {
           const reason = iterations === this.maxIterations
-            ? `ho raggiunto il limite di ${this.maxIterations} passaggi in questo turno`
+            ? `reached the limit of ${this.maxIterations} steps for this turn`
             : toolBudgetFinalizeUsed
-              ? `ho usato tutte le ${this.maxToolCallsPerTurn} chiamate di tool concesse a un turno`
-              : (this._lastFinalizeReason ? `mi fermo qui (${this._lastFinalizeReason})` : 'mi fermo qui');
+              ? `used all ${this.maxToolCallsPerTurn} tool calls allowed in one turn`
+              : (this._lastFinalizeReason ? `stopping here (${this._lastFinalizeReason})` : 'stopping here');
           const files = [...touchedFiles];
           const fileNote = files.length
-            ? ` File modificati in questo turno: ${files.slice(0, 8).map(file => shortenPath(file, 3)).join(', ')}${files.length > 8 ? ` e altri ${files.length - 8}` : ''}.`
+            ? ` Files changed this turn: ${files.slice(0, 8).map(file => shortenPath(file, 3)).join(', ')}${files.length > 8 ? ` and ${files.length - 8} more` : ''}.`
             : '';
           const advice = toolBudgetFinalizeUsed ? ` ${this._toolBudgetAdvice(this.maxToolCallsPerTurn, toolCallCount)}` : '';
-          const summary = `${reason.charAt(0).toUpperCase()}${reason.slice(1)}. Il lavoro già eseguito è conservato (${this._toolsCompletedThisTurn()} tool completati).${fileNote}`
-            + (advice || ' Scrivi "continua" per riprendere da dove sono arrivato.');
+          const summary = `${reason.charAt(0).toUpperCase()}${reason.slice(1)}. The work done so far is kept (${this._toolsCompletedThisTurn()} tools completed).${fileNote}`
+            + (advice || ' Type "continue" to pick up where it stopped.');
           this.messages.push({ role: 'assistant', content: summary });
           emitter?.emit('complete', summary);
           emitTurnState('completed', { reason: iterations === this.maxIterations ? 'max_iterations_recovered' : 'text_only_recovered' });
@@ -2458,8 +2458,8 @@ export class Agent {
             }
             // Out of attempts. Ending is right; ending as if all were well is not.
             releaseWarning = gate.status === 'suite_failing'
-              ? `\n\n⚠️ Codice NON verificato: la suite di test è ancora rossa dopo ${this.maxReleaseGateRetries} tentativi di correzione. Non considerare queste modifiche pronte per il rilascio.`
-              : '\n\n⚠️ Codice NON verificato: nessun controllo è stato eseguito con successo dopo l\'ultima modifica.';
+              ? `\n\n⚠️ Code NOT verified: the test suite is still failing after ${this.maxReleaseGateRetries} attempts to fix it. Do not treat these changes as ready to release.`
+              : '\n\n⚠️ Code NOT verified: no check has passed since the last change.';
             emitter?.emit('releaseGate', { status: 'exhausted', reason: gate.status });
             this._debugLog(emitter, 'turn.release_gate_exhausted', { status: gate.status });
           } else if (releaseGate.mutationSeq > 0) {
@@ -3113,9 +3113,9 @@ export class Agent {
             .join('\n');
           emitter?.emit(
             'error',
-            `Il modello continua a chiamare i tool con argomenti vuoti o non validi (${turnRecoveryState.invalidToolCallStreak} turni di fila). Probabile bug del modello.\n`
-            + `Ultime chiamate rifiutate:\n${rejected || '  • (nessun dettaglio disponibile)'}\n`
-            + `Suggerimenti: (1) riformula la richiesta in modo più specifico, (2) usa /compress per ridurre il contesto, (3) usa /use per cambiare modello.`
+            `The model keeps calling tools with empty or invalid arguments (${turnRecoveryState.invalidToolCallStreak} turns in a row). Most likely a bug in the model.\n`
+            + `Last rejected calls:\n${rejected || '  • (no details available)'}\n`
+            + `Tips: (1) rephrase the request more specifically, (2) use /compress to shrink the context, (3) use /use to switch model.`
           );
           emitTurnState('failed', { reason: 'invalid_tool_call_loop' });
           this._debugLog(emitter, 'turn.failed', {
@@ -3215,8 +3215,8 @@ export class Agent {
           // terminal event the TUI never learned the turn was over: it stayed
           // "running" with the last tool frozen on screen, and only the
           // animation ticking, for the rest of the session.
-          const message = 'Il provider ha rifiutato gli argomenti di una tool call (JSON non valido). '
-            + 'Ho lasciato in conversazione una correzione per il modello: scrivi "continua" e riparte da qui.';
+          const message = 'The provider rejected the arguments of a tool call (invalid JSON). '
+            + 'A correction for the model has been left in the conversation: type "continue" and it picks up from here.';
           this.messages.push({ role: 'assistant', content: message });
           emitter?.emit('complete', message);
           emitTurnState('completed', { reason: 'tool_args_retry' });
@@ -3243,7 +3243,7 @@ export class Agent {
     // fallback is only reachable when a provider aborts the loop without
     // returning a final response; keep it non-fatal so the TUI does not show a
     // misleading error after useful tool work has already completed.
-    const summary = `Ho raggiunto il limite di ${this.maxIterations} passaggi in questo turno. Il lavoro già eseguito è conservato: continuo da qui.`;
+    const summary = `Reached the limit of ${this.maxIterations} steps for this turn. The work done so far is kept: continue from here.`;
     this.messages.push({ role: 'assistant', content: summary });
     emitter?.emit('complete', summary);
     emitTurnState('completed', { reason: 'max_iterations_recovered' });

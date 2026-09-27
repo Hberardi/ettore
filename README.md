@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.14.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.15.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -17,7 +17,7 @@ What changed in each release is in the [changelog](https://github.com/Hberardi/e
 - 💻 **Tool Execution** - bash, read, write, edit, grep, glob, web search, web fetch, image inspection, delegated codebase search
 - ✅ **Done means the tests pass** - when the agent changes code it runs your project's full test suite before handing the work back; a red suite goes back to the agent to fix, and it never reports "done" over failing tests ([details](#done-means-the-tests-pass))
 - 🖱️ **Runs your apps** - opens web apps in a real browser (reads the browser console: errors, exceptions, failed requests) and launches desktop apps (captures stdout/stderr, screenshots, clicks and types) to reproduce bugs before fixing them
-- 🎨 **Native TUI** - Custom ANSI renderer (no React/Ink) with themes and a sidebar that grows with the terminal (`/sidebar auto|wide|narrow|<n>`)
+- 🎨 **Native TUI** - Custom ANSI renderer (no React/Ink) with themes and a sidebar that grows with the terminal (`/sidebar auto|wide|narrow|<n>`); long text wraps rather than being cut — your messages, the input as you type it, command output, the model name and folder in the sidebar
 - 🖼️ **Vision** - Reads local images; agent can discover, download, and inspect public web images
 - 📄 **Super OCR for PDF** - Extracts native text first, then automatically handles scanned and low-quality PDFs with preprocessing, deskew, denoise, adaptive thresholding, and multi-pass Tesseract OCR
 - 🪟 **Linux, macOS and Windows** - shell commands, code search and file edits work natively on each; on Windows the `bash` tool keeps PowerShell warm instead of starting it per command; see [Platform support](#platform-support)
@@ -184,6 +184,14 @@ ettore 1.2.4
 `ettore update` does the same thing on demand, and `--no-update-check` skips
 the npm call altogether.
 
+The first time you open the TUI on a new version, it tells you what came with
+it: a *✨ What's new* message listing the headings of every release since the
+version you last ran (the latest three, the older ones counted), read from the
+`CHANGELOG.md` shipped in the package. `/changelog` shows the latest release
+notes in full, `/changelog 1.13.0` any other one. A fresh install shows
+nothing — there is nothing you missed. The last version seen is kept as
+`lastSeenVersion` in `~/.config/ettore/`.
+
 The install is skipped — and ETTORE tells you about the new version instead —
 when:
 
@@ -267,6 +275,24 @@ that deletes, for instance), and adds a confirmation only when it is sure.
 `/auto-approve edits|installs|commands on|off` sets each part on its own, and
 the setting is remembered; an earlier `/auto-approve on` counts as all three.
 
+Text is wrapped, not cut. What you type wraps between words and the input
+grows with the terminal (up to 40% of its height), so a long request is seen
+whole while you write it; your messages in the conversation wrap the same way.
+Command output (`/plugins`, `/config`, …) opens in a framed window titled with
+the command, wide enough to read, its long lines wrapped inside the frame. It is
+dressed by its shape: section titles in bold, each entry's name bold and
+coloured with its details dimmed beside it, descriptions in plain text,
+permissions and hints in grey — so `/plugins` reads as one card per plugin
+rather than a wall of text.
+
+Typing `/` opens the command palette: every command with its arguments dimmed
+beside it and what it does, a `⧉ plugin` badge on the ones a plugin added, and
+the selected command spelled out in full below the list — usage, aliases,
+the whole description. Type to filter, ↑↓ to move, Enter to run.
+
+The whole interface — commands, prompts, confirmations, the music video
+studio — is in English. You can still write to the agent in any language.
+
 When the agent needs a decision from you it asks in a small window with its
 suggested answers. Pick one with the arrows and Enter, or just start typing:
 the last line, *✎ or type your own answer*, takes an answer in your words, and
@@ -327,6 +353,7 @@ installed, ETTORE keeps its native PDF and binary-text fallbacks.
 | `/system` | Platform and runtime info |
 | `/init` | Reload project memory and reset the conversation |
 | `/version` | Show ETTORE version |
+| `/changelog [version]` | What changed in the latest release, or in the one given (aliases `/whats-new`, `/news`) |
 | `/help [command]` | Show help for a specific command |
 | `/clear` | Clear the screen |
 | `/exit` | Exit interactive mode |

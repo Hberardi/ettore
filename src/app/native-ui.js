@@ -2,9 +2,11 @@ import { EventEmitter } from 'events';
 import { emitKeypressEvents } from 'readline';
 import { TUI, THEMES, setTheme, sidebarWidthFor } from './tui-native.js';
 import { applyAskUserKey, pasteIntoAskUser } from './ask-user-input.js';
+import { styleOutputLine } from './output-style.js';
 import { connectionManager, ConnectionManager } from '../providers/index.js';
 import { PROVIDER_REGISTRY } from '../providers/registry.js';
-import { loadConfig, getConfig } from '../config/index.js';
+import { loadConfig, getConfig, saveConfig } from '../config/index.js';
+import { whatsNewOnStartup } from './whats-new.js';
 import { createClient } from '../llm/client.js';
 import { Agent } from '../agents/index.js';
 import { createSession, saveSession, sessionHasContent } from '../sessions/index.js';
@@ -336,7 +338,7 @@ export async function startApp(options = {}) {
           if (result) {
             tui.messages.push({
               role: 'system',
-              text: `📚 Memoria progetto caricata — ${result.projectName} (.ettore/memory.md)`,
+              text: `📚 Project memory loaded — ${result.projectName} (.ettore/memory.md)`,
               tools: [], id: Date.now(),
             });
             tui.needsRender = true;
@@ -365,6 +367,22 @@ export async function startApp(options = {}) {
       // installs only, and meant "stop asking" — which now includes commands.
       commands: typeof savedAutoApprove.commands === 'boolean' ? savedAutoApprove.commands : bothOn,
     });
+  }
+
+  // After an update, what came with it: the headings of every release since
+  // the version this machine last ran, from the changelog in the package.
+  try {
+    const { message, record } = whatsNewOnStartup({
+      current: tui.version,
+      lastSeen: getConfig('lastSeenVersion') || null,
+      // Config from before the saved version existed: an upgrade, not a
+      // first run.
+      upgraded: Boolean(getConfig('theme') || getConfig('provider') || connectionManager.getSavedConnections().length),
+    });
+    if (message) tui.messages.push({ role: 'system', text: message, tools: [], id: Date.now(), kind: 'whats-new' });
+    if (record && record !== getConfig('lastSeenVersion')) saveConfig('lastSeenVersion', record);
+  } catch (_e) {
+    // Release notes are a courtesy; a broken changelog must not stop the CLI.
   }
 
   const p = connectionManager.activeProvider || 'unknown';
@@ -468,9 +486,9 @@ export async function startApp(options = {}) {
     if (imageAttachments.length && modelVisionSupport(connectionManager.activeModel) === 'unknown') {
       tui.messages.push({
         role: 'system',
-        text: `⚠ ${imageAttachments.length === 1 ? "L'immagine allegata viene inviata" : 'Le immagini allegate vengono inviate'} a ${connectionManager.activeModel || 'il modello attivo'}, che non risulta fra i modelli con visione.`
-          + ' Se non la legge puoi ricevere un errore dopo una lunga attesa, o una risposta che la ignora senza dirlo.'
-          + ' Per sicurezza passa a un modello con visione con /use, oppure incolla il testo.',
+        text: `⚠ ${imageAttachments.length === 1 ? 'The attached image is being sent' : 'The attached images are being sent'} to ${connectionManager.activeModel || 'the active model'}, which is not listed as a vision model.`
+          + ' If it cannot read images you may get an error after a long wait, or an answer that silently ignores them.'
+          + ' To be safe, switch to a vision model with /use, or paste the text instead.',
         tools: [],
         id: Date.now(),
       });
@@ -549,7 +567,7 @@ export async function startApp(options = {}) {
       role: 'system',
       text: `▶ Loop avviato${name ? ` (${name})` : ''}: ${plan.steps.length} step.\n`
         + `  Step 1/${plan.steps.length}: ${plan.steps[0]?.title || 'step 1'}\n`
-        + `  /loop status per i dettagli, /loop stop per fermare dopo lo step corrente.`,
+        + `  /loop status for details, /loop stop to stop after the current step.`,
       tools: [],
       id: Date.now(),
     });
@@ -574,7 +592,7 @@ export async function startApp(options = {}) {
     if (wasActive) {
       tui.messages.push({
         role: 'system',
-        text: '⏹ Loop fermato. Lo step corrente è stato completato.',
+        text: '⏹ Loop stopped. The current step was completed.',
         tools: [],
         id: Date.now(),
       });
@@ -664,36 +682,36 @@ export async function startApp(options = {}) {
 
   const summarizeToolIntent = (name, args = {}) => {
     const plan = {
-      read: ['Capire il codice rilevante', args.file_path ? `Prossimo passo: leggo ${args.file_path}` : 'Prossimo passo: leggo i file principali'],
-      read_pdf: ['Estrarre informazioni dal documento', args.file_path ? `Prossimo passo: analizzo PDF ${args.file_path}` : 'Prossimo passo: analizzo il PDF richiesto'],
-      read_doc: ['Estrarre informazioni dal documento', args.file_path ? `Prossimo passo: analizzo file ${args.file_path}` : 'Prossimo passo: analizzo il documento richiesto'],
-      read_server_console: ['Capire errori/runtime dell’app', 'Prossimo passo: leggo i log della console server'],
-      dev_server: ['Gestire il dev server locale', 'Prossimo passo: avvio/controllo stato o log del server di sviluppo'],
-      browser_check: ['Verificare rapidamente una pagina web', 'Prossimo passo: controllo HTTP, titolo e testi attesi della pagina'],
-      browser_app: ['Usare l’app web nel browser per trovare gli errori', args.url ? `Prossimo passo: apro ${sanitizeIntentText(args.url)} e leggo la console del browser` : 'Prossimo passo: interagisco con la pagina e leggo la console del browser'],
-      desktop_app: ['Usare l’app desktop per trovare gli errori', args.command ? `Prossimo passo: avvio ${sanitizeIntentText(args.command)} e leggo il suo output` : 'Prossimo passo: interagisco con la finestra e leggo l’output dell’app'],
-      dep_inspect: ['Analizzare lo stato delle dipendenze del progetto', 'Prossimo passo: controllo pacchetti outdated e possibili vulnerabilità'],
-      repo_map: ['Mappare rapidamente la struttura del repository', 'Prossimo passo: costruisco una panoramica dei file chiave ed entrypoint'],
-      repo_find_symbol: ['Individuare rapidamente dove vive un simbolo', 'Prossimo passo: cerco occorrenze e definizioni del simbolo richiesto'],
-      apply_patch_structured: ['Applicare una patch validata su un file', 'Prossimo passo: verifico match univoco e applico la modifica'],
-      run_tests: ['Verificare che le modifiche non rompano il progetto', 'Prossimo passo: eseguo la suite di test appropriata'],
-      run_checks: ['Eseguire quality checks completi del progetto', 'Prossimo passo: lancio lint/typecheck/test in profilo sicuro'],
-      glob: ['Mappare i file utili al task', args.pattern ? `Prossimo passo: cerco con pattern ${sanitizeIntentText(args.pattern)}` : 'Prossimo passo: cerco i file pertinenti'],
-      grep: ['Trovare i punti di codice rilevanti', args.pattern ? `Prossimo passo: cerco "${sanitizeIntentText(args.pattern)}"` : 'Prossimo passo: cerco il pattern richiesto'],
-      list_dir: ['Capire la struttura del progetto', args.path ? `Prossimo passo: esploro ${sanitizeIntentText(args.path)}` : 'Prossimo passo: esploro le directory principali'],
-      file_info: ['Verificare i dettagli di file/cartelle', args.path ? `Prossimo passo: controllo metadata di ${sanitizeIntentText(args.path)}` : 'Prossimo passo: controllo i metadata necessari'],
-      git_status: ['Verificare lo stato del repository', 'Prossimo passo: controllo branch e working tree'],
-      git_diff: ['Analizzare le modifiche in corso', 'Prossimo passo: leggo il diff rilevante'],
-      websearch: ['Raccogliere informazioni aggiornate', args.query ? `Prossimo passo: cerco "${sanitizeIntentText(args.query)}"` : 'Prossimo passo: effettuo una ricerca web'],
-      webfetch: ['Leggere contenuto di una pagina specifica', args.url ? `Prossimo passo: apro ${sanitizeIntentText(args.url)}` : 'Prossimo passo: apro la pagina richiesta'],
-      bash: ['Eseguire una verifica operativa', args.command ? `Prossimo passo: eseguo ${sanitizeIntentText(args.command, 80)}` : 'Prossimo passo: eseguo il comando necessario'],
-      bash_session: ['Eseguire un comando con stato di shell persistente', args.command ? `Prossimo passo: eseguo nella sessione ${sanitizeIntentText(args.command, 80)}` : 'Prossimo passo: eseguo il comando nella sessione persistente'],
-      write: ['Applicare le modifiche richieste', args.file_path ? `Prossimo passo: scrivo ${sanitizeIntentText(args.file_path)}` : 'Prossimo passo: scrivo le modifiche'],
-      edit: ['Applicare patch mirata al codice', args.file_path ? `Prossimo passo: modifico ${sanitizeIntentText(args.file_path)}` : 'Prossimo passo: modifico il file richiesto'],
-      ask_user: ['Chiarire una scelta necessaria', 'Prossimo passo: chiedo una decisione all’utente'],
-    }[name] || ['Raccogliere il contesto necessario', 'Prossimo passo: avvio i controlli iniziali'];
+      read: ['Understand the relevant code', args.file_path ? `Next: reading ${args.file_path}` : 'Next: reading the main files'],
+      read_pdf: ['Extract information from the document', args.file_path ? `Next: analysing PDF ${args.file_path}` : 'Next: analysing the requested PDF'],
+      read_doc: ['Extract information from the document', args.file_path ? `Next: analysing ${args.file_path}` : 'Next: analysing the requested document'],
+      read_server_console: ['Understand the app’s runtime errors', 'Next: reading the server console logs'],
+      dev_server: ['Manage the local dev server', 'Next: starting it, or checking its status and logs'],
+      browser_check: ['Quickly check a web page', 'Next: checking the HTTP status, title and expected text'],
+      browser_app: ['Use the web app in a browser to find errors', args.url ? `Next: opening ${sanitizeIntentText(args.url)} and reading the browser console` : 'Next: interacting with the page and reading the browser console'],
+      desktop_app: ['Use the desktop app to find errors', args.command ? `Next: launching ${sanitizeIntentText(args.command)} and reading its output` : 'Next: interacting with the window and reading the app’s output'],
+      dep_inspect: ['Review the project’s dependencies', 'Next: checking outdated packages and known vulnerabilities'],
+      repo_map: ['Map the repository’s structure', 'Next: building an overview of the key files and entry points'],
+      repo_find_symbol: ['Find where a symbol lives', 'Next: searching for its definitions and uses'],
+      apply_patch_structured: ['Apply a validated patch to a file', 'Next: checking the match is unique, then applying the change'],
+      run_tests: ['Check the changes do not break the project', 'Next: running the test suite'],
+      run_checks: ['Run the project’s quality checks', 'Next: running lint, typecheck and tests in a safe profile'],
+      glob: ['Find the files the task needs', args.pattern ? `Next: searching with pattern ${sanitizeIntentText(args.pattern)}` : 'Next: searching for the relevant files'],
+      grep: ['Find the relevant places in the code', args.pattern ? `Next: searching for "${sanitizeIntentText(args.pattern)}"` : 'Next: searching for the requested pattern'],
+      list_dir: ['Understand the project’s structure', args.path ? `Next: exploring ${sanitizeIntentText(args.path)}` : 'Next: exploring the main directories'],
+      file_info: ['Check file or folder details', args.path ? `Next: checking the metadata of ${sanitizeIntentText(args.path)}` : 'Next: checking the metadata needed'],
+      git_status: ['Check the repository’s state', 'Next: checking the branch and working tree'],
+      git_diff: ['Review the changes in progress', 'Next: reading the relevant diff'],
+      websearch: ['Gather up-to-date information', args.query ? `Next: searching for "${sanitizeIntentText(args.query)}"` : 'Next: searching the web'],
+      webfetch: ['Read a specific page', args.url ? `Next: opening ${sanitizeIntentText(args.url)}` : 'Next: opening the requested page'],
+      bash: ['Run an operational check', args.command ? `Next: running ${sanitizeIntentText(args.command, 80)}` : 'Next: running the command needed'],
+      bash_session: ['Run a command in the persistent shell', args.command ? `Next: running in the session ${sanitizeIntentText(args.command, 80)}` : 'Next: running the command in the persistent session'],
+      write: ['Apply the requested changes', args.file_path ? `Next: writing ${sanitizeIntentText(args.file_path)}` : 'Next: writing the changes'],
+      edit: ['Apply a targeted change to the code', args.file_path ? `Next: editing ${sanitizeIntentText(args.file_path)}` : 'Next: editing the requested file'],
+      ask_user: ['Settle a choice that is needed', 'Next: asking the user for a decision'],
+    }[name] || ['Gather the context needed', 'Next: starting the initial checks'];
 
-    return `Piano: ${plan[0]}\n${plan[1]}`;
+    return `Plan: ${plan[0]}\n${plan[1]}`;
   };
 
   const ensureStreaming = () => {
@@ -804,7 +822,7 @@ export async function startApp(options = {}) {
         tui.streaming.text = `${intent}\n`;
       } else {
         const parts = String(tui.streaming.text).split('\n');
-        if (parts.length >= 2 && parts[0].startsWith('Piano: ') && parts[1].startsWith('Prossimo passo: ')) {
+        if (parts.length >= 2 && parts[0].startsWith('Plan: ') && parts[1].startsWith('Next: ')) {
           parts[0] = intent.split('\n')[0] || parts[0];
           parts[1] = intent.split('\n')[1] || parts[1];
           tui.streaming.text = parts.join('\n');
@@ -900,7 +918,7 @@ export async function startApp(options = {}) {
     const shown = String(command || '').replace(/\s+/g, ' ').slice(0, 80);
     tui.messages.push({
       role: 'system',
-      text: `◆ Jev (${ms}ms) — comando rischioso (${Number(value).toFixed(2)}): ${shown}`,
+      text: `◆ Jev (${ms}ms) — risky command (${Number(value).toFixed(2)}): ${shown}`,
       tools: [],
       id: Date.now() + Math.random(),
     });
@@ -959,7 +977,7 @@ export async function startApp(options = {}) {
       if (tool.status !== 'running') continue;
       tool.status = 'done';
       tool.durationMs = Date.now() - tool.startMs;
-      tool.output = tool.output || `(nessun esito ricevuto — turno ${label})`;
+      tool.output = tool.output || `(no result received — turn ${label})`;
     }
   };
 
@@ -1021,7 +1039,7 @@ export async function startApp(options = {}) {
       });
       setImmediate(() => {
         runAgent(
-          'continua con il prossimo passo. Se il task è davvero completo, rispondi solo "task completo" e fermati.',
+          'continue with the next step. If the task is really complete, reply only "task complete" and stop.',
           [],
           undefined,
           { continuation: true },
@@ -1036,7 +1054,7 @@ export async function startApp(options = {}) {
       tui.messages.push({
         role: 'system',
         text: `⚠ Mi fermo qui: ${decision.why}.`
-          + `\n   Scrivi "continua" per riprendere, oppure indica tu il passo successivo.`,
+          + `\n   Type "continue" to resume, or say what the next step is.`,
         tools: [],
         id: Date.now(),
       });
@@ -1093,7 +1111,7 @@ export async function startApp(options = {}) {
   });
 
   emitter.on('error', (msg) => {
-    closeDanglingTools('interrotto da un errore');
+    closeDanglingTools('interrupted by an error');
     const loopWasActive = loops.getLoopStatus().active;
     if (loopWasActive) {
       loops.stopLoopRuntime();
@@ -1142,7 +1160,7 @@ export async function startApp(options = {}) {
   emitter.on('outputTruncated', ({ attempt, max }) => {
     tui.messages.push({
       role: 'system',
-      text: `▸ Risposta troncata dal limite di token (ripresa ${attempt}/${max}): continuo da dove si era interrotta`,
+      text: `▸ Reply cut off by the token limit (resume ${attempt}/${max}): continuing from where it stopped`,
       tools: [],
       id: Date.now(),
     });
@@ -1154,7 +1172,7 @@ export async function startApp(options = {}) {
   });
 
   emitter.on('autoContinue', ({ attempt, max, remaining, stalled }) => {
-    const suffix = stalled ? ' — nessun progresso, sollecito il modello' : '';
+    const suffix = stalled ? ' — no progress, nudging the model' : '';
     tui.messages.push({
       role: 'system',
       text: `▸ Auto-continue ${attempt}/${max}: ${remaining} step rimasti dal piano${suffix}`,
@@ -1178,12 +1196,12 @@ export async function startApp(options = {}) {
   // Release gate: the agent refused to end the turn on unverified or red code.
   emitter.on('releaseGate', ({ status, attempt, max }) => {
     const text = status === 'open'
-      ? '✓ Test verdi — modifiche verificate'
+      ? '✓ Tests green — changes verified'
       : status === 'exhausted'
-        ? '⚠ Test non verdi dopo tutti i tentativi — modifiche NON verificate'
+        ? '⚠ Tests still failing after every attempt — changes NOT verified'
         : status === 'suite_failing'
-          ? `✗ Test rossi — rilascio bloccato, correzione ${attempt}/${max}`
-          : `▸ Modifiche non verificate — rilascio bloccato, verifica ${attempt}/${max}`;
+          ? `✗ Tests failing — release blocked, fix ${attempt}/${max}`
+          : `▸ Changes not verified — release blocked, check ${attempt}/${max}`;
     tui.messages.push({ role: 'system', text, tools: [], id: Date.now() });
     if (status !== 'open' && status !== 'exhausted' && tui.streaming) {
       tui.streaming.text = '';
@@ -1197,14 +1215,14 @@ export async function startApp(options = {}) {
   emitter.on('autoContinueExhausted', ({ reason, remaining, attempts, pending = [] }) => {
     if (autoResumeCount >= MAX_AUTO_RESUMES) {
       const why = reason === 'no_progress'
-        ? 'il modello non ha fatto progressi'
-        : `esauriti i ${attempts} tentativi di auto-continue`;
+        ? 'the model made no progress'
+        : `all ${attempts} auto-continue attempts used`;
       const list = pending.slice(0, 5).map(step => `   ${step}`).join('\n');
       tui.messages.push({
         role: 'system',
         text: `⚠ Piano incompleto: ${remaining} step ancora aperti (${why}).\n${list}`
           + `${pending.length > 5 ? `\n   … e altri ${pending.length - 5}` : ''}`
-          + `\n   Auto-resume esaurito (${MAX_AUTO_RESUMES}). Scrivi "continua" per riprendere manualmente, oppure indica il passo successivo.`,
+          + `\n   Auto-resume used up (${MAX_AUTO_RESUMES}). Type "continue" to resume by hand, or say what the next step is.`,
         tools: [],
         id: Date.now(),
       });
@@ -1215,11 +1233,11 @@ export async function startApp(options = {}) {
     const list = pending.slice(0, 3).map(step => `   ${step}`).join('\n');
     tui.messages.push({
       role: 'system',
-      text: `▸ Auto-resume ${autoResumeCount}/${MAX_AUTO_RESUMES}: ${remaining} step dal piano ancora aperti. Continuo automaticamente.\n${list}`,
+      text: `▸ Auto-resume ${autoResumeCount}/${MAX_AUTO_RESUMES}: ${remaining} plan step(s) still open. Continuing automatically.\n${list}`,
       tools: [],
       id: Date.now(),
     });
-    pendingAutoResume = 'continua con il prossimo step del piano — esegui, non annunciare';
+    pendingAutoResume = 'continue with the next step of the plan — do it, do not announce it';
     tui.needsRender = true;
   });
 
@@ -1229,9 +1247,9 @@ export async function startApp(options = {}) {
     if (autoResumeCount >= MAX_AUTO_RESUMES) {
       tui.messages.push({
         role: 'system',
-        text: `⚠ Il modello ha annunciato un'azione senza eseguirla${announcement ? ` ("${announcement}")` : ''}`
-          + ` anche dopo ${attempts} solleciti.\n`
-          + `   Auto-resume esaurito (${MAX_AUTO_RESUMES}). Scrivi "fallo" per insistere, oppure indica tu il comando/file esatto su cui lavorare.`,
+        text: `⚠ The model announced an action without doing it${announcement ? ` ("${announcement}")` : ''}`
+          + ` even after ${attempts} nudges.\n`
+          + `   Auto-resume used up (${MAX_AUTO_RESUMES}). Type "do it" to insist, or name the exact command or file to work on.`,
         tools: [],
         id: Date.now(),
       });
@@ -1241,11 +1259,11 @@ export async function startApp(options = {}) {
     autoResumeCount++;
     tui.messages.push({
       role: 'system',
-      text: `▸ Auto-resume ${autoResumeCount}/${MAX_AUTO_RESUMES} dopo annuncio non eseguito. Forzo esecuzione (era: "${String(announcement || '').slice(0, 80)}").`,
+      text: `▸ Auto-resume ${autoResumeCount}/${MAX_AUTO_RESUMES} after an announcement that was not carried out. Forcing execution (was: "${String(announcement || '').slice(0, 80)}").`,
       tools: [],
       id: Date.now(),
     });
-    pendingAutoResume = 'esegui il prossimo passo concreto con un tool — smetti di annunciare cosa farai';
+    pendingAutoResume = 'carry out the next concrete step with a tool — stop announcing what you will do';
     tui.needsRender = true;
   });
 
@@ -1253,11 +1271,11 @@ export async function startApp(options = {}) {
   // retries and then reports a rate limit, as if it had not already waited.
   emitter.on('providerRetry', ({ attempt, max, status, waitMs, fromServer }) => {
     const secs = Math.max(1, Math.round(Number(waitMs) / 1000));
-    const label = status === 429 ? 'Rate limit del provider' : `Provider non raggiungibile (HTTP ${status || '?'})`;
-    const source = fromServer ? ' (attesa richiesta dal server)' : '';
+    const label = status === 429 ? 'Provider rate limit' : `Provider unreachable (HTTP ${status || '?'})`;
+    const source = fromServer ? ' (wait requested by the server)' : '';
     tui.messages.push({
       role: 'system',
-      text: `⏳ ${label} — riprovo tra ${secs}s (tentativo ${attempt}/${max})${source}`,
+      text: `⏳ ${label} — retrying in ${secs}s (attempt ${attempt}/${max})${source}`,
       tools: [],
       id: Date.now(),
     });
@@ -1268,7 +1286,7 @@ export async function startApp(options = {}) {
   emitter.on('providerRetryResolved', ({ attempts }) => {
     tui.messages.push({
       role: 'system',
-      text: `✓ Provider ha risposto dopo ${attempts} ${attempts === 1 ? 'tentativo' : 'tentativi'}`,
+      text: `✓ Provider answered after ${attempts} ${attempts === 1 ? 'attempt' : 'attempts'}`,
       tools: [],
       id: Date.now(),
     });
@@ -1280,7 +1298,7 @@ export async function startApp(options = {}) {
   emitter.on('compressPrivacyNotice', () => {
     tui.messages.push({
       role: 'system',
-      text: '▸ Auto-compact attivo: quando il contesto supera ~70% verrà riassunto con una chiamata LLM aggiuntiva. Disattivabile con /compress auto off.',
+      text: '▸ Auto-compact on: when the context passes ~70% it is summarised with one extra LLM call. Turn it off with /compress auto off.',
       tools: [],
       id: Date.now(),
     });
@@ -1303,7 +1321,7 @@ export async function startApp(options = {}) {
   emitter.on('compressionFallback', ({ reason }) => {
     tui.messages.push({
       role: 'system',
-      text: `⚠ Compressione degradata (riassunto fallback senza LLM): ${reason}`,
+      text: `⚠ Compression degraded (fallback summary without an LLM): ${reason}`,
       tools: [],
       id: Date.now(),
     });
@@ -1321,29 +1339,29 @@ export async function startApp(options = {}) {
     tui.needsRender = true;
   };
   const isDecisive = value => typeof value === 'number' && Math.abs(value - 0.5) >= 0.25;
-  const ROUTE_LABELS = { direct: 'diretto', explore: 'ricerca estesa', none: 'nessuna lettura di codice' };
+  const ROUTE_LABELS = { direct: 'direct', explore: 'wide search', none: 'no code reading' };
 
   emitter.on('jevJudgment', ({ verdicts = {}, ms, preTurn }) => {
     tui.jevLastMs = ms;
     const LABELS = {
-      announced: 'lavoro annunciato ma non fatto',
-      deferred: 'lavoro rimandato all\'utente',
-      unapplied_code: 'codice mostrato invece che scritto',
+      announced: 'work announced but not done',
+      deferred: 'work handed back to you',
+      unapplied_code: 'code shown instead of written',
     };
     const parts = [];
     const complete = verdicts.complete;
     if (typeof complete === 'number') {
-      const word = !isDecisive(complete) ? 'incerto' : complete > 0.5 ? 'sì' : 'no';
-      parts.push(`completata: ${word} (${complete.toFixed(2)})`);
+      const word = !isDecisive(complete) ? 'unsure' : complete > 0.5 ? 'yes' : 'no';
+      parts.push(`complete: ${word} (${complete.toFixed(2)})`);
     }
     for (const [key, label] of Object.entries(LABELS)) {
       const value = verdicts[key];
       if (isDecisive(value) && value > 0.5) parts.push(`${label} (${value.toFixed(2)})`);
     }
     if (preTurn?.choice) {
-      parts.push(`approccio: ${ROUTE_LABELS[preTurn.choice] || preTurn.choice}${typeof preTurn.confidence === 'number' ? ` ${preTurn.confidence.toFixed(2)}` : ''}`);
+      parts.push(`approach: ${ROUTE_LABELS[preTurn.choice] || preTurn.choice}${typeof preTurn.confidence === 'number' ? ` ${preTurn.confidence.toFixed(2)}` : ''}`);
     }
-    pushJev(`(${ms}ms) — ${parts.join(' · ') || 'nessun verdetto utilizzabile'}`);
+    pushJev(`(${ms}ms) — ${parts.join(' · ') || 'no usable verdict'}`);
   });
 
   // The pre-turn decision, when it changes how the turn starts.
@@ -1352,19 +1370,19 @@ export async function startApp(options = {}) {
     if (!done) {
       // Sent before the exploration starts, so the wait has a reason.
       if (actions.includes('explore')) {
-        pushJev(`(${ms}ms) — ricerca estesa: lancio explore prima di iniziare (confidenza ${Number(confidence).toFixed(2)})`);
+        pushJev(`(${ms}ms) — wide search: running explore before starting (confidence ${Number(confidence).toFixed(2)})`);
       }
       return;
     }
     const ACTION_LABELS = {
-      clarify: 'richiesta ambigua: prima una domanda a te',
-      explore_hint: 'ricerca estesa: explore non ha risposto, lo suggerisco al modello',
-      answer: 'nessun codice da guardare: risposta diretta',
-      plan: 'lavoro su più passi: chiedo un piano prima di iniziare',
-      no_plan: 'lavoro semplice: salto il piano e vado diretto',
-      tools: 'tool del turno scelti da Jev',
-      'effort:low': 'sforzo basso: richiesta semplice',
-      'effort:high': 'sforzo alto: richiesta difficile',
+      clarify: 'ambiguous request: a question to you first',
+      explore_hint: 'wide search: explore did not answer, suggesting it to the model',
+      answer: 'no code to look at: answering directly',
+      plan: 'multi-step work: asking for a plan before starting',
+      no_plan: 'simple work: skipping the plan',
+      tools: 'tools for this turn chosen by Jev',
+      'effort:low': 'low effort: simple request',
+      'effort:high': 'high effort: hard request',
     };
     const shown = actions.filter(action => ACTION_LABELS[action]).map(action => ACTION_LABELS[action]);
     if (shown.length) pushJev(`(${ms}ms) — ${shown.join(' · ')}`);
@@ -1372,26 +1390,26 @@ export async function startApp(options = {}) {
 
   // A tool could not run here and Jev named the one to use instead.
   emitter.on('jevFallback', ({ tool, pick, ms }) => {
-    pushJev(`(${ms}ms) — \`${tool}\` non funziona qui: passo a \`${pick}\``);
+    pushJev(`(${ms}ms) — \`${tool}\` does not work here: switching to \`${pick}\``);
   });
 
   // Jev kept some tool results whole that the compressor was about to cut.
   emitter.on('jevKeep', ({ kept, judged, ms }) => {
-    pushJev(`(${ms}ms) — compressione: tengo ${kept} risultat${kept === 1 ? 'o' : 'i'} su ${judged} che servono ancora`);
+    pushJev(`(${ms}ms) — compression: keeping ${kept} of ${judged} result${judged === 1 ? '' : 's'} still needed`);
   });
 
   // Jev checked the turn while it was running and did something about it.
   emitter.on('jevGuard', ({ action, issues = [], ms, toolCallCount }) => {
     if (action !== 'correct' && action !== 'stop') return;
     const ISSUE_LABELS = {
-      looping: 'gira a vuoto',
-      stuck_on_error: 'ripete lo stesso errore',
-      off_track: 'sta uscendo dalla richiesta',
+      looping: 'is going round in circles',
+      stuck_on_error: 'repeats the same error',
+      off_track: 'is drifting off the request',
     };
     const what = issues.map(issue => ISSUE_LABELS[issue] || issue).join(', ');
     pushJev(action === 'stop'
-      ? `(${ms}ms) — dopo ${toolCallCount} tool l'agente ${what} anche dopo la correzione: stop ai tool, chiudo con quello che c'è`
-      : `(${ms}ms) — dopo ${toolCallCount} tool l'agente ${what}: gli chiedo di cambiare strada`);
+      ? `(${ms}ms) — after ${toolCallCount} tools the agent ${what} even after the correction: no more tools, closing with what there is`
+      : `(${ms}ms) — after ${toolCallCount} tools the agent ${what}: asking it to change course`);
   });
 
   // Jev changed which skills guide the turn. Only shown when it actually
@@ -1409,7 +1427,7 @@ export async function startApp(options = {}) {
   emitter.on('jevError', ({ error }) => {
     tui.messages.push({
       role: 'system',
-      text: `◆ Jev non raggiungibile: ${error}. Il turno prosegue con i controlli normali.`,
+      text: `◆ Jev unreachable: ${error}. The turn continues with the usual checks.`,
       tools: [],
       id: Date.now(),
     });
@@ -1682,8 +1700,8 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false, freeTex
         tui.messages.push({
           role: 'system',
           text: waitKind === 'tool'
-            ? `⚠ Tool fermo da ${idleSec}s senza segnalare progresso — se sembra bloccato, premi ESC per annullare.`
-            : `⚠ Modello senza risposta da ${idleSec}s — se continua, premi ESC per annullare o cambia modello con /use.`,
+            ? `⚠ Tool idle for ${idleSec}s with no progress reported — if it looks stuck, press ESC to cancel.`
+            : `⚠ No response from the model for ${idleSec}s — if it goes on, press ESC to cancel or switch model with /use.`,
           tools: [],
           id: Date.now(),
         });
@@ -1692,11 +1710,11 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false, freeTex
       if (!cancel) return;
       const reason = waitKind === 'tool'
         ? `tool fermo da ${idleSec}s`
-        : `nessun token dal modello da ${idleSec}s`;
+        : `no token from the model for ${idleSec}s`;
       tui.messages.push({
         role: 'assistant',
-        text: `Error: stallo rilevato (${reason}). Operazione annullata automaticamente.\n` +
-              `Suggerimenti: (1) riprova con /use per cambiare modello, (2) riduci il contesto con /compress, (3) imposta ETTORE_STALL_TIMEOUT_MS per cambiare la soglia.`,
+        text: `Error: stall detected (${reason}). Cancelled automatically.\n` +
+              `Tips: (1) try another model with /use, (2) shrink the context with /compress, (3) set ETTORE_STALL_TIMEOUT_MS to change the threshold.`,
         tools: [],
         id: Date.now(),
       });
@@ -1770,14 +1788,39 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false, freeTex
   const executeCommand = async (cmdName, cmdArgs = []) => {
     const showCommandOutput = (title, text) => {
       const raw = sanitizeUiText(text);
-      const lines = raw.split('\n').filter(l => l.trim().length > 0);
-      const items = (lines.length ? lines : ['(no output)']).map((line, i) => ({
-        value: `line_${i}`,
-        label: sanitizeUiText(line),
-        description: ''
-      }));
-      items.unshift({ value: '__header', label: `[/${title || cmdName}]`, description: 'output' });
-      tui.openSubMenu('output', items);
+      // Blank lines are kept — they are what separates one entry from the
+      // next — but never two in a row, nor at either end.
+      const lines = raw.split('\n')
+        .filter((l, i, all) => l.trim() || (i > 0 && all[i - 1].trim()))
+        .map(l => (l.trim() ? l : ''));
+      while (lines.length && !lines[lines.length - 1]) lines.pop();
+      while (lines.length && !lines[0]) lines.shift();
+      // Wrapped to the frame, keeping each line's indent and indenting what
+      // it wraps onto: a long description used to run past the frame and
+      // across the screen. The room is the frame minus its borders and the
+      // one-column margin inside them.
+      const room = Math.max(20, tui.subMenuWidth('output') - 4);
+      const items = [];
+      for (const line of (lines.length ? lines : ['(no output)'])) {
+        // A line that fits keeps its spacing — command output lines columns
+        // up with runs of spaces, which re-wrapping would collapse.
+        const style = styleOutputLine(line);
+        if (tui._visualLen(line) <= room) {
+          items.push({ value: `line_${items.length}`, label: line, description: '', style });
+          continue;
+        }
+        const indent = (line.match(/^\s*/) || [''])[0].slice(0, 12);
+        const body = line.slice(indent.length);
+        const wrapped = tui._wrapText(body, Math.max(10, room - indent.length - 2));
+        wrapped.forEach((part, j) => {
+          const label = `${indent}${j ? '  ' : ''}${part}`;
+          // The first row keeps the line's style; what wraps under it reads as
+          // the same kind of text, except an entry, whose tail is detail.
+          const rowStyle = j === 0 ? styleOutputLine(label) : { kind: style.kind === 'entry' || style.kind === 'title' ? 'detail' : style.kind };
+          items.push({ value: `line_${items.length}`, label, description: '', style: rowStyle });
+        });
+      }
+      tui.openSubMenu('output', items, { label: `/${title || cmdName}` });
     };
 
     if (cmdName === 'models') {
@@ -2107,7 +2150,7 @@ const modelList = result.models.slice(0, 10).join(', ');
       ? modelsWithMeta.models.filter(m => m?.free === true || (typeof m === 'string' ? m : m.id).endsWith(':free')).length
       : 0;
     if (freeCount > 0) {
-      msg += `\n✓ ${freeCount} free model${freeCount !== 1 ? 's' : ''} disponibili — contrassegnati con [FREE]. Gli altri sono a pagamento.`;
+      msg += `\n✓ ${freeCount} free model${freeCount !== 1 ? 's' : ''} available — marked [FREE]. The others are paid.`;
     } else {
       msg += `\n⚠️ This is a paid API — you'll be charged per token.`;
     }
@@ -2191,11 +2234,11 @@ if (cmdName === 'models' || cmdName === 'use' || cmdName === 'select') {
     }
     // Warn if the model may not support tool-use reliably.
     if (tui.modelCapability === 'lite') {
-      msg += `\n⚠️  Modello lite — solo chat semplice, niente coding tools (bash/read/write/edit).`;
-      msg += `\n   Usa /use per scegliere un modello FULL con tool-use.`;
+      msg += `\n⚠️  Lite model — plain chat only, no coding tools (bash/read/write/edit).`;
+      msg += `\n   Use /use to pick a FULL model with tool use.`;
     } else if (tui.modelCapability === 'unknown') {
-      msg += `\n⚠️  Capability non confermata — i tool vengono inviati, ma il modello potrebbe non gestirli.`;
-      msg += `\n   Se l'output è incoerente, usa /use per un modello FULL.`;
+      msg += `\n⚠️  Capability unconfirmed — tools are sent, but the model may not handle them.`;
+      msg += `\n   If the output looks incoherent, use /use for a FULL model.`;
     }
     tui.messages.push({ role: 'system', text: msg, tools: [], id: Date.now() });
   } else {
@@ -2449,7 +2492,7 @@ if (cmdName === 'connect') {
       if (tui.exitConfirmMode) { tui.exitConfirmMode = false; tui.needsRender = true; return; }
       if (tui.isRunning) agent?.cancel();
       tui.exitConfirmMode = true;
-      tui.messages.push({ role: 'system', text: 'Uscire? Premi Y + Invio per confermare, ESC per annullare', tools: [], id: Date.now() });
+      tui.messages.push({ role: 'system', text: 'Quit? Press Y + Enter to confirm, ESC to cancel', tools: [], id: Date.now() });
       tui.needsRender = true;
       return;
     }
@@ -2629,7 +2672,7 @@ if (cmdName === 'connect') {
       }
       if (key?.name === 'end') {
         tui.commandIndex = tui.commandFiltered.length - 1;
-        tui.commandScrollOffset = Math.max(0, tui.commandFiltered.length - (tui.availableHeight - 2));
+        tui.commandScrollOffset = Math.max(0, tui.commandFiltered.length - tui.paletteVisibleRows());
         tui.needsRender = true;
         return;
       }

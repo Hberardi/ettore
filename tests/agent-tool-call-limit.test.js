@@ -77,7 +77,7 @@ test('Agent: a model that keeps calling tools past the budget ends the turn with
   const result = await agent.run('do thing', emitter);
   assert.ok(recoveries.some((r) => r.reason === 'tool_call_limit'));
   assert.deepEqual(errors, [], 'using the budget is not an error');
-  assert.match(result, /tutte le 4 chiamate di tool/);
+  assert.match(result, /all 4 tool calls allowed/);
   assert.match(result, /maxToolCallsPerTurn": 8/, 'a big task is told how to get more room');
   assert.match(result, /\.ettore\/config\.json/);
   assert.ok(states.some((s) => s && s.state === 'completed'));
@@ -213,9 +213,9 @@ test('Agent: a turn that spends its budget on one command is called a loop, not 
 
   const result = await agent.run('lancia i test', new EventEmitter());
 
-  assert.match(result, /ripetuta \d+ volte: bash \(npm test\)/);
-  assert.match(result, /un limite più alto lo allungherebbe soltanto/);
-  assert.match(result, /Il lavoro già eseguito è conservato/);
+  assert.match(result, /repeated \d+ times: bash \(npm test\)/);
+  assert.match(result, /a higher limit would only make it longer/);
+  assert.match(result, /The work done so far is kept/);
   assert.doesNotMatch(result, /maxToolCallsPerTurn/, 'raising the limit is the wrong advice for a loop');
 });
 
@@ -243,6 +243,6 @@ test('Agent: repeats from earlier turns and todo bookkeeping are not a loop', as
 
   assert.doesNotMatch(result, /loop/i, result);
   assert.match(result, /maxToolCallsPerTurn/, 'a big task is advised to get more room');
-  assert.match(result, /\(12 tool completati\)|\(\d+ tool completati\)/);
-  assert.doesNotMatch(result, /\(1[7-9] tool completati\)/, 'earlier turns are not counted as this turn\'s work');
+  assert.match(result, /\(\d+ tools completed\)/);
+  assert.doesNotMatch(result, /\(1[7-9] tools completed\)/, 'earlier turns are not counted as this turn\'s work');
 });

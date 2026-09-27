@@ -49,7 +49,7 @@ async function download(url, outputPath, doFetch, signal) {
 export async function generateRunwayClip(params, opts = {}) {
   const { prompt, firstFrameImage, outputPath, duration = 5, model = 'gen3a_turbo', ratio = '1280:768' } = params;
   const apiKey = opts.apiKey;
-  if (!apiKey) throw new Error('Runway richiede una API key (RUNWAY_API_KEY o salvata nello studio).');
+  if (!apiKey) throw new Error('Runway needs an API key (RUNWAY_API_KEY, or saved in the studio).');
   if (!firstFrameImage) throw new Error('Runway image_to_video richiede un fotogramma iniziale (foto).');
   const doFetch = opts._fetch || ((u, o) => fetch(u, o));
   const base = process.env.RUNWAY_BASE_URL || 'https://api.dev.runwayml.com';
@@ -63,7 +63,7 @@ export async function generateRunwayClip(params, opts = {}) {
   });
   if (!submit.ok) throw new Error(`Runway submit HTTP ${submit.status}: ${(await submit.text().catch(() => '')).slice(0, 200)}`);
   const { id } = await submit.json();
-  if (!id) throw new Error('Runway: nessun task id nella risposta.');
+  if (!id) throw new Error('Runway: no task id in the response.');
 
   const started = Date.now();
   const maxWaitMs = opts.maxWaitMs ?? 10 * 60_000;
@@ -107,7 +107,7 @@ export async function generateReplicateClip(params, opts = {}) {
   if (!submit.ok) throw new Error(`Replicate submit HTTP ${submit.status}: ${(await submit.text().catch(() => '')).slice(0, 200)}`);
   const created = await submit.json();
   const getUrl = created?.urls?.get;
-  if (!getUrl) throw new Error('Replicate: nessun polling URL nella risposta.');
+  if (!getUrl) throw new Error('Replicate: no polling URL in the response.');
 
   const started = Date.now();
   const maxWaitMs = opts.maxWaitMs ?? 10 * 60_000;
@@ -139,7 +139,7 @@ export async function generateReplicateClip(params, opts = {}) {
 export async function generateLumaClip(params, opts = {}) {
   const { prompt, firstFrameImage, outputPath, model = 'ray-2', resolution = '720p', duration } = params;
   const apiKey = opts.apiKey;
-  if (!apiKey) throw new Error('Luma richiede una API key (LUMAAI_API_KEY o salvata nello studio).');
+  if (!apiKey) throw new Error('Luma needs an API key (LUMAAI_API_KEY, or saved in the studio).');
   const doFetch = opts._fetch || ((u, o) => fetch(u, o));
   const base = process.env.LUMA_BASE_URL || 'https://api.lumalabs.ai';
   const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json', accept: 'application/json' };
@@ -156,7 +156,7 @@ export async function generateLumaClip(params, opts = {}) {
   });
   if (!submit.ok) throw new Error(`Luma submit HTTP ${submit.status}: ${(await submit.text().catch(() => '')).slice(0, 200)}`);
   const { id } = await submit.json();
-  if (!id) throw new Error('Luma: nessun id nella risposta.');
+  if (!id) throw new Error('Luma: no id in the response.');
 
   const started = Date.now();
   const maxWaitMs = opts.maxWaitMs ?? 10 * 60_000;
@@ -185,7 +185,7 @@ export async function generateLumaClip(params, opts = {}) {
 export async function generateVeoClip(params, opts = {}) {
   const { prompt, firstFrameImage, outputPath, model = 'veo-3.0-generate-preview', aspectRatio = '16:9' } = params;
   const apiKey = opts.apiKey;
-  if (!apiKey) throw new Error('Veo richiede la chiave Gemini (GEMINI_API_KEY o salvata nello studio).');
+  if (!apiKey) throw new Error('Veo needs the Gemini key (GEMINI_API_KEY, or saved in the studio).');
   const doFetch = opts._fetch || ((u, o) => fetch(u, o));
   const base = process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com';
   const headers = { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' };
@@ -207,7 +207,7 @@ export async function generateVeoClip(params, opts = {}) {
   if (!submit.ok) throw new Error(`Veo submit HTTP ${submit.status}: ${(await submit.text().catch(() => '')).slice(0, 200)}`);
   const op = await submit.json();
   const name = op?.name;
-  if (!name) throw new Error('Veo: nessuna operation nella risposta.');
+  if (!name) throw new Error('Veo: no operation in the response.');
 
   const started = Date.now();
   const maxWaitMs = opts.maxWaitMs ?? 10 * 60_000;
@@ -276,7 +276,7 @@ export async function generateKlingClip(params, opts = {}) {
   const sd = await submit.json();
   if (sd.code && sd.code !== 0) throw new Error(`Kling error ${sd.code}: ${sd.message || 'unknown'}`);
   const taskId = sd?.data?.task_id;
-  if (!taskId) throw new Error('Kling: nessun task_id nella risposta.');
+  if (!taskId) throw new Error('Kling: no task_id in the response.');
 
   const started = Date.now();
   const maxWaitMs = opts.maxWaitMs ?? 10 * 60_000;

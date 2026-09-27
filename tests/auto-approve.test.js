@@ -141,7 +141,7 @@ test('under auto-approve a deletion still asks, and a refusal stops it', async (
   try {
     const out = await toolHandlers.bash({ command: 'rm keep.txt', workdir: dir });
     assert.equal(ui.asked.length, 1);
-    assert.match(ui.asked[0], /cancella file/);
+    assert.match(ui.asked[0], /deletes files/);
     assert.match(out, /Cancelled by user/);
   } finally {
     ui.done();
@@ -166,7 +166,7 @@ test('writing a file inside the working directory asks nothing; outside it alway
     const outside = join(elsewhere, 'b.txt');
     const out = await toolHandlers.write({ file_path: outside, content: 'fuori' });
     assert.equal(ui.asked.length, 1);
-    assert.match(ui.asked[0], /fuori dalla directory di lavoro/);
+    assert.match(ui.asked[0], /outside the working directory/);
     assert.match(out, /Cancelled by user/);
     assert.equal(existsSync(outside), false, 'refused means not written');
   } finally {
@@ -198,7 +198,7 @@ test('under auto-approve Jev is asked the user\'s own question, not the general 
     const out = await toolHandlers.bash({ command: 'python3 -c "import shutil; shutil.rmtree(\'build\')"' });
     assert.deepEqual(asked, [['needs_approval']]);
     assert.equal(ui.asked.length, 1);
-    assert.match(ui.asked[0], /Jev: il comando cancella file o modifica fuori/);
+    assert.match(ui.asked[0], /Jev: this command deletes files or changes things outside/);
     assert.match(out, /Cancelled by user/);
   } finally {
     ui.done();

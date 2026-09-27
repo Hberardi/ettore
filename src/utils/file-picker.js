@@ -33,7 +33,7 @@ export async function chooseFiles(options = {}) {
 
   if (process.platform === 'darwin') {
     const script = [
-      `set chosenFiles to choose file with prompt "Allega file"${multiple ? ' with multiple selections allowed' : ''}`,
+      `set chosenFiles to choose file with prompt "Attach files"${multiple ? ' with multiple selections allowed' : ''}`,
       'set output to ""',
       'repeat with chosenFile in chosenFiles',
       'set output to output & POSIX path of chosenFile & linefeed',
@@ -50,7 +50,7 @@ export async function chooseFiles(options = {}) {
       '$dialog = New-Object System.Windows.Forms.OpenFileDialog',
       `$dialog.InitialDirectory = [Environment]::CurrentDirectory`,
       `$dialog.Multiselect = $${multiple ? 'true' : 'false'}`,
-      '$dialog.Title = "Allega file"',
+      '$dialog.Title = "Attach files"',
       'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.FileNames }',
     ].join('; ');
     const result = await runChooser('powershell.exe', ['-NoProfile', '-STA', '-Command', script], { cwd });
@@ -60,16 +60,16 @@ export async function chooseFiles(options = {}) {
   // Linux desktop environments commonly provide one of these native GTK/Qt
   // selectors. Try them in order without invoking a shell.
   const linuxChoosers = [
-    ['zenity', ['--file-selection', '--multiple', '--separator=\n', '--title=Allega file']],
+    ['zenity', ['--file-selection', '--multiple', '--separator=\n', '--title=Attach files']],
     ['kdialog', ['--getopenfilename', cwd, 'All files (*)', ...(multiple ? ['--multiple', '--separate-output'] : [])]],
-    ['yad', ['--file-selection', '--multiple', '--separator=\n', '--title=Allega file']],
+    ['yad', ['--file-selection', '--multiple', '--separator=\n', '--title=Attach files']],
   ];
   for (const [command, args] of linuxChoosers) {
     const result = await runChooser(command, args, { cwd });
     if (result.handled) return result.paths;
   }
 
-  throw new Error('Nessun selettore file disponibile. Installa zenity, kdialog o yad e riprova.');
+  throw new Error('No file picker available. Install zenity, kdialog or yad and try again.');
 }
 
 export { parseSelectedPaths };

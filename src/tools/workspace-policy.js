@@ -52,12 +52,13 @@ async function confirmExternalPath({ operation, path, root }) {
 
   const answer = await new Promise(resolveAnswer => {
     uiBridge.emit('askUser', {
-      question: `Accesso esterno alla workspace richiesto.\nOperazione: ${operation}\nPath: ${path}\nWorkspace: ${root}`,
-      options: ['Sì, consenti', 'No, blocca'],
+      question: `Access outside the workspace requested.\nOperation: ${operation}\nPath: ${path}\nWorkspace: ${root}`,
+      options: ['Yes, allow', 'No, block'],
       resolve: resolveAnswer,
     });
   });
-  const allowed = /^Sì/i.test(String(answer));
+  // "Yes, allow" — and the Italian "Sì, consenti" it used to offer.
+  const allowed = /^(yes|y|sì|si)\b/i.test(String(answer ?? '').trim());
   if (allowed) sessionApprovals.add(key);
   return allowed;
 }

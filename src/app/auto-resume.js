@@ -66,22 +66,22 @@ export function autoResumeDecision({
   const stop = (reason, why) => ({ resume: false, reason, why, signature });
 
   if (attempts >= maxAttempts) {
-    return stop('budget_exhausted', `auto-resume esaurito (${maxAttempts} riprese in questo turno)`);
+    return stop('budget_exhausted', `auto-resume used up (${maxAttempts} resumes this turn)`);
   }
   if (modelDeclaredCompletion(text)) {
-    return stop('model_done', 'il modello ha dichiarato il lavoro completo');
+    return stop('model_done', 'the model declared the work complete');
   }
 
   const tail = tailOf(text, 2);
   const announced = responseAnnouncesUnexecutedAction(text);
   const declaredPending = UNFINISHED_WORK.test(tail);
   if (pendingTodos <= 0 && toolCount <= 0 && !announced && !declaredPending) {
-    return stop('nothing_pending', 'nessun passo aperto e nessuna attività da riprendere');
+    return stop('nothing_pending', 'no open step and nothing to resume');
   }
   // The model repeated itself word for word without running a single tool.
   // Another resume would produce the same sentence a third time.
   if (lastSignature && lastSignature === signature && toolCount <= 0) {
-    return stop('repeated_without_progress', 'il modello ha ripetuto la stessa risposta senza eseguire nulla');
+    return stop('repeated_without_progress', 'the model repeated the same answer without doing anything');
   }
 
   // Plan mode is read-only analysis: the plan *is* the deliverable, so a
@@ -89,7 +89,7 @@ export function autoResumeDecision({
   // passo". Only the model's own unfinished-business signals resume there.
   const planMode = String(mode || '') === 'plan';
   if (planMode && !announced && !declaredPending) {
-    return stop('plan_mode_complete', 'plan mode: l\'analisi è il risultato, non proseguo da solo');
+    return stop('plan_mode_complete', 'plan mode: the analysis is the result, not continuing on its own');
   }
 
   if (!planMode && pendingTodos > 0) {
@@ -101,5 +101,5 @@ export function autoResumeDecision({
   if (announced) {
     return { resume: true, reason: 'announced_action', why: 'azione annunciata ma non eseguita', signature };
   }
-  return { resume: true, reason: 'declared_pending_work', why: 'il modello ha indicato lavoro ancora da fare', signature };
+  return { resume: true, reason: 'declared_pending_work', why: 'the model said there is work still to do', signature };
 }

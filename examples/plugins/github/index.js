@@ -504,7 +504,7 @@ export const tools = {
       const head = await currentBranch(ctx);
       const refused = await confirmOrRefuse(
         ctx,
-        `🐙 Aprire una pull request su GitHub${draft ? ' (bozza)' : ''}?`,
+        `🐙 Open a pull request on GitHub${draft ? ' (draft)' : ''}?`,
         `${head}${base ? ` → ${base}` : ''}\n${title}\n\n${clip(body, 1500)}`,
       );
       if (refused) return refused;
@@ -530,7 +530,7 @@ export const tools = {
     },
     handler: async ({ title, body, labels = [] }, ctx) => {
       if (!String(title || '').trim()) throw new Error('gh_issue_create needs a `title`.');
-      const refused = await confirmOrRefuse(ctx, '🐙 Aprire una issue su GitHub?', `${title}\n\n${clip(body, 1500)}`);
+      const refused = await confirmOrRefuse(ctx, '🐙 Open an issue on GitHub?', `${title}\n\n${clip(body, 1500)}`);
       if (refused) return refused;
       const args = ['issue', 'create', '--title', String(title), '--body', String(body || '')];
       for (const label of Array.isArray(labels) ? labels : []) args.push('--label', String(label));
@@ -554,7 +554,7 @@ export const tools = {
     handler: async ({ number, on = 'issue', body }, ctx) => {
       if (!number || !String(body || '').trim()) throw new Error('gh_comment needs a `number` and a `body`.');
       const kind = on === 'pr' ? 'pr' : 'issue';
-      const refused = await confirmOrRefuse(ctx, `🐙 Commentare su GitHub (${kind === 'pr' ? 'PR' : 'issue'} #${number})?`, clip(body, 1500));
+      const refused = await confirmOrRefuse(ctx, `🐙 Comment on GitHub (${kind === 'pr' ? 'PR' : 'issue'} #${number})?`, clip(body, 1500));
       if (refused) return refused;
       const out = await gh([kind, 'comment', String(number), '--body', String(body)], ctx);
       return `Commented: ${out.trim().split(/\s+/).pop()}`;

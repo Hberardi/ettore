@@ -30,7 +30,7 @@ test('loadAttachments deduplicates paths and rejects directories', async () => {
 
   const files = await loadAttachments([filePath, filePath], { cwd: dir });
   assert.equal(files.length, 1);
-  await assert.rejects(inspectAttachment(dir, { cwd: dir }), /non è un file/);
+  await assert.rejects(inspectAttachment(dir, { cwd: dir }), /Not a file/);
 });
 
 test('TUI removes the last attachment without touching earlier ones', () => {

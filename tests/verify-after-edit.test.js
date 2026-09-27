@@ -158,7 +158,7 @@ test('a model that never verifies is nudged up to the cap, then the answer carri
     const result = await agent.run('crea hello.js', new EventEmitter());
     // write, then a text answer refused twice, then the third ends the turn.
     assert.equal(turns, 4);
-    assert.match(String(result), /Codice NON verificato/);
+    assert.match(String(result), /Code NOT verified/);
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
   }

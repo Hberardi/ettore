@@ -125,7 +125,7 @@ test('provider tool call on final recovery turn completes instead of failing', a
 
     const answer = await agent.run('research online', emitter);
 
-    assert.match(answer, /limite di 3 passaggi/);
+    assert.match(answer, /limit of 3 steps/);
     assert.equal(errors.length, 0);
     assert.equal(completed.at(-1), answer);
   } finally {

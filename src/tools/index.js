@@ -164,7 +164,7 @@ function workspaceRoot() {
   return toolWorkspaceRoot || process.cwd();
 }
 // Session-wide project-install bypass. Flipped to true either by the user
-// answering "Sì, sempre per questa sessione" once, or by /auto-approve.
+// answering "Yes, always for this session" once, or by /auto-approve.
 const projectInstallApproval = { all: false };
 
 export function isEditAlwaysApproved() {
@@ -420,12 +420,12 @@ async function requestSensitiveInput({ question, trim = true }) {
 
 async function requestWebCredentials(origin) {
   const username = await requestSensitiveInput({
-    question: `Credenziali temporanee per ${origin}\nUsername (non verrà salvato):`,
+    question: `Temporary credentials for ${origin}\nUsername (not saved):`,
   });
   if (!username.allowed) return username;
 
   const password = await requestSensitiveInput({
-    question: `Credenziali temporanee per ${origin}\nPassword (non verrà salvata):`,
+    question: `Temporary credentials for ${origin}\nPassword (not saved):`,
     trim: false,
   });
   if (!password.allowed) return password;
@@ -510,6 +510,17 @@ function normalizeDuckDuckGoUrl(href = '') {
   }
 }
 
+// The answers the confirmation prompts offer are English ("Yes, proceed",
+// "Yes, always for this session", "No, cancel"). The Italian ones they used to
+// offer ("Sì, procedi", "Sì, sempre…") are still understood, so a script or a
+// test answering in the old words keeps working.
+function saidYes(answer) {
+  return /^(yes|y|sì|si)\b/i.test(String(answer ?? '').trim());
+}
+function saidAlways(answer) {
+  return /\b(always|sempre)\b/i.test(String(answer ?? ''));
+}
+
 // Ask the user via the UI bridge for a yes/no confirmation.
 // In CLI/scripted mode without an interactive listener, callers can opt-in to
 // strict blocking (used for destructive shell commands).
@@ -521,12 +532,12 @@ async function requestConfirmation({ title, detail, allowNonInteractive = true }
   const answer = await new Promise((resolve) => {
     uiBridge.emit('askUser', {
       question: detail ? `${title}\n${detail}` : title,
-      options: ['Sì, procedi', 'No, annulla'],
+      options: ['Yes, proceed', 'No, cancel'],
       resolve,
     });
   });
   if (answer === '__cancelled__') return { allowed: false, interactive: true, reason: 'cancelled' };
-  return { allowed: /^Sì/i.test(String(answer)), interactive: true };
+  return { allowed: saidYes(answer), interactive: true };
 }
 
 /**
@@ -561,7 +572,7 @@ async function guardShellCommand(command, workdir) {
       }
       if (verdict.flagged) {
         reason = { kind: 'jev', label: 'Jev' };
-        title = `◆ Jev: il comando cancella file o modifica fuori dalla directory di lavoro (${Number(verdict.value).toFixed(2)})`;
+        title = `◆ Jev: this command deletes files or changes things outside the working directory (${Number(verdict.value).toFixed(2)})`;
       }
     }
     if (!reason) return null;
@@ -592,7 +603,7 @@ async function guardShellCommand(command, workdir) {
   const danger = detectDestructive(command);
   if (danger) {
     const ok = await requestConfirmation({
-      title: `⚠ Comando potenzialmente distruttivo (${danger})`,
+      title: `⚠ Potentially destructive command (${danger})`,
       detail: `$ ${command}`,
       allowNonInteractive: false,
     });
@@ -648,14 +659,14 @@ async function requestInstallConfirmation({ label, kind, command }) {
   }
 
   const titleByKind = kind === 'system'
-    ? `⚠ Installazione di sistema rilevata (${label})`
+    ? `⚠ System install detected (${label})`
     : kind === 'project'
-      ? `📦 Installazione dipendenze progetto (${label})`
-      : `⬇️ Download/clone rilevato (${label})`;
+      ? `📦 Project dependency install (${label})`
+      : `⬇️ Download or clone detected (${label})`;
 
   const options = kind === 'project'
-    ? ['Sì, una volta', 'Sì, sempre per questa sessione', 'No, annulla']
-    : ['Sì, procedi', 'No, annulla'];
+    ? ['Yes, once', 'Yes, always for this session', 'No, cancel']
+    : ['Yes, proceed', 'No, cancel'];
 
   const answer = await new Promise((resolve) => {
     uiBridge.emit('askUser', {
@@ -669,7 +680,7 @@ async function requestInstallConfirmation({ label, kind, command }) {
     return { allowed: false, interactive: true, reason: 'cancelled' };
   }
 
-  if (kind === 'project' && /sempre/i.test(String(answer))) {
+  if (kind === 'project' && saidAlways(answer)) {
     installSessionApproval.add(approvalKey);
     return { allowed: true, remembered: true };
   }
@@ -721,8 +732,8 @@ async function confirmOutsideWorkdir({ filePath, diff = '' }) {
   if (!isOutsideRoot(filePath, workspaceRoot())) return null;
   const answer = await new Promise((resolve) => {
     uiBridge.emit('askUser', {
-      question: `📁 Modifica fuori dalla directory di lavoro\n${filePath}\n(directory di lavoro: ${workspaceRoot()})${diff ? `\n\n${diff}` : ''}`,
-      options: ['Sì, procedi', 'No, annulla'],
+      question: `📁 Change outside the working directory\n${filePath}\n(working directory: ${workspaceRoot()})${diff ? `\n\n${diff}` : ''}`,
+      options: ['Yes, proceed', 'No, cancel'],
       resolve,
     });
   });
@@ -747,8 +758,8 @@ async function requestEditConfirmation({ filePath, oldString, newString, fileCon
   const diff = buildEditDiff({ filePath, oldString, newString, fileContent });
   const answer = await new Promise((resolve) => {
     uiBridge.emit('askUser', {
-      question: `✎ Applicare questa modifica a ${filePath}?\n\n${diff}`,
-      options: ['Sì, applica', 'Sì, sempre per questa sessione', 'No, annulla'],
+      question: `✎ Apply this change to ${filePath}?\n\n${diff}`,
+      options: ['Yes, apply', 'Yes, always for this session', 'No, cancel'],
       resolve,
     });
   });
@@ -756,7 +767,7 @@ async function requestEditConfirmation({ filePath, oldString, newString, fileCon
   if (answer === '__cancelled__' || /^No/i.test(String(answer))) {
     return { allowed: false, interactive: true, reason: 'cancelled' };
   }
-  if (/sempre/i.test(String(answer))) {
+  if (saidAlways(answer)) {
     editSessionApproval.all = true;
     return { allowed: true, remembered: true };
   }
@@ -2785,7 +2796,7 @@ export const toolHandlers = {
     }
     // If no interactive UI is available, return an error that tells the model to stop
     if (uiBridge.listenerCount('askUser') === 0) {
-      return `ERROR: No interactive UI available. The user needs to run 'ettore' in interactive mode to answer questions. Please tell the user: "Avvia 'ettore' senza argomenti per entrare in modalità interattiva, poi ripeti la richiesta."`;
+      return `ERROR: No interactive UI available. The user needs to run 'ettore' in interactive mode to answer questions. Please tell the user: "Start 'ettore' with no arguments to enter interactive mode, then repeat the request."`;
     }
     return await new Promise((resolve) => {
       uiBridge.emit('askUser', {

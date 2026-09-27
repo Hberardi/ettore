@@ -99,8 +99,8 @@ test('plugins command: available lists on-disk plugins with enabled tags', async
     // The listing now separates what is installed from what merely ships with
     // ETTORE, since a fresh install has the second and none of the first.
     assert.match(out, /Installed plugins \(2\)/);
-    assert.match(out, /one \[enabled\]/);
-    assert.match(out, /two(?! \[enabled\])/);
+    assert.match(out, /● one {2}enabled/);
+    assert.match(out, /● two {2}not enabled — \/plugins enable two/);
     assert.match(out, /Bundled with ETTORE/);
     assert.match(out, /git-history/);
   } finally {
@@ -216,12 +216,11 @@ test('plugins command: info shows detailed metadata for an enabled plugin', asyn
     const runtime = new PluginRuntime({ registry, pluginsDir: dir });
     await runtime.enable('one');
     const out = await builtinCommands.plugins.handler(['info', 'one'], buildContext(runtime, registry));
-    assert.match(out, /Plugin: one/);
-    assert.match(out, /Version: 1\.0\.0/);
-    assert.match(out, /A test plugin/);
-    assert.match(out, /Tools \(1\):/);
-    assert.match(out, /- hello/);
-    assert.match(out, /Status: enabled/);
+    assert.match(out, /● one {2}v1\.0\.0 · enabled/);
+        assert.match(out, /A test plugin/);
+    assert.match(out, /Tools \(1\)/);
+    assert.match(out, /• hello/);
+    assert.match(out, /loaded at: /);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -333,7 +332,7 @@ test('plugins available flags an installed copy that has fallen behind', async (
     const out = await builtinCommands.plugins.handler(['available'], buildContext(runtime, registry));
 
     assert.match(out, /Older than the copy shipped with ETTORE/);
-    assert.match(out, /hello-world — running an older copy/);
+    assert.match(out, /● hello-world {2}running an older copy/);
     assert.match(out, /--force to update/);
   } finally {
     await rm(dir, { recursive: true, force: true });

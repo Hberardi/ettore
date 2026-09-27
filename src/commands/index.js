@@ -7,6 +7,8 @@ import { PROVIDER_REGISTRY } from '../providers/registry.js';
 import { getProviderEnvVars, listConfiguredEnvProviders } from '../providers/env.js';
 import { clearInstallSessionApprovals, listInstallSessionApprovals, setAutoApprove, getAutoApprove } from '../tools/index.js';
 import { saveConfig, getConfig } from '../config/index.js';
+import { changelogText } from '../app/whats-new.js';
+import { readLocalPackage } from '../cli/update.js';
 import { redactSecrets } from '../utils/secrets.js';
 import { listSessions, loadSession } from '../sessions/index.js';
 
@@ -1182,10 +1184,18 @@ Examples:
     description: 'Show version',
     usage: 'version',
     aliases: ['v', 'ver'],
-    handler: async () => {
-      return `ETTORE v1.0.0
-Advanced AI CLI Assistant`;
+    handler: async (args, context = {}) => {
+      return `ETTORE v${context.version || readLocalPackage().version || 'unknown'}
+Advanced AI CLI Assistant
+Run /changelog to see what changed in this release.`;
     }
+  },
+
+  changelog: {
+    description: 'What changed in this release, or in the one given',
+    usage: 'changelog [version]',
+    aliases: ['whats-new', 'news'],
+    handler: async (args) => changelogText(args[0] || null),
   },
   
   keys: {
@@ -1563,7 +1573,7 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
           const state = reused ? 'already open' : 'opened';
           const browserNote = browserOpened
             ? ''
-            : '\n⚠ Browser automatico non disponibile. Apri manualmente questo URL.';
+            : '\n⚠ Could not open a browser automatically. Open this URL yourself.';
           return `✓ Skill Studio ${state}: ${url}${browserNote}\nCreate a global skill from the web form. It will be available in every project.`;
         } catch (error) {
           return `✗ Cannot open Skill Studio: ${error.message}`;
@@ -1771,7 +1781,7 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
   },
 
   video_music: {
-    description: 'Apri lo studio web per generare un video musicale da un mp3 + foto del personaggio',
+    description: 'Open the web studio to make a music video from an mp3 and a photo of the character',
     usage: 'video_music',
     aliases: ['videomusic', 'musicvideo', 'mv'],
     handler: async (_args, _context) => {
@@ -1779,11 +1789,11 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         const { startMusicVideoStudio } = await import('../web/music-video-studio.js');
         const { url, reused } = await startMusicVideoStudio({ open: true });
         const notes = [];
-        if (!connectionManager.activeProvider) notes.push('⚠ Nessun modello attivo: usa /connect + /use (serve per lo storyboard automatico).');
-        if (!process.env.MINIMAX_API_KEY) notes.push('⚠ MINIMAX_API_KEY non impostata: serve per generare le clip video.');
+        if (!connectionManager.activeProvider) notes.push('⚠ No active model: use /connect and /use (needed for the automatic storyboard).');
+        if (!process.env.MINIMAX_API_KEY) notes.push('⚠ MINIMAX_API_KEY is not set: it is needed to generate the video clips.');
         return [
-          `🎬 Music Video Studio ${reused ? 'già attivo' : 'avviato'}: ${url}`,
-          reused ? '(riapro il browser sulla pagina esistente)' : 'Ho aperto il browser. Se non si apre, incolla l\'URL manualmente.',
+          `🎬 Music Video Studio ${reused ? 'already running' : 'started'}: ${url}`,
+          reused ? '(reopening the browser on the existing page)' : 'Opened in the browser. If it did not open, paste the URL yourself.',
           ...notes,
         ].join('\n');
       } catch (e) {
@@ -1793,8 +1803,8 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
   },
 
   team: {
-    description: 'Gestisci team di agenti. /team create <nome> | /team list | /team show <nome> | /team delete <nome> | /team <nome>',
-    usage: 'team [create|list|show|delete] [nome]',
+    description: 'Manage agent teams: /team create <name> | /team list | /team show <name> | /team delete <name> | /team <name>',
+    usage: 'team [create|list|show|delete] [name]',
     aliases: [],
     handler: async (args, context) => {
       const { mkdir, writeFile, readFile, readdir, unlink, access } = await import('fs/promises');
@@ -1818,31 +1828,31 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         const files = await readdir(teamsDir).catch(() => []);
         const teams = files.filter(f => f.endsWith('.md')).map(f => f.replace('.md', ''));
         if (teams.length === 0) {
-          return 'Nessun team creato.\nUsa /team create <nome> per crearne uno.\nEsempio: /team create doganale';
+          return 'No teams yet.\nUse /team create <name> to make one.\nExample: /team create backend';
         }
-        return `Team disponibili (${teams.length}):\n${teams.map(t => `  • ${t}`).join('\n')}\n\nUsa /team <nome> per caricare un team.`;
+        return `Teams (${teams.length}):\n${teams.map(t => `  • ${t}`).join('\n')}\n\nUse /team <name> to load one.`;
       }
 
       // ── /team show <nome> ───────────────────────────────────────────
       if (subCmd === 'show') {
         const name = rest[0];
-        if (!name) return 'Uso: /team show <nome>';
+        if (!name) return 'Usage: /team show <name>';
         try {
           return await readFile(join(teamsDir, `${name}.md`), 'utf-8');
         } catch {
-          return `Team "${name}" non trovato. Usa /team list per vedere i team disponibili.`;
+          return `Team "${name}" not found. Use /team list to see the teams.`;
         }
       }
 
       // ── /team delete <nome> ─────────────────────────────────────────
       if (subCmd === 'delete') {
         const name = rest[0];
-        if (!name) return 'Uso: /team delete <nome>';
+        if (!name) return 'Usage: /team delete <name>';
         try {
           await unlink(join(teamsDir, `${name}.md`));
-          return `✓ Team "${name}" eliminato.`;
+          return `✓ Team "${name}" deleted.`;
         } catch {
-          return `Team "${name}" non trovato.`;
+          return `Team "${name}" not found.`;
         }
       }
 
@@ -1850,26 +1860,26 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
       if (subCmd === 'create') {
         const teamName = rest[0];
         if (!teamName) {
-          return 'Uso: /team create <nome>\nEsempio: /team create doganale';
+          return 'Usage: /team create <name>\nExample: /team create backend';
         }
 
         const teamFile = join(teamsDir, `${teamName}.md`);
         try {
           await access(teamFile);
-          return `Team "${teamName}" esiste già.\nUsa /team show ${teamName} per visualizzarlo.\nUsa /team delete ${teamName} per eliminarlo.`;
+          return `Team "${teamName}" already exists.\nUse /team show ${teamName} to see it.\nUse /team delete ${teamName} to delete it.`;
         } catch {}
 
         // Wizard interattivo
-        const nStr = await askUser(`Quanti agenti vuoi nel team "${teamName}"? (inserisci un numero, es: 3)`);
+        const nStr = await askUser(`How many agents in team "${teamName}"? (a number, e.g. 3)`);
         const n = parseInt(nStr);
         if (isNaN(n) || n < 1 || n > 20) {
-          return `Numero agenti non valido: "${nStr}". Inserisci un numero tra 1 e 20.`;
+          return `Invalid number of agents: "${nStr}". Enter a number from 1 to 20.`;
         }
 
         const agents = [];
         for (let i = 1; i <= n; i++) {
-          const agentName = await askUser(`[Agente ${i}/${n}] Nome: (es: Analista Doganale)`);
-          const agentComp = await askUser(`[Agente ${i}/${n}] Competenze di "${agentName}": (es: analisi bollette, classificazione merci, normativa doganale)`);
+          const agentName = await askUser(`[Agent ${i}/${n}] Name: (e.g. Backend Engineer)`);
+          const agentComp = await askUser(`[Agent ${i}/${n}] Skills of "${agentName}": (e.g. APIs, databases, performance)`);
           agents.push({ name: agentName.trim(), competencies: agentComp.trim() });
         }
 
@@ -1877,23 +1887,23 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         const date = new Date().toISOString().slice(0, 10);
         let md = `---\nname: ${teamName}\nagents: ${n}\ncreated: ${date}\n---\n\n`;
         md += `# Team ${capitalize(teamName)}\n\n`;
-        md += `## Composizione Team (${n} agenti)\n\n`;
+        md += `## Team members (${n} agents)\n\n`;
         for (let i = 0; i < agents.length; i++) {
           md += `### ${i + 1}. ${agents[i].name}\n`;
-          md += `**Competenze:** ${agents[i].competencies}\n\n`;
+          md += `**Skills:** ${agents[i].competencies}\n\n`;
         }
         md += `## Workflow\n`;
-        md += `Gli agenti lavorano in parallelo sul proprio dominio di competenza.\n`;
-        md += `\n## Come usare\n`;
-        md += `Carica questo team con: \`/team ${teamName}\`\n`;
+        md += `The agents work in parallel, each on its own area.\n`;
+        md += `\n## How to use\n`;
+        md += `Load this team with: \`/team ${teamName}\`\n`;
 
         await mkdir(teamsDir, { recursive: true });
         await writeFile(teamFile, md, 'utf-8');
 
-        let summary = `✓ Team "${teamName}" creato con ${n} agenti!\n`;
+        let summary = `✓ Team "${teamName}" created with ${n} agents.\n`;
         summary += `File: team/${teamName}.md\n\n`;
         summary += agents.map((a, i) => `  ${i + 1}. ${a.name} — ${a.competencies}`).join('\n');
-        summary += `\n\nUsa /team ${teamName} per caricarlo nell'agente corrente.`;
+        summary += `\n\nUse /team ${teamName} to load it into the current agent.`;
         return summary;
       }
 
@@ -1907,41 +1917,41 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         if (context.agent) {
           context.agent.teamContext = content;
         }
-        return `✓ Team "${teamName}" caricato!\n\n${content}`;
+        return `✓ Team "${teamName}" loaded.\n\n${content}`;
       } catch {}
 
       // File non esiste → wizard di creazione
-      const nStr = await askUser(`Team "${teamName}" non esiste. Quanti agenti vuoi? (es: 3)`);
+      const nStr = await askUser(`Team "${teamName}" does not exist. How many agents? (e.g. 3)`);
       const n = parseInt(nStr);
       if (isNaN(n) || n < 1 || n > 20) {
-        return `Numero agenti non valido: "${nStr}". Inserisci un numero tra 1 e 20.`;
+        return `Invalid number of agents: "${nStr}". Enter a number from 1 to 20.`;
       }
 
       const agents = [];
       for (let i = 1; i <= n; i++) {
-        const agentName = await askUser(`[Agente ${i}/${n}] Nome: (es: Analista Doganale)`);
-        const agentComp = await askUser(`[Agente ${i}/${n}] Competenze di "${agentName}": (es: analisi bollette, classificazione merci)`);
+        const agentName = await askUser(`[Agent ${i}/${n}] Name: (e.g. Backend Engineer)`);
+        const agentComp = await askUser(`[Agent ${i}/${n}] Skills of "${agentName}": (e.g. APIs, databases)`);
         agents.push({ name: agentName.trim(), competencies: agentComp.trim() });
       }
 
       const date = new Date().toISOString().slice(0, 10);
       let md = `---\nname: ${teamName}\nagents: ${n}\ncreated: ${date}\n---\n\n`;
       md += `# Team ${capitalize(teamName)}\n\n`;
-      md += `## Composizione Team (${n} agenti)\n\n`;
+      md += `## Team members (${n} agents)\n\n`;
       for (let i = 0; i < agents.length; i++) {
         md += `### ${i + 1}. ${agents[i].name}\n`;
-        md += `**Competenze:** ${agents[i].competencies}\n\n`;
+        md += `**Skills:** ${agents[i].competencies}\n\n`;
       }
-      md += `## Workflow\nGli agenti lavorano in parallelo sul proprio dominio di competenza.\n`;
-      md += `\n## Come usare\nCarica questo team con: \`/team/${teamName}\`\n`;
+      md += `## Workflow\nThe agents work in parallel, each on its own area.\n`;
+      md += `\n## How to use\nLoad this team with: \`/team/${teamName}\`\n`;
 
       await mkdir(teamsDir, { recursive: true });
       await writeFile(teamFile, md, 'utf-8');
 
-      let summary = `✓ Team "${teamName}" creato con ${n} agenti!\n`;
+      let summary = `✓ Team "${teamName}" created with ${n} agents.\n`;
       summary += `File: team/${teamName}.md\n\n`;
-      summary += agents.map((a, i) => `  ${i + 1}. ${a.name} — ${a.competenze}`).join('\n');
-      summary += `\n\nRichiama il team con: /team/${teamName}`;
+      summary += agents.map((a, i) => `  ${i + 1}. ${a.name} — ${a.competencies}`).join('\n');
+      summary += `\n\nLoad the team again with: /team/${teamName}`;
       return summary;
     }
   },
@@ -1986,65 +1996,65 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         // mutate the plan and re-display it.
         while (true) {
           const choice = await askUser(
-            `${fmtPlan(plan)}\n\nCosa faccio?`,
-            ['Esegui', 'Modifica uno step', 'Salva e poi esegui', 'Salva senza eseguire', 'Annulla'],
+            `${fmtPlan(plan)}\n\nWhat now?`,
+            ['Run', 'Edit a step', 'Save, then run', 'Save without running', 'Cancel'],
           );
-          if (choice === '__cancelled__' || /^annull/i.test(choice || '')) {
-            return 'Annullato.';
+          if (choice === '__cancelled__' || /^(cancel|annull)/i.test(choice || '')) {
+            return 'Cancelled.';
           }
-          if (/^esegui/i.test(choice || '')) {
+          if (/^(run|esegui)/i.test(choice || '')) {
             if (typeof context.startLoop === 'function') {
               context.startLoop({ plan, name: plan.name || null });
-              return `▶ Loop avviato: ${plan.steps.length} step in coda. /loop stop per fermare.`;
+              return `▶ Loop started: ${plan.steps.length} step(s) queued. /loop stop to stop.`;
             }
-            return '⚠ Loop non disponibile in questo contesto (serve la TUI interattiva).';
+            return '⚠ Loops need the interactive TUI; not available here.';
           }
-          if (/^salva senza/i.test(choice || '')) {
-            const saveName = await askUser('Nome del loop (es: auth-system):');
-            if (saveName === '__cancelled__' || !String(saveName || '').trim()) return 'Annullato.';
+          if (/^(save without|salva senza)/i.test(choice || '')) {
+            const saveName = await askUser('Loop name (e.g. auth-system):');
+            if (saveName === '__cancelled__' || !String(saveName || '').trim()) return 'Cancelled.';
             try {
               await loops.saveLoop(saveName.trim(), plan, { goal: originalGoal || plan.goal });
             } catch (e) {
-              return `✗ Salvataggio fallito: ${e.message}`;
+              return `✗ Save failed: ${e.message}`;
             }
-            return `✓ Salvato come "${saveName.trim()}".\nUsa /loop run ${saveName.trim()} per rieseguirlo.`;
+            return `✓ Saved as "${saveName.trim()}".\nUse /loop run ${saveName.trim()} to run it again.`;
           }
-          if (/^salva e poi/i.test(choice || '')) {
-            const saveName = await askUser('Nome del loop (es: auth-system):');
-            if (saveName === '__cancelled__' || !String(saveName || '').trim()) return 'Annullato.';
+          if (/^(save,? then|salva e poi)/i.test(choice || '')) {
+            const saveName = await askUser('Loop name (e.g. auth-system):');
+            if (saveName === '__cancelled__' || !String(saveName || '').trim()) return 'Cancelled.';
             try {
               const saved = await loops.saveLoop(saveName.trim(), plan, { goal: originalGoal || plan.goal });
               plan.name = saved.name;
             } catch (e) {
-              return `✗ Salvataggio fallito: ${e.message}`;
+              return `✗ Save failed: ${e.message}`;
             }
             if (typeof context.startLoop === 'function') {
               context.startLoop({ plan, name: plan.name });
-              return `▶ Loop "${plan.name}" salvato e avviato: ${plan.steps.length} step. /loop stop per fermare.`;
+              return `▶ Loop "${plan.name}" saved and started: ${plan.steps.length} step(s). /loop stop to stop.`;
             }
-            return `✓ Salvato come "${plan.name}". (Loop non avviato: serve TUI interattiva.)`;
+            return `✓ Saved as "${plan.name}". (Not started: loops need the interactive TUI.)`;
           }
-          if (/^modif/i.test(choice || '')) {
+          if (/^(edit|modif)/i.test(choice || '')) {
             const whichRaw = await askUser(
-              'Quale step vuoi modificare?',
+              'Which step do you want to edit?',
               plan.steps.map((s, i) => `${i + 1}. ${s.title}`),
             );
-            if (whichRaw === '__cancelled__') return 'Annullato.';
+            if (whichRaw === '__cancelled__') return 'Cancelled.';
             const idx = parseInt(String(whichRaw).trim(), 10) - 1;
             if (Number.isNaN(idx) || idx < 0 || idx >= plan.steps.length) {
-              return 'Numero di step non valido. Riprova con /loop start o /loop run.';
+              return 'Invalid step number. Try again with /loop start or /loop run.';
             }
             const newPrompt = await askUser(
-              `Nuovo prompt per step ${idx + 1} (${plan.steps[idx].title}).\nInvio = mantieni il prompt attuale.\nPrompt attuale:\n${plan.steps[idx].prompt}`,
+              `New prompt for step ${idx + 1} (${plan.steps[idx].title}).\nEnter keeps the current prompt.\nCurrent prompt:\n${plan.steps[idx].prompt}`,
             );
-            if (newPrompt === '__cancelled__') return 'Annullato.';
+            if (newPrompt === '__cancelled__') return 'Cancelled.';
             if (String(newPrompt || '').trim()) {
               plan.steps[idx].prompt = String(newPrompt).trim();
             }
             // Re-enter the review loop.
             continue;
           }
-          return 'Scelta non riconosciuta, riprova.';
+          return 'Choice not recognised, try again.';
         }
       };
 
@@ -2055,22 +2065,22 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
       if (sub === 'stop' || sub === 'abort' || sub === 'cancel') {
         if (typeof context.stopLoop === 'function') {
           const wasActive = context.stopLoop();
-          return wasActive ? '⏹ Loop fermato (dopo lo step corrente).' : 'Nessun loop attivo.';
+          return wasActive ? '⏹ Loop stopped (after the current step).' : 'No loop running.';
         }
-        return 'Nessun loop attivo.';
+        return 'No loop running.';
       }
 
       // ── /loop status ───────────────────────────────────────────────────
       if (sub === 'status' || sub === 'st') {
         const s = loops.getLoopStatus();
         if (!s.active && !s.totalSteps) {
-          return 'Nessun loop in esecuzione.\nUsa /loop start <goal> per generarne uno.';
+          return 'No loop running.\nUse /loop start <goal> to create one.';
         }
         const done = s.completedTitles.length;
-        const current = s.active ? `step ${done + 1}/${s.totalSteps}` : `completato (${s.totalSteps}/${s.totalSteps})`;
+        const current = s.active ? `step ${done + 1}/${s.totalSteps}` : `complete (${s.totalSteps}/${s.totalSteps})`;
         const lines = [
-          `Loop status: ${s.active ? 'attivo' : 'completato'}`,
-          `Goal: ${s.goal || '(non specificato)'}`,
+          `Loop status: ${s.active ? 'running' : 'complete'}`,
+          `Goal: ${s.goal || '(not specified)'}`,
           s.name ? `Name: ${s.name}` : null,
           `Progress: ${current}`,
           `Started: ${s.startedAt || 'n/a'}`,
@@ -2089,14 +2099,14 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
       if (sub === 'list' || sub === 'ls') {
         const items = await loops.listLoops();
         if (!items.length) {
-          return 'Nessun loop salvato.\nUsa /loop start <goal> per generarne uno, oppure /loop clear dopo averne eseguito uno.';
+          return 'No saved loops.\nUse /loop start <goal> to create one, or /loop clear after running one.';
         }
-        const lines = [`Loop salvati (${items.length}):`];
+        const lines = [`Saved loops (${items.length}):`];
         for (const it of items) {
           const goal = it.goal ? ` — ${it.goal.slice(0, 70)}${it.goal.length > 70 ? '…' : ''}` : '';
           lines.push(`  • ${it.name}  (${it.stepCount} step, ${it.createdAt || 'n/d'})${goal}`);
         }
-        lines.push('', 'Comandi: /loop show <name>, /loop run <name>, /loop clear <name>');
+        lines.push('', 'Commands: /loop show <name>, /loop run <name>, /loop clear <name>');
         return lines.join('\n');
       }
 
@@ -2108,7 +2118,7 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
           const plan = await loops.loadLoop(name);
           return fmtPlan(plan) + `\n\nCreated: ${plan.createdAt || 'n/d'}\nProvider: ${plan.provider || 'n/d'} / ${plan.model || 'n/d'}`;
         } catch {
-          return `Loop "${name}" non trovato. Usa /loop list per vederli.`;
+          return `Loop "${name}" not found. Use /loop list to see them.`;
         }
       }
 
@@ -2117,14 +2127,14 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         const name = rest[0];
         if (name) {
           const ok = await loops.deleteLoop(name);
-          return ok ? `✓ Loop "${name}" eliminato.` : `Loop "${name}" non trovato.`;
+          return ok ? `✓ Loop "${name}" deleted.` : `Loop "${name}" not found.`;
         }
         const items = await loops.listLoops();
-        if (!items.length) return 'Nessun loop salvato.';
-        const which = await askUser('Quale loop elimino?', items.map(i => i.name));
-        if (which === '__cancelled__') return 'Annullato.';
+        if (!items.length) return 'No saved loops.';
+        const which = await askUser('Which loop should be deleted?', items.map(i => i.name));
+        if (which === '__cancelled__') return 'Cancelled.';
         const ok = await loops.deleteLoop(which);
-        return ok ? `✓ Loop "${which}" eliminato.` : `Loop "${which}" non trovato.`;
+        return ok ? `✓ Loop "${which}" deleted.` : `Loop "${which}" not found.`;
       }
 
       // ── /loop run <name> ───────────────────────────────────────────────
@@ -2135,7 +2145,7 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         try {
           plan = await loops.loadLoop(name);
         } catch {
-          return `Loop "${name}" non trovato. Usa /loop list per vederli.`;
+          return `Loop "${name}" not found. Use /loop list to see them.`;
         }
         plan.name = plan.name || name;
         return reviewAndEnqueue(plan, { originalGoal: plan.goal });
@@ -2157,13 +2167,13 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
             cleanGoal = goalWithMax.slice(0, maxMatch.index).trim();
           }
         }
-        if (!cleanGoal) return 'Goal vuoto. Usage: /loop start <goal> [max-steps]';
+        if (!cleanGoal) return 'Empty goal. Usage: /loop start <goal> [max-steps]';
 
         let plan;
         try {
           plan = await loops.generatePlan(cleanGoal, { maxSteps });
         } catch (e) {
-          return `✗ Generazione piano fallita: ${e.message}`;
+          return `✗ Could not generate the plan: ${e.message}`;
         }
         plan.name = null;
         return reviewAndEnqueue(plan, { originalGoal: cleanGoal });
@@ -2199,10 +2209,15 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         if (enabled.length === 0) {
           return 'No plugins enabled.\nUse /plugins available to see what is on disk, then /plugins enable <name>.';
         }
-        return `Enabled plugins (${enabled.length}):\n` + enabled.map((p) => {
-          const perm = (p.permissions && p.permissions.length) ? ` perms: ${p.permissions.join(', ')}` : '';
-          return `  ${p.name.padEnd(20)} v${p.version}  ${p.toolCount} tool(s), ${p.commandCount} command(s)${perm}\n    ${p.description || '(no description)'}`;
-        }).join('\n');
+        // One card per plugin: the name on its own line where the eye finds
+        // it, what it is below, what it is allowed to do last.
+        const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+        return [`Enabled plugins (${enabled.length})`, '', ...enabled.flatMap((p) => [
+          `● ${p.name}  v${p.version} · ${plural(p.toolCount, 'tool')} · ${plural(p.commandCount, 'command')}`,
+          `    ${p.description || '(no description)'}`,
+          ...((p.permissions && p.permissions.length) ? [`    permissions: ${p.permissions.join(', ')}`] : []),
+          '',
+        ]), 'Run /plugins info <name> for its tools and commands.'].join('\n');
       }
 
       // ── /plugins available — on-disk plugins (enabled or not) ────────
@@ -2231,25 +2246,26 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         }
         const lines = [];
         if (candidates.length) {
-          lines.push(`Installed plugins (${candidates.length}):`);
+          lines.push(`Installed plugins (${candidates.length})`, '');
           for (const c of candidates) {
-            lines.push(`  ${c.name}${runtime.has(c.name) ? ' [enabled]' : ''}`);
+            lines.push(`● ${c.name}  ${runtime.has(c.name) ? 'enabled' : `not enabled — /plugins enable ${c.name}`}`);
           }
         }
         if (stale.length) {
           if (lines.length) lines.push('');
-          lines.push(`Older than the copy shipped with ETTORE (${stale.length}):`);
+          lines.push(`Older than the copy shipped with ETTORE (${stale.length})`, '');
           for (const p of stale) {
-            lines.push(`  ${p.name} — running an older copy; /plugins install ${p.name} --force to update`);
+            lines.push(`● ${p.name}  running an older copy`, `    /plugins install ${p.name} --force to update it`);
           }
         }
         if (bundled.length) {
           if (lines.length) lines.push('');
-          lines.push(`Bundled with ETTORE (${bundled.length}) — /plugins install to pick one:`);
+          lines.push(`Bundled with ETTORE, not installed (${bundled.length})`, '');
           for (const b of bundled) {
-            const summary = b.description ? ` — ${b.description.split('.')[0]}` : '';
-            lines.push(`  ${b.name}${summary}`.slice(0, 200));
+            lines.push(`● ${b.name}`);
+            if (b.description) lines.push(`    ${b.description.split('.')[0]}.`);
           }
+          lines.push('', 'Run /plugins install <name> to add one, or /plugins install to pick from a list.');
         }
         return lines.join('\n');
       }
@@ -2364,27 +2380,27 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         const entry = runtime.get(name);
         if (entry) {
           const m = entry.manifest;
-          const toolList = Object.keys(entry.tools || {}).map((t) => `      - ${t}`).join('\n');
-          const cmdList = Object.keys(entry.commands || {}).map((c) => `      /${c}`).join('\n');
+          const firstSentence = (text) => String(text || '').split(/(?<=\.)\s/)[0];
+          const tools = Object.entries(entry.tools || {});
+          const cmds = Object.entries(entry.commands || {});
           return [
-            `Plugin: ${m.name}`,
-            `Version: ${m.version}`,
-            `apiVersion: ${m.apiVersion}`,
-            `Main: ${m.main}`,
-            `Root: ${m.root}`,
-            `Description: ${m.description || '(none)'}`,
-            `Author: ${m.author || '(none)'}`,
-            `License: ${m.license || '(none)'}`,
-            `Permissions: ${(m.permissions && m.permissions.length) ? m.permissions.join(', ') : '(none)'}`,
-            ``,
-            `Tools (${Object.keys(entry.tools || {}).length}):`,
-            toolList || '      (none)',
-            ``,
-            `Commands (${Object.keys(entry.commands || {}).length}):`,
-            cmdList || '      (none)',
-            ``,
-            `Loaded at: ${entry.loadedAt}`,
-            `Status: enabled`,
+            `● ${m.name}  v${m.version} · enabled`,
+            `    ${m.description || '(no description)'}`,
+            '',
+            `Tools (${tools.length})`,
+            ...(tools.length
+              ? tools.map(([t, def]) => `  • ${t}${def?.description ? `  ${firstSentence(def.description)}` : ''}`)
+              : ['    (none)']),
+            '',
+            `Commands (${cmds.length})`,
+            ...(cmds.length
+              ? cmds.map(([c, def]) => `  • /${c}${def?.description ? `  ${firstSentence(def.description)}` : ''}`)
+              : ['    (none)']),
+            '',
+            `    permissions: ${(m.permissions && m.permissions.length) ? m.permissions.join(', ') : '(none)'}`,
+            `    author: ${m.author || '(none)'} · license: ${m.license || '(none)'} · api version: ${m.apiVersion}`,
+            `    root: ${m.root}`,
+            `    loaded at: ${entry.loadedAt}`,
           ].join('\n');
         }
         // Fallback: read the manifest from disk without enabling.

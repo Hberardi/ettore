@@ -7,7 +7,7 @@
 // where the user writes their own answer. Typing anywhere in the list jumps to
 // that line, so there is nothing to learn.
 //
-// Confirmations the harness asks for itself ("Sì, procedi" / "No, annulla")
+// Confirmations the harness asks for itself ("Yes, proceed" / "No, cancel")
 // keep the closed list: their answer is matched against those exact words, and
 // a free-text reply there would read as a refusal nobody meant.
 

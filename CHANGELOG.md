@@ -8,6 +8,76 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-09-27
+
+### Added — what's new after an update, and `/changelog`
+
+An update arrived in silence: the version in the sidebar changed and nothing
+said what came with it. The first time the TUI opens on a new version it now
+shows a *✨ What's new* message with the headings of every release since the
+one last run — the latest three, the older ones counted — read from the
+`CHANGELOG.md` the npm package already ships (`src/app/whats-new.js`). A fresh
+install shows nothing, a downgrade shows nothing, and an install from before
+this existed shows the release it landed on. The version seen is saved as
+`lastSeenVersion` in the global config. `/changelog [version]` (also
+`/whats-new`, `/news`) prints a release's notes in full.
+
+### Changed — the interface speaks English
+
+ETTORE is used beyond Italy, and half of what it said was in Italian. Every
+user-facing text is now English: command output and usage, confirmations and
+their options (*Yes, proceed* / *No, cancel*, *Yes, always for this session*),
+approval titles, the file picker, Jev's lines, retry and stall notices, the
+agent's tool-budget and release-gate messages, specialist prompts, the music
+video studio and its error table, the github plugin's confirmations. Answers
+are still understood in Italian too (*sì*, *sempre*), and the patterns that
+read an Italian request are unchanged — you can keep writing in any language.
+
+### Changed — a command palette you can read
+
+The `/` palette was a plain list where arguments ran into descriptions and a
+plugin command showed as `//edi`. It now has the rounded frame of the other
+windows: each command's name in bold with its arguments dimmed beside it, the
+descriptions aligned in one column, a `⧉ plugin` badge on commands a plugin
+added, and below the list the selected command in full — usage, aliases, the
+plugin it comes from, the whole description. The title counts the commands and
+the hint bar shows the position when the list scrolls; nothing reaches past
+the frame.
+
+### Fixed — long text is shown whole, and command output is readable
+
+- **Command output spilled across the screen.** The window `/plugins`,
+  `/config` and the other commands print into never cut its lines to its frame,
+  so a long one ran past the right border and the terminal wrapped it onto the
+  transcript from column 1. Every line is now kept inside the frame; command
+  output gets a wider window, titled with the command (`/plugins`, not
+  `/output`), with long lines wrapped under their own indent and short ones
+  left with their column spacing. The frame is drawn with the same rounded
+  borders as the other windows, and its side borders are no longer painted over
+  by the background.
+- **A line exactly as wide as its space lost its last character.** The
+  truncation kept a column free for "…" even when nothing needed cutting: every
+  row of the sidebar ended in "…", and a wrapped message dropped a letter at the
+  wrap ("i fil…", then "che").
+- **The input broke words in half** ("pagin" / "e") and started rows with a
+  space. It now wraps between words, and grows with the terminal — up to 40% of
+  its height, six rows at least — instead of folding a long request into "…"
+  after six lines.
+- **Command output was a wall of one colour.** Every line of the output window
+  was painted the same cyan, so in `/plugins` the names did not stand out from
+  their descriptions. Lines are now styled by their shape
+  (`src/app/output-style.js`): titles bold, an entry's `●` and name bold and
+  coloured with its version and counts dimmed, descriptions plain, permissions
+  and hints grey, blank lines kept as spacing. `/plugins list`, `available` and
+  `info` are laid out as one card per plugin for it. In the output window the
+  selected row is a quiet shade rather than the bright bar that means "Enter
+  picks this", and an empty line no longer shows its internal id (`line_5`).
+- **The sidebar cut the model name and the folder short.** Long values wrap
+  under themselves, at a `/` or `-` where there is one, and active skills are
+  listed one per row.
+- **`/version` always said 1.0.0.** It printed a number written into the
+  command long ago; it now shows the running build.
+
 ## [1.14.0] — 2026-09-27
 
 ### Added — a `github` plugin: why CI failed, pull requests, issues

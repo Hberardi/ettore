@@ -285,23 +285,23 @@ test('resolveStoryboardLlm picks the first saved LLM key when no override', () =
 // ── friendlyLlmError: Italian translations for common failure modes ──────
 
 test('friendlyLlmError translates auth errors', () => {
-  assert.match(_internal.friendlyLlmError(new Error('401 Unauthorized: invalid API key')), /Chiave API non valida/i);
-  assert.match(_internal.friendlyLlmError(new Error('403 Forbidden')), /Chiave API non valida/i);
+  assert.match(_internal.friendlyLlmError(new Error('401 Unauthorized: invalid API key')), /Invalid or expired API key/i);
+  assert.match(_internal.friendlyLlmError(new Error('403 Forbidden')), /Invalid or expired API key/i);
 });
 
 test('friendlyLlmError translates model-not-found errors', () => {
-  assert.match(_internal.friendlyLlmError(new Error('404 model not found: models/foo-bar')), /Modello non disponibile/i);
-  assert.match(_internal.friendlyLlmError(new Error('model "foo-bar" is not supported by this endpoint')), /Modello non disponibile/i);
+  assert.match(_internal.friendlyLlmError(new Error('404 model not found: models/foo-bar')), /Model not available/i);
+  assert.match(_internal.friendlyLlmError(new Error('model "foo-bar" is not supported by this endpoint')), /Model not available/i);
 });
 
 test('friendlyLlmError translates rate-limit errors', () => {
-  assert.match(_internal.friendlyLlmError(new Error('429 Too Many Requests')), /Limite di richieste/i);
-  assert.match(_internal.friendlyLlmError(new Error('rate limit exceeded')), /Limite di richieste/i);
-  assert.match(_internal.friendlyLlmError(new Error('quota exhausted')), /Limite di richieste/i);
+  assert.match(_internal.friendlyLlmError(new Error('429 Too Many Requests')), /Rate limit reached/i);
+  assert.match(_internal.friendlyLlmError(new Error('rate limit exceeded')), /Rate limit reached/i);
+  assert.match(_internal.friendlyLlmError(new Error('quota exhausted')), /Rate limit reached/i);
 });
 
 test('friendlyLlmError translates "no active connection" hint', () => {
-  assert.match(_internal.friendlyLlmError(new Error('No active connection. Use /connect to connect a provider.')), /Nessuna connessione attiva/i);
+  assert.match(_internal.friendlyLlmError(new Error('No active connection. Use /connect to connect a provider.')), /No active connection/i);
 });
 
 test('friendlyLlmError falls through with the raw message for unknown errors', () => {
@@ -310,7 +310,7 @@ test('friendlyLlmError falls through with the raw message for unknown errors', (
 });
 
 test('friendlyLlmError handles empty/null safely', () => {
-  assert.equal(_internal.friendlyLlmError(null), 'LLM non disponibile.');
-  assert.equal(_internal.friendlyLlmError(undefined), 'LLM non disponibile.');
-  assert.equal(_internal.friendlyLlmError(''), 'LLM non disponibile.');
+  assert.equal(_internal.friendlyLlmError(null), 'LLM not available.');
+  assert.equal(_internal.friendlyLlmError(undefined), 'LLM not available.');
+  assert.equal(_internal.friendlyLlmError(''), 'LLM not available.');
 });

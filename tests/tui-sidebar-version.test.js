@@ -118,3 +118,23 @@ test('/sidebar validates the width and hands it to the UI', async () => {
   assert.match(await builtinCommands.sidebar.handler(['huge']), /Invalid width/);
   assert.match(await builtinCommands.sidebar.handler([]), /Right panel: wide|Right panel: 48/);
 });
+
+test('a long model name or folder wraps in the panel instead of ending in "…"', async () => {
+  const { TUI } = await import('../src/app/tui-native.js');
+  const t = new TUI();
+  t.availableHeight = 30;
+  t.model = 'models/antigravity-preview-05-20-extra-long-name';
+  t.skillsAvailable = 12;
+  t.activeSkills = ['esperto-programmazione', 'verifica-dogana'];
+  const text = t._renderSidebar(32).map(l => stripAllAnsi(l)).join('\n');
+  assert.doesNotMatch(text, /…/);
+  assert.match(text, /models\/antigravity- *\n\s+preview-05-20-extra- *\n\s+long-name/, 'the whole name, wrapped at its dashes');
+  assert.match(text, /esperto-programmazione *\n\s+verifica-dogana/, 'one skill per row');
+});
+
+test('a row exactly as wide as its space is shown whole, not cut to "…"', async () => {
+  const { TUI } = await import('../src/app/tui-native.js');
+  const t = new TUI();
+  assert.equal(t._padVisual('x'.repeat(10), 10), 'x'.repeat(10));
+  assert.match(stripAllAnsi(t._truncateVisual('x'.repeat(11), 10)), /^x{9}…$/);
+});

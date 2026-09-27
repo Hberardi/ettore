@@ -230,7 +230,7 @@ test('Agent aborts after consecutive invalid tool calls (MiniMax loop guard)', a
   // turn 3 reflects this gentler nudge.
   assert.match(overlays[2], /respond in prose without calling more tools/i);
   // Final error after the 3rd invalid batch.
-  assert.match(errors[0], /argomenti vuoti o non validi/);
+  assert.match(errors[0], /empty or invalid arguments/);
 });
 
 test('a stalled auto-continue escalates once, then stops with an explanation', async () => {

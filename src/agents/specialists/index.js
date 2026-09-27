@@ -4,14 +4,14 @@ import { toolHandlers } from '../../tools/index.js';
 export class ExplorerAgent extends Agent {
   constructor(client, config) {
     super(client, config);
-    this.systemPrompt = `Sei un esploratore di codebase esperto. Il tuo compito è:
-1. Analizzare la struttura del progetto
-2. Trovare file rilevanti usando glob/grep
-3. Leggere e comprendere il codice
-4. Rispondere a domande sulla struttura e il funzionamento
+    this.systemPrompt = `You are an expert codebase explorer. Your job is to:
+1. Analyse the structure of the project
+2. Find the relevant files with glob/grep
+3. Read and understand the code
+4. Answer questions about how it is structured and how it works
 
-Usa sempre \`glob\` per trovare file e \`read\` per leggere il contenuto.
-Includi i path dei file nelle risposte.`;
+Always use \`glob\` to find files and \`read\` to read them.
+Include file paths in your answers.`;
   }
   
   async explore(prompt) {
@@ -30,13 +30,13 @@ Includi i path dei file nelle risposte.`;
 export class CodeReviewerAgent extends Agent {
   constructor(client, config) {
     super(client, config);
-    this.systemPrompt = `Sei un esperto code reviewer. Il tuo compito è:
-1. Leggere e analizzare il codice
-2. Identificare bug, vulnerabilità, code smells
-3. Proporre migliorie e best practices
-4. Verificare che il codice segua le convenzioni
+    this.systemPrompt = `You are an expert code reviewer. Your job is to:
+1. Read and analyse the code
+2. Find bugs, vulnerabilities and code smells
+3. Suggest improvements and best practices
+4. Check the code follows the project's conventions
 
-Sii critico ma costruttivo. Includi esempi concreti nelle review.`;
+Be critical but constructive. Include concrete examples in your reviews.`;
   }
   
   async review(prompt) {
@@ -47,10 +47,10 @@ Sii critico ma costruttivo. Includi esempi concreti nelle review.`;
     const issues = [];
     
     if (code.includes('eval(') || code.includes('exec(')) {
-      issues.push('uso di eval/exec - potenziale vulnerabilità');
+      issues.push('eval/exec in use — potential vulnerability');
     }
     if (code.includes('password') && !code.includes('env')) {
-      issues.push('password hardcoded rilevata');
+      issues.push('hardcoded password found');
     }
     if (code.includes('API_KEY') && !code.includes('process.env')) {
       issues.push('API key hardcoded');
@@ -63,14 +63,14 @@ Sii critico ma costruttivo. Includi esempi concreti nelle review.`;
 export class DebugAgent extends Agent {
   constructor(client, config) {
     super(client, config);
-    this.systemPrompt = `Sei un debugger esperto. Il tuo approccio:
-1. Leggi e analizza il codice sorgente
-2. Riproduci il bug se possibile
-3. Identifica la causa radice
-4. Proponi e implementa una fix
-5. Verifica che funzioni
+    this.systemPrompt = `You are an expert debugger. Your approach:
+1. Read and analyse the source code
+2. Reproduce the bug if you can
+3. Find the root cause
+4. Propose and implement a fix
+5. Check that it works
 
-Usa il tool \`bash\` per eseguire test e comandi.`;
+Use the \`bash\` tool to run tests and commands.`;
   }
   
   async debug(prompt) {
@@ -81,14 +81,14 @@ Usa il tool \`bash\` per eseguire test e comandi.`;
 export class RefactorAgent extends Agent {
   constructor(client, config) {
     super(client, config);
-    this.systemPrompt = `Sei un esperto refactoring. Il tuo compito è:
-1. Analizzare il codice esistente
-2. Identificare opportunità di miglioramento
-3. Refactoring senza cambiare comportamento
-4. Applicare design patterns dove appropriato
-5. Migliorare leggibilità e manutenibilità
+    this.systemPrompt = `You are an expert at refactoring. Your job is to:
+1. Analyse the existing code
+2. Find opportunities to improve it
+3. Refactor without changing behaviour
+4. Apply design patterns where they fit
+5. Improve readability and maintainability
 
-Mantieni la retrocompatibilità quando possibile.`;
+Keep backwards compatibility wherever you can.`;
   }
   
   async refactor(prompt) {

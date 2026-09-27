@@ -325,7 +325,9 @@ class TUI {
     this.availableHeight = Math.max(2, this.rows - 5 - inputHeight);
 
     const msgLines = this._renderMessages();
-    const sideLines = this._renderSidebar(sidebarContentWidth);
+    // One column short of the panel: a margin on the right edge, so a line
+    // that fills the panel does not touch the terminal's border.
+    const sideLines = this._renderSidebar(Math.max(1, sidebarContentWidth - 1));
     this.animationFrame = (this.animationFrame + 1) % 100;
     let out = ANSI.hide;
 
@@ -494,6 +496,8 @@ class TUI {
 
     const isUser = msg.role === 'user';
     const isSys = msg.role === 'system';
+
+    if (isSys && msg.kind === 'whats-new') return this._renderWhatsNew(msg, maxWidth);
 
     if (isSys) {
       const lines = [];
@@ -706,6 +710,45 @@ class TUI {
     out.push(`${pad}${color}╰${'━'.repeat(Math.max(0, bubbleWidth - 2))}╯${C.reset}`);
     out.push('');
     return out;
+  }
+
+  /**
+   * The release notes shown after an update, in a bubble of their own: the
+   * version headings bold, each section on its line and wrapped under its
+   * bullet, the pointer to /changelog dimmed. The text is what
+   * `formatWhatsNew` wrote, so it also reads as plain lines.
+   */
+  _renderWhatsNew(msg, maxWidth) {
+    const bubbleWidth = Math.min(maxWidth - 2, Math.max(42, Math.floor(maxWidth * 0.84)));
+    const innerWidth = Math.max(18, bubbleWidth - 4);
+    const rows = [];
+    const lines = String(msg.text || '').split('\n');
+    lines.forEach((rawLine, i) => {
+      const line = this._sanitizeForRender(rawLine);
+      if (!line.trim()) return;
+      if (i === 0) {
+        // The bubble's label already carries the ✨.
+        this._wrapText(line.replace(/^✨\s*/, ''), innerWidth).forEach((w) => rows.push(`${C.bold}${C.accent}${w}${C.reset}`));
+        rows.push('');
+        return;
+      }
+      const bullet = /^(\s*)•\s+(.*)$/.exec(line);
+      if (bullet) {
+        const indent = bullet[1].length + 2;
+        this._wrapText(bullet[2], innerWidth - indent).forEach((w, j) => {
+          rows.push(`${' '.repeat(bullet[1].length)}${j === 0 ? `${C.ok}•${C.reset} ` : '  '}${C.text}${w}${C.reset}`);
+        });
+        return;
+      }
+      if (/^\d+\.\d+\.\d+/.test(line)) {
+        if (rows.length && rows[rows.length - 1] !== '') rows.push('');
+        rows.push(`${C.bold}${C.text}${line}${C.reset}`);
+        return;
+      }
+      if ((i === lines.length - 1 || line.startsWith('…')) && rows[rows.length - 1] !== '') rows.push('');
+      this._wrapText(line, innerWidth).forEach((w) => rows.push(`${C.dim}${w}${C.reset}`));
+    });
+    return this._renderBubble({ label: "✨ WHAT'S NEW", meta: '', rows, color: C.accent, maxWidth, align: 'left' });
   }
 
   _renderAssistantBlock({ label, meta, rows, color, maxWidth }) {
@@ -974,7 +1017,7 @@ class TUI {
     if (idleMs >= stallMs) {
       let waitText;
       if (waitKind === 'tool') {
-        waitText = `${C.warn}stato:${C.reset} ${C.dim}in attesa completamento tool…${C.reset}`;
+        waitText = `${C.warn}status:${C.reset} ${C.dim}waiting for the tool to finish…${C.reset}`;
       } else {
         // Model wait: escalate color from accent → warn → err as the idle
         // duration grows. Reaches err well before the 300s hard watchdog
@@ -983,7 +1026,7 @@ class TUI {
         const waitColor = idleMs > 180_000 ? C.err
                         : idleMs > 60_000  ? C.warn
                         :                    C.accent;
-        waitText = `${waitColor}stato:${C.reset} ${C.dim}in attesa risposta modello…${C.reset}`;
+        waitText = `${waitColor}status:${C.reset} ${C.dim}waiting for the model…${C.reset}`;
       }
       rows.push(waitText);
     }
@@ -1143,6 +1186,15 @@ class TUI {
   // shows the prompt glyph (❯); subsequent rows are continuation lines.
   static INPUT_MAX_ROWS = 6;
 
+  /**
+   * How many rows the input may grow to. Six on a small terminal, as before;
+   * on a taller one up to 40% of its height, so a long request is seen whole
+   * while it is written rather than folded into "…" after six lines.
+   */
+  inputMaxRows() {
+    return Math.max(TUI.INPUT_MAX_ROWS, Math.min(20, Math.floor((Number(this.rows) || 24) * 0.4)));
+  }
+
   // Wrap raw user input (no ANSI) at a column boundary, walking codepoints so
   // surrogate pairs aren't split. Honors INPUT_MAX_ROWS — anything past the
   // cap is collapsed into the last row, which is then left-truncated so the
@@ -1165,9 +1217,25 @@ class TUI {
         (cp >= 0x1F300 && cp <= 0x1FAFF)
       )) ? 2 : 1;
       if (curLen + w > maxLen) {
-        rows.push(cur);
-        cur = '';
-        curLen = 0;
+        // Break after the last space on the row, not inside a word: "pagin"
+        // on one row and "e" on the next is not how anyone reads. The space
+        // stays on the row it ends, so the next one starts with a letter.
+        // A single word longer than the row still breaks where it must.
+        const space = cur.lastIndexOf(' ');
+        if (space > 0 && ch !== ' ') {
+          rows.push(cur.slice(0, space + 1));
+          cur = cur.slice(space + 1);
+          curLen = this._visualLen(cur);
+        } else {
+          rows.push(cur);
+          cur = '';
+          curLen = 0;
+        }
+        // A space landing at the start of a row belongs to the row before.
+        if (ch === ' ' && !cur) {
+          rows[rows.length - 1] += ch;
+          continue;
+        }
       }
       cur += ch;
       curLen += w;
@@ -1244,8 +1312,9 @@ class TUI {
     const attachmentRows = this.attachments.length
       ? this._wrapInputText(`📎 ${this.attachments.map(file => this._truncate(file.name, 20)).join('  ')}  ⌫ remove last`, maxLen - 1, 2)
       : [];
-    const inputRows = this._wrapInputText(this.input, maxLen - 1, Math.max(1, TUI.INPUT_MAX_ROWS - attachmentRows.length));
-    const rows = [...attachmentRows, ...inputRows].slice(0, TUI.INPUT_MAX_ROWS);
+    const maxRows = this.inputMaxRows();
+    const inputRows = this._wrapInputText(this.input, maxLen - 1, Math.max(1, maxRows - attachmentRows.length));
+    const rows = [...attachmentRows, ...inputRows].slice(0, maxRows);
     return rows.map((rowText, idx) => {
       const isLast = idx === rows.length - 1;
       const payload = `${C.text}${rowText}${isLast ? '▋' : ''}${C.reset}`;
@@ -1331,9 +1400,28 @@ class TUI {
     const provider = connectionManager.activeProvider || this.provider || 'none';
     const model = connectionManager.activeModel || this.model || 'none';
     const cwdDisplay = shortenPath(process.cwd());
-    lines.push(`${C.dim}◉ provider${C.reset} ${C.text}${this._truncate(provider, Math.max(8, width - 11))}${C.reset}`);
-    lines.push(`${C.dim}◈ model${C.reset}    ${C.text}${this._truncate(model, Math.max(8, width - 11))}${C.reset}`);
-    lines.push(`${C.dim}⌂ cwd${C.reset}      ${C.text}${this._truncate(cwdDisplay, Math.max(8, width - 11))}${C.reset}`);
+    // A value longer than its row wraps under itself instead of ending in
+    // "…": the model id and the folder are exactly what one opens the panel
+    // to read.
+    const field = (label, value) => {
+      const room = Math.max(8, width - 11);
+      const parts = [];
+      let rest = String(value || '');
+      while (rest.length > room && parts.length < 3) {
+        const cut = Math.max(rest.lastIndexOf('/', room), rest.lastIndexOf('-', room), rest.lastIndexOf(' ', room));
+        const at = cut > room / 2 ? cut + 1 : room;
+        parts.push(rest.slice(0, at));
+        rest = rest.slice(at);
+      }
+      parts.push(rest);
+      parts.forEach((part, i) => {
+        const head = i === 0 ? `${C.dim}${label}${C.reset}` : ' '.repeat(this._visualLen(label));
+        lines.push(`${head} ${C.text}${this._truncate(part, room)}${C.reset}`);
+      });
+    };
+    field('◉ provider', provider);
+    field('◈ model   ', model);
+    field('⌂ cwd     ', cwdDisplay);
 
     const state = this.isRunning ? `${C.warn}running${C.reset}` : `${C.ok}idle${C.reset}`;
     const capability = this.modelCapability === 'full' ? `${C.ok}FULL${C.reset}` : this.modelCapability === 'lite' ? `${C.warn}LITE${C.reset}` : `${C.dim}?${C.reset}`;
@@ -1357,11 +1445,17 @@ class TUI {
     // Which skills the prompt woke, and how many were on offer. Without it a
     // skill that did not match is indistinguishable from one that did.
     if (this.skillsAvailable) {
-      const names = (this.activeSkills || []).join(', ');
-      const body = names
-        ? `${C.text}${this._truncate(names, Math.max(6, width - 10))}${C.reset}`
-        : `${C.dim}none of ${this.skillsAvailable}${C.reset}`;
-      lines.push(`${C.dim}✦ skills${C.reset} ${body}`);
+      const names = this.activeSkills || [];
+      if (!names.length) {
+        lines.push(`${C.dim}✦ skills${C.reset} ${C.dim}none of ${this.skillsAvailable}${C.reset}`);
+      } else {
+        // One skill per row after the first, rather than a list cut short.
+        const room = Math.max(6, width - 10);
+        names.forEach((name, i) => {
+          const head = i === 0 ? `${C.dim}✦ skills${C.reset}` : ' '.repeat(8);
+          lines.push(`${head} ${C.text}${this._truncate(name, room)}${C.reset}`);
+        });
+      }
     }
     lines.push(`${C.bold}${C.accent}▸ ACTIVITY${C.reset}`);
 
@@ -1596,6 +1690,13 @@ class TUI {
 
   _truncateVisual(str, max) {
     if (!str) return '';
+    // A line that fits is returned whole. The loop below keeps a column free
+    // for the "…", which is right for a line that is cut — and was applied to
+    // lines that were not: one exactly as wide as its space lost its last
+    // character to an ellipsis. That was the "…" closing every row of the
+    // sidebar, and the letter missing where a message wrapped ("i fil…",
+    // then "che").
+    if (this._visualLen(str) <= max) return str;
     let out = '';
     let visible = 0;
     for (let i = 0; i < str.length; i++) {
@@ -1778,22 +1879,22 @@ class TUI {
       out += ANSI.move(left, top + i) + `${bg}${' '.repeat(width)}${C.reset}`;
     }
     out += ANSI.move(left, top) + `${headerBg}`;
-    const title = `  ${C.bold}${C.accent}📎 Allega file${C.reset}  ${C.dim}selettore di sistema${C.reset}`;
+    const title = `  ${C.bold}${C.accent}📎 Attach files${C.reset}  ${C.dim}system picker${C.reset}`;
     out += title + ' '.repeat(Math.max(0, width - this._visualLen(title))) + C.reset;
 
     out += ANSI.move(left, top + 2) + bg;
     const status = this.filePicker.error
       ? `${C.err}✗ ${this.filePicker.error}${C.reset}`
-      : `${C.accent}▣${C.reset} ${C.text}Seleziona uno o più file nella finestra che si è aperta.${C.reset}`;
+      : `${C.accent}▣${C.reset} ${C.text}Pick one or more files in the window that opened.${C.reset}`;
     const statusLine = `  ${this._truncateVisual(status, width - 2)}`;
     out += statusLine + ' '.repeat(Math.max(0, width - this._visualLen(statusLine))) + C.reset;
 
     out += ANSI.move(left, top + 3) + bg;
-    const hintLine = `  ${C.dim}Immagini, documenti, audio, video e file di progetto${C.reset}`;
+    const hintLine = `  ${C.dim}Images, documents, audio, video and project files${C.reset}`;
     out += hintLine + ' '.repeat(Math.max(0, width - this._visualLen(hintLine))) + C.reset;
 
     out += ANSI.move(left, top + 5) + `${headerBg}`;
-    const hint = `  ${C.dim}selezione multipla disponibile${C.reset}  ${C.dim}esc annulla${C.reset}  ${C.dim}allegati: ${this.attachments.length}${C.reset}`;
+    const hint = `  ${C.dim}multiple selection available${C.reset}  ${C.dim}esc cancel${C.reset}  ${C.dim}attached: ${this.attachments.length}${C.reset}`;
     out += hint + ' '.repeat(Math.max(0, width - this._visualLen(hint))) + C.reset;
     return out;
   }
@@ -1859,7 +1960,7 @@ class TUI {
   selectCommandDown() {
     if (this.commandIndex < this.commandFiltered.length - 1) {
       this.commandIndex++;
-      const maxVisible = Math.min(this.commandFiltered.length, this.availableHeight - 3);
+      const maxVisible = this.paletteVisibleRows();
       if (this.commandIndex >= this.commandScrollOffset + maxVisible) {
         this.commandScrollOffset = this.commandIndex - maxVisible + 1;
       }
@@ -1872,9 +1973,12 @@ class TUI {
   }
 
   // ─── Sub-menu ─────────────────────────────────────────────────────────────
-  openSubMenu(title, items) {
+  openSubMenu(title, items, { label = null } = {}) {
     this.subMenuOpen         = true;
     this.subMenuTitle        = title;
+    // What the frame's title bar says, when the menu's kind (`output`) is not
+    // what the user asked for (`/plugins`).
+    this.subMenuLabel        = label;
     this.subMenuItems        = items;
     this.subMenuFiltered     = [...items];
     this.subMenuFilter       = '';
@@ -1987,6 +2091,16 @@ class TUI {
   }
 
   // ─── Command palette rendering (OpenCode-style full-width) ────────────────
+  /**
+   * How many commands the palette shows at once. One figure for drawing and
+   * for scrolling, so the selection can never move past the last visible row.
+   * The frame also carries a title, two detail rows and a hint bar.
+   */
+  paletteVisibleRows() {
+    const total = Array.isArray(this.commandFiltered) ? this.commandFiltered.length : 0;
+    return Math.max(1, Math.min(total || 1, (this.availableHeight || 10) - 6));
+  }
+
   _renderCommandPalette() {
     if (!this.commandPaletteOpen || this.subMenuOpen || this.apiKeyInputMode) return '';
 
@@ -2000,189 +2114,200 @@ class TUI {
       this.commandFiltered = Array.isArray(this.commandList) ? [...this.commandList] : [];
     }
 
-    const maxVisible = Math.max(1, Math.min(this.commandFiltered.length || 1, this.availableHeight - 3));
-    const width      = Math.max(52, Math.min(this.cols - 8, 96));
+    // The same frame as the other windows: rounded borders, every row cut to
+    // the inside, nothing reaching past the right edge. Each command is its
+    // name in bold, its arguments dimmed beside it, what it does in plain
+    // text, and where it comes from when a plugin added it. The selected
+    // command is spelled out in full below the list — usage, aliases and the
+    // whole description — so nothing has to be squeezed into its row.
+    const items      = this.commandFiltered;
+    const maxVisible = this.paletteVisibleRows();
+    const width      = Math.max(52, Math.min(this.cols - 8, 110));
+    const inner      = width - 2;
     const left       = Math.max(1, Math.floor((this.cols - width) / 2));
-    const top        = Math.max(2, Math.floor((this.rows - (maxVisible + 2)) / 2));
-    const height     = maxVisible + 2;
+    const height     = maxVisible + 4;
+    const top        = Math.max(2, Math.floor((this.rows - height) / 2));
+    const BORDER     = '\x1b[38;5;244m\x1b[48;5;238m';
+    const BG         = '\x1b[48;5;238m';
+    const BAR        = '\x1b[48;5;24m';
+    // The selected command in full sits on a darker band of its own.
+    const DETAIL     = '\x1b[48;5;235m';
+    const row = (y, bg, content) => {
+      const clipped = this._truncateVisual(content, inner);
+      const pad = ' '.repeat(Math.max(0, inner - this._visualLen(clipped)));
+      const keep = String(clipped).replace(/\x1b\[0m/g, `\x1b[0m${bg}`);
+      return ANSI.move(left, y) + `${BORDER}│${C.reset}${bg}${keep}${pad}${C.reset}${BORDER}│${C.reset}`;
+    };
+    const slash = (text) => `/${String(text || '').replace(/^\/+/, '')}`;
 
     let out = '';
-
-    // Shadow (offset)
-    for (let i = 0; i < height; i++) {
-      out += ANSI.move(left + 1, top + i + 1);
-      out += `\x1b[48;5;234m${' '.repeat(width)}\x1b[0m`;
+    for (let i = 0; i < height + 1; i++) {
+      out += ANSI.move(left + 1, top + i) + `\x1b[48;5;234m${' '.repeat(width)}\x1b[0m`;
     }
+    out += ANSI.move(left, top - 1) + `${BORDER}╭${'─'.repeat(inner)}╮${C.reset}`;
+    out += ANSI.move(left, top + height) + `${BORDER}╰${'─'.repeat(inner)}╯${C.reset}`;
 
-    // Border
-    out += ANSI.move(left, top - 1) + `\x1b[48;5;240m+${'-'.repeat(Math.max(0, width - 2))}+\x1b[0m`;
-    for (let i = 0; i < height; i++) {
-      out += ANSI.move(left, top + i) + `\x1b[48;5;240m|\x1b[0m`;
-      out += ANSI.move(left + width - 1, top + i) + `\x1b[48;5;240m|\x1b[0m`;
-    }
-    out += ANSI.move(left, top + height) + `\x1b[48;5;240m+${'-'.repeat(Math.max(0, width - 2))}+\x1b[0m`;
+    const count = `${C.dim}${items.length} command${items.length === 1 ? '' : 's'}${C.reset}`;
+    out += row(top, BAR, this.commandFilter
+      ? ` ${C.bold}${C.accent}/ commands${C.reset}  ${C.dim}filter${C.reset} ${C.text}${this.commandFilter}${C.reset}  ${count}`
+      : ` ${C.bold}${C.accent}/ commands${C.reset}  ${C.dim}type to filter · enter to run${C.reset}  ${count}`);
 
-    // Background rows: title + items + hint
-    for (let i = 0; i < maxVisible + 2; i++) {
-      out += ANSI.move(left, top + i);
-      out += `\x1b[48;5;238m${' '.repeat(width)}\x1b[0m`;
-    }
-
-    out += ANSI.move(left, top);
-    out += `\x1b[48;5;24m`;
-    const title = this.commandFilter
-      ? `  ${C.bold}${C.accent}/ commands${C.reset}  ${C.dim}filter:${C.reset} ${C.text}${this.commandFilter}${C.reset}`
-      : `  ${C.bold}${C.accent}/ commands${C.reset}  ${C.dim}type to filter, enter to run${C.reset}`;
-    out += title;
-    out += ' '.repeat(Math.max(0, width - this._visualLen(title)));
-    out += C.reset;
-
-    if (this.commandFiltered.length === 0) {
-      out += ANSI.move(left, top + 1);
-      out += `\x1b[48;5;238m`;
-      const empty = `  ${C.warn}No commands match "${this.commandFilter}"${C.reset}  ${C.dim}backspace to edit, esc to close${C.reset}`;
-      out += empty;
-      out += ' '.repeat(Math.max(0, width - this._visualLen(empty)));
-      out += C.reset;
-    }
-
-    // Items
+    const nameCol = Math.min(34, Math.max(18, Math.floor(inner * 0.32)));
     for (let i = 0; i < maxVisible; i++) {
-      const cmd = this.commandFiltered[i + this.commandScrollOffset];
-      if (!cmd) break;
-      const isSelected = (i + this.commandScrollOffset) === this.commandIndex;
-
-      out += ANSI.move(left, top + 1 + i);
-
-      const usage = `/${cmd.usage || cmd.name}`;
-      const usageWidth = Math.min(30, Math.max(16, Math.floor(width * 0.28)));
-      const usagePlain = this._truncate(usage, usageWidth);
-      const aliasText = cmd.aliases && cmd.aliases.length ? ` aliases: ${cmd.aliases.join(', ')}` : '';
-      const descPlain = this._truncate(`${cmd.description || ''}${aliasText}`, Math.max(12, width - usageWidth - 8));
-      if (isSelected) {
-        out += `\x1b[48;5;31m`;
-        const line = `  ${C.bold}${C.text}${usagePlain.padEnd(usageWidth)}${C.reset} ${C.dim}${descPlain}${C.reset}`;
-        out += line;
-        out += ' '.repeat(Math.max(0, width - this._visualLen(line)));
-        out += C.reset;
-      } else {
-        const line = `  ${C.accent}${usagePlain.padEnd(usageWidth)}${C.reset} ${C.dim}${descPlain}${C.reset}`;
-        out += line;
-        out += ' '.repeat(Math.max(0, width - this._visualLen(line)));
+      const cmd = items[i + this.commandScrollOffset];
+      const y = top + 1 + i;
+      if (!cmd) {
+        out += row(y, BG, i === 0 && !items.length
+          ? ` ${C.warn}No commands match "${this.commandFilter}"${C.reset}  ${C.dim}backspace to edit · esc to close${C.reset}`
+          : '');
+        continue;
       }
+      const isSelected = (i + this.commandScrollOffset) === this.commandIndex;
+      const name = slash(cmd.name);
+      const usage = slash(cmd.usage || cmd.name);
+      const args = usage.startsWith(name) ? usage.slice(name.length).trim() : '';
+      // Name and arguments fill at most nameCol - 1 columns, so every
+      // description starts in the same column.
+      const argRoom = Math.max(0, nameCol - 1 - this._visualLen(name) - 1);
+      const argText = args && argRoom > 3 ? this._truncateVisual(args, argRoom) : '';
+      const left1 = `${C.bold}${isSelected ? C.text : C.accent}${name}${C.reset}${argText ? ` ${C.dim}${argText}${C.reset}` : ''}`;
+      const pad1 = ' '.repeat(Math.max(1, nameCol - this._visualLen(name) - (argText ? this._visualLen(argText) + 1 : 0)));
+      const badge = cmd.plugin ? `  ${C.dim}⧉ ${cmd.plugin}${C.reset}` : '';
+      const descRoom = Math.max(10, inner - nameCol - 3 - (cmd.plugin ? this._visualLen(cmd.plugin) + 4 : 0));
+      const desc = this._truncate(String(cmd.description || '').replace(/\s+/g, ' '), descRoom);
+      out += row(y, isSelected ? '\x1b[48;5;31m' : BG, ` ${left1}${pad1}${C.text}${desc}${C.reset}${badge}`);
     }
 
-    // Hint bar
-    out += ANSI.move(left, top + 1 + maxVisible);
-    out += `\x1b[48;5;24m`;
-    const total     = this.commandFiltered.length;
+    // The selected command in full.
+    const current = items[this.commandIndex];
+    if (current) {
+      const aliases = current.aliases && current.aliases.length ? `  ${C.dim}aliases: ${current.aliases.map(slash).join(', ')}${C.reset}` : '';
+      const from = current.plugin ? `  ${C.dim}from the ${current.plugin} plugin${C.reset}` : '';
+      out += row(top + 1 + maxVisible, DETAIL, ` ${C.ok}▸${C.reset} ${C.bold}${C.accent}${slash(current.usage || current.name)}${C.reset}${aliases}${from}`);
+      out += row(top + 2 + maxVisible, DETAIL, `   ${C.text}${String(current.description || '').replace(/\s+/g, ' ')}${C.reset}`);
+    } else {
+      out += row(top + 1 + maxVisible, DETAIL, '');
+      out += row(top + 2 + maxVisible, DETAIL, '');
+    }
+
+    const total     = items.length;
     const canScroll = total > maxVisible;
-    const arrowUp   = canScroll && this.commandIndex > 0
-                      ? `${C.accent}▲${C.reset}` : `${C.dim}▲${C.reset}`;
-    const arrowDown = canScroll && this.commandIndex < total - 1
-                      ? `${C.accent}▼${C.reset}` : `${C.dim}▼${C.reset}`;
+    const arrowUp   = canScroll && this.commandIndex > 0 ? `${C.accent}▲${C.reset}` : `${C.dim}▲${C.reset}`;
+    const arrowDown = canScroll && this.commandIndex < total - 1 ? `${C.accent}▼${C.reset}` : `${C.dim}▼${C.reset}`;
     const posInfo   = canScroll ? `  ${C.dim}${this.commandIndex + 1}/${total}${C.reset}` : '';
     const hint = total === 0
-      ? `  ${C.dim}backspace edit${C.reset}  ${C.dim}esc close${C.reset}`
-      : canScroll
-        ? `  ${arrowUp} ${arrowDown}  ${C.dim}↑↓ navigate${C.reset}  ${C.dim}↵ run/open${C.reset}  ${C.dim}esc close${C.reset}${posInfo}`
-        : `  ${C.dim}↑↓ navigate${C.reset}  ${C.dim}↵ run/open${C.reset}  ${C.dim}esc close${C.reset}`;
-    out += hint;
-    out += ' '.repeat(Math.max(0, width - this._visualLen(hint)));
-    out += C.reset;
+      ? ` ${C.dim}backspace edit · esc close${C.reset}`
+      : ` ${canScroll ? `${arrowUp} ${arrowDown}  ` : ''}${C.dim}↑↓ navigate · ↵ run · esc close${C.reset}${posInfo}`;
+    out += row(top + 3 + maxVisible, BAR, hint);
 
     return out;
   }
 
   // ─── Sub-menu rendering ───────────────────────────────────────────────────
+  /**
+   * How wide the submenu frame is. Command output gets more room than a list
+   * of choices: it is text to read, and every column saved is a line less
+   * wrapped. native-ui wraps the output to fit this same width.
+   */
+  subMenuWidth(kind = this.subMenuTitle) {
+    const cap = kind === 'output' ? 140 : 96;
+    return Math.max(40, Math.min(this.cols - 8, cap));
+  }
+
+  /**
+   * One line of command output in its colours: a title in bold accent, an
+   * entry's name in bold with its details dim, meta and hints dim, the rest
+   * plain. See src/app/output-style.js for how a line's kind is read.
+   */
+  _styledOutputLine(label, style = {}) {
+    switch (style.kind) {
+      case 'title':
+        return `${C.bold}${C.accent}${label}${C.reset}`;
+      case 'entry': {
+        const { indent = '', marker = '●', name = '', rest = '' } = style.parts || {};
+        return `${indent}${C.ok}${marker}${C.reset} ${C.bold}${C.accent}${name}${C.reset}${C.dim}${rest}${C.reset}`;
+      }
+      case 'meta':
+      case 'hint':
+        return `${C.dim}${label}${C.reset}`;
+      default:
+        return `${C.text}${label}${C.reset}`;
+    }
+  }
+
   _renderSubMenu() {
     if (!this.subMenuOpen || this.subMenuItems.length === 0 || this.apiKeyInputMode) return '';
 
     const items      = this.subMenuFiltered;
-    const maxVisible = Math.min(items.length, this.availableHeight - 4);
-    const width      = Math.max(52, Math.min(this.cols - 8, 96));
+    const maxVisible = Math.max(1, Math.min(items.length, this.availableHeight - 4));
+    // The frame is `width` columns including its two borders; everything
+    // written inside it is cut to `inner`, so no line can reach past the
+    // right border — a long one used to run on across the screen and wrap
+    // into the transcript from column 1.
+    const width      = this.subMenuWidth();
+    const inner      = width - 2;
     const left       = Math.max(1, Math.floor((this.cols - width) / 2));
     const top        = Math.max(2, Math.floor((this.rows - (maxVisible + 3)) / 2));
     const height     = maxVisible + 3;
+    const BORDER     = '\x1b[38;5;244m\x1b[48;5;238m';
+    const row = (y, bg, content) => {
+      const clipped = this._truncateVisual(content, inner);
+      const pad = ' '.repeat(Math.max(0, inner - this._visualLen(clipped)));
+      const keep = String(clipped).replace(/\x1b\[0m/g, `\x1b[0m${bg}`);
+      return ANSI.move(left, y) + `${BORDER}│${C.reset}${bg}${keep}${pad}${C.reset}${BORDER}│${C.reset}`;
+    };
 
     let out = '';
 
     // Shadow (offset)
-    for (let i = 0; i < height; i++) {
-      out += ANSI.move(left + 1, top + i + 1);
+    for (let i = 0; i < height + 1; i++) {
+      out += ANSI.move(left + 1, top + i);
       out += `\x1b[48;5;234m${' '.repeat(width)}\x1b[0m`;
     }
 
-    // Border
-    out += ANSI.move(left, top - 1) + `\x1b[48;5;240m+${'-'.repeat(Math.max(0, width - 2))}+\x1b[0m`;
-    for (let i = 0; i < height; i++) {
-      out += ANSI.move(left, top + i) + `\x1b[48;5;240m|\x1b[0m`;
-      out += ANSI.move(left + width - 1, top + i) + `\x1b[48;5;240m|\x1b[0m`;
-    }
-    out += ANSI.move(left, top + height) + `\x1b[48;5;240m+${'-'.repeat(Math.max(0, width - 2))}+\x1b[0m`;
-
-    // Background (title + search + items + hint)
-    for (let i = 0; i < maxVisible + 3; i++) {
-      out += ANSI.move(left, top + i);
-      out += `\x1b[48;5;238m${' '.repeat(width)}\x1b[0m`;
-    }
+    // Frame
+    out += ANSI.move(left, top - 1) + `${BORDER}╭${'─'.repeat(inner)}╮${C.reset}`;
+    out += ANSI.move(left, top + height) + `${BORDER}╰${'─'.repeat(inner)}╯${C.reset}`;
 
     // Title
-    out += ANSI.move(left, top);
-    out += `\x1b[48;5;24m`;
-    const titleLine = `  ${C.bold}${C.accent}/${this.subMenuTitle}${C.reset}`;
-    out += titleLine;
-    out += ' '.repeat(Math.max(0, width - this._visualLen(titleLine)));
-    out += C.reset;
+    const title = this.subMenuLabel || `/${this.subMenuTitle}`;
+    out += row(top, '\x1b[48;5;24m', ` ${C.bold}${C.accent}${title}${C.reset}`);
 
     // Search bar
-    out += ANSI.move(left, top + 1);
-    out += `\x1b[48;5;238m`;
     const searchLine = this.subMenuFilter
-      ? `  ${C.accent}🔍${C.reset}  ${C.bold}${C.text}${this.subMenuFilter}${C.reset}${C.accent}▋${C.reset}`
-      : `  ${C.accent}🔍${C.reset}  ${C.dim}cerca…${C.reset}${C.dim}▋${C.reset}`;
-    out += searchLine;
-    out += ' '.repeat(Math.max(0, width - this._visualLen(searchLine)));
-    out += C.reset;
+      ? ` ${C.accent}🔍${C.reset} ${C.bold}${C.text}${this.subMenuFilter}${C.reset}${C.accent}▋${C.reset}`
+      : ` ${C.accent}🔍${C.reset} ${C.dim}search…${C.reset}${C.dim}▋${C.reset}`;
+    out += row(top + 1, '\x1b[48;5;238m', searchLine);
 
-    // Items
+    // Items. Output is text to read, so it is not painted in the accent
+    // colour meant for choices.
+    const isOutput = this.subMenuTitle === 'output';
     if (items.length === 0) {
-      out += ANSI.move(1, top + 2);
-      out += ANSI.move(left, top + 2);
-      out += `\x1b[48;5;238m`;
-      const noResult = `  ${C.dim}nessun risultato per "${this.subMenuFilter}"${C.reset}`;
-      out += noResult;
-      out += ' '.repeat(Math.max(0, width - this._visualLen(noResult)));
-      out += C.reset;
+      out += row(top + 2, '\x1b[48;5;238m', ` ${C.dim}no results for "${this.subMenuFilter}"${C.reset}`);
+      for (let i = 1; i < maxVisible; i++) out += row(top + 2 + i, '\x1b[48;5;238m', '');
     } else {
       for (let i = 0; i < maxVisible; i++) {
         const item = items[i + this.subMenuScrollOffset];
-        if (!item) break;
-        const isSelected = (i + this.subMenuScrollOffset) === this.subMenuIndex;
-
-        out += ANSI.move(left, top + 2 + i);
-
-        if (isSelected) {
-          out += `\x1b[48;5;31m`;
-          const label = item.label || item.value || '';
-          const desc  = item.description || '';
-          const line  = `  ${C.bold}${C.text}${label}${C.reset}${desc ? `${C.dim} · ${desc}${C.reset}` : ''}`;
-          out += line;
-          out += ' '.repeat(Math.max(0, width - this._visualLen(line)));
-          out += C.reset;
-        } else {
-          const label = item.label || item.value || '';
-          const desc  = item.description || '';
-          const line  = `  ${C.accent}${label}${C.reset}${desc ? `${C.dim} · ${desc}${C.reset}` : ''}`;
-          out += line;
-          out += ' '.repeat(Math.max(0, width - this._visualLen(line)));
+        if (!item) {
+          out += row(top + 2 + i, '\x1b[48;5;238m', '');
+          continue;
         }
+        const isSelected = (i + this.subMenuScrollOffset) === this.subMenuIndex;
+        // An output line may be empty on purpose (a spacer); falling back to
+        // the item's id painted "line_5" in the middle of the text.
+        const label = isOutput ? String(item.label ?? '') : (item.label || item.value || '');
+        const desc  = item.description || '';
+        const line  = isOutput && item.style
+          ? ` ${this._styledOutputLine(label, item.style)}`
+          : ` ${isSelected ? `${C.bold}${C.text}` : (isOutput ? C.text : C.accent)}${label}${C.reset}${desc ? `${C.dim} · ${desc}${C.reset}` : ''}`;
+        // In output the selection only marks where scrolling is: a quiet
+        // shade, not the bright bar that means "this is what Enter picks".
+        const selectedBg = isOutput ? '\x1b[48;5;240m' : '\x1b[48;5;31m';
+        out += row(top + 2 + i, isSelected ? selectedBg : '\x1b[48;5;238m', line);
       }
     }
 
     // Hint bar
-    out += ANSI.move(left, top + 2 + maxVisible);
-    out += `\x1b[48;5;24m`;
     const total     = items.length;
     const fullTotal = this.subMenuItems.length;
     const canScroll = total > maxVisible;
@@ -2191,13 +2316,11 @@ class TUI {
     const arrowDown = canScroll && this.subMenuIndex < total - 1
                       ? `${C.accent}▼${C.reset}` : `${C.dim}▼${C.reset}`;
     const hint = this.subMenuFilter
-      ? `  ${C.accent}🔍${C.reset} ${C.bold}${C.text}"${this.subMenuFilter}"${C.reset}  ${C.accent}${total}/${fullTotal}${C.reset}  ${C.dim}⌫ cancella${C.reset}  ${canScroll ? `${arrowUp} ${arrowDown}  ${C.dim}${this.subMenuIndex + 1}/${total}${C.reset}  ` : ''}${C.dim}↵ select${C.reset}  ${C.dim}esc chiudi${C.reset}`
+      ? `  ${C.accent}🔍${C.reset} ${C.bold}${C.text}"${this.subMenuFilter}"${C.reset}  ${C.accent}${total}/${fullTotal}${C.reset}  ${C.dim}⌫ delete${C.reset}  ${canScroll ? `${arrowUp} ${arrowDown}  ${C.dim}${this.subMenuIndex + 1}/${total}${C.reset}  ` : ''}${C.dim}↵ select${C.reset}  ${C.dim}esc close${C.reset}`
       : canScroll
-        ? `  ${arrowUp} ${arrowDown}  ${C.dim}↑↓ naviga${C.reset}  ${C.dim}↵ select${C.reset}  ${C.dim}← back${C.reset}  ${C.dim}digita per cercare${C.reset}  ${C.dim}${this.subMenuIndex + 1}/${total}${C.reset}`
-        : `  ${C.dim}↑↓ naviga${C.reset}  ${C.dim}↵ select${C.reset}  ${C.dim}← back${C.reset}  ${C.dim}digita per cercare${C.reset}`;
-    out += hint;
-    out += ' '.repeat(Math.max(0, width - this._visualLen(hint)));
-    out += C.reset;
+        ? `  ${arrowUp} ${arrowDown}  ${C.dim}↑↓ navigate${C.reset}  ${C.dim}↵ select${C.reset}  ${C.dim}← back${C.reset}  ${C.dim}type to search${C.reset}  ${C.dim}${this.subMenuIndex + 1}/${total}${C.reset}`
+        : `  ${C.dim}↑↓ navigate${C.reset}  ${C.dim}↵ select${C.reset}  ${C.dim}← back${C.reset}  ${C.dim}type to search${C.reset}`;
+    out += row(top + 2 + maxVisible, '\x1b[48;5;24m', hint);
 
     return out;
   }
@@ -2514,11 +2637,11 @@ class TUI {
     out += ANSI.move(left, top + 1);
     out += `${C.dim}│${C.reset}${' '.repeat(boxWidth - 2)}${C.dim}│${C.reset}`;
 
-    const msg = ' Uscire? ';
+    const msg = ' Quit? ';
     const padBefore = Math.floor((boxWidth - 2 - msg.length - 4) / 2);
     const padAfter = boxWidth - 2 - msg.length - 4 - padBefore;
     out += ANSI.move(left, top + 1);
-    out += `${C.dim}│${C.reset}${' '.repeat(padBefore)}${C.text}${C.bold}Uscire?${C.reset}${C.dim} [y/N]${C.reset}${' '.repeat(padAfter)}${C.dim}│${C.reset}`;
+    out += `${C.dim}│${C.reset}${' '.repeat(padBefore)}${C.text}${C.bold}Quit?${C.reset}${C.dim} [y/N]${C.reset}${' '.repeat(padAfter)}${C.dim}│${C.reset}`;
 
     out += ANSI.move(left, top + 2);
     out += `${C.dim}│${C.reset}${' '.repeat(boxWidth - 2)}${C.dim}│${C.reset}`;

@@ -43,3 +43,21 @@ test('TUI.INPUT_MAX_ROWS is a sensible cap', () => {
   assert.ok(TUI.INPUT_MAX_ROWS >= 3 && TUI.INPUT_MAX_ROWS <= 10,
     `unexpected INPUT_MAX_ROWS=${TUI.INPUT_MAX_ROWS}`);
 });
+
+test('_wrapInputText breaks between words, not inside them', () => {
+  const rows = tui._wrapInputText('tabelle spezzate su più pagine', 12, 10);
+  assert.deepEqual(rows, ['tabelle ', 'spezzate su ', 'più pagine']);
+  assert.ok(rows.every(row => !row.startsWith(' ')), 'no row starts with a space');
+});
+
+test('a word longer than the row still breaks where it must', () => {
+  assert.deepEqual(tui._wrapInputText('abcdefghij xy', 5, 10), ['abcde', 'fghij ', 'xy']);
+});
+
+test('the input grows with the terminal: six rows on a small one, more on a tall one', () => {
+  const small = Object.assign(Object.create(TUI.prototype), { rows: 24 });
+  const tall = Object.assign(Object.create(TUI.prototype), { rows: 50 });
+  assert.ok(small.inputMaxRows() >= TUI.INPUT_MAX_ROWS);
+  assert.ok(tall.inputMaxRows() > small.inputMaxRows());
+  assert.ok(tall.inputMaxRows() <= 20);
+});

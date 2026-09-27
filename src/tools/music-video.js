@@ -137,10 +137,10 @@ const MINIMAX_CODE_HINTS = {
   // through the Token Plan quota, where video/audio models are unprovisioned
   // (Hs_max 0/0) — so they fail even when the account has Credits. Ref:
   // github.com/MiniMax-AI/MiniMax-MCP/issues/80, MiniMax-AI/cli/issues/173.
-  2056: 'La chiave sembra legata al Token Plan / Coding Plan: MiniMax instrada il video sulla quota del piano (dove i modelli video valgono 0/0) invece che sui tuoi Credits, quindi fallisce anche se hai Credits. Usa una API key che fatturi dai Credits (pay-as-you-go, senza subscription Coding Plan) e verifica che i Credits siano sullo stesso account/GroupId. Se non è separabile è un bug di routing MiniMax: apri un ticket citando "2056 Token Plan Hs_max 0/0 su video_generation".',
-  1008: 'Saldo Credits insufficiente: ricarica su platform.minimax.io → Billing.',
-  1004: 'Autenticazione fallita: la MINIMAX_API_KEY non è valida o è di un account/regione diversa dall\'endpoint.',
-  1002: 'Rate limit raggiunto: riprova tra qualche istante.',
+  2056: 'The key looks tied to a Token Plan / Coding Plan: MiniMax routes video through the plan quota (where video models are 0/0) instead of your Credits, so it fails even when you have Credits. Use an API key billed from Credits (pay-as-you-go, no Coding Plan subscription) and check the Credits are on the same account/GroupId. If the two cannot be separated it is a MiniMax routing bug: open a ticket quoting "2056 Token Plan Hs_max 0/0 on video_generation".',
+  1008: 'Not enough Credits: top up at platform.minimax.io → Billing.',
+  1004: 'Authentication failed: MINIMAX_API_KEY is invalid, or belongs to a different account or region than the endpoint.',
+  1002: 'Rate limit reached: try again in a moment.',
 };
 
 // Billing/quota codes that mean "the batch cannot proceed" (vs a transient

@@ -77,5 +77,5 @@ test('a lite model is still protected from its own garbage', async () => {
 
   await agent.run('spiegami il ledger', emitter);
   assert.equal(errors.length, 1, 'the fallback message must still be shown');
-  assert.match(errors[0], /output incoerente/);
+  assert.match(errors[0], /incoherent output/);
 });
