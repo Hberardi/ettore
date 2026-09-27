@@ -76,6 +76,16 @@ can keep its own advice for that case; a module that is present and throws
 while loading propagates unchanged, because "run npm install" is useless
 advice for something already installed.
 
+### Asking the user
+
+A tool that acts outside the project — publishes, sends, deletes something
+remote — should ask first. Handlers get `ctx.confirm(title, detail)`, which
+shows the user a yes/no question and resolves `{ allowed, reason }`. It is
+never auto-approved by `/auto-approve`, and resolves `allowed: false` with
+`reason: 'non_interactive'` when there is no one to ask. The `github` plugin
+uses it for every pull request, issue and comment it creates. Declare such a
+tool `risk: 'high'`.
+
 ### Permissions
 
 Declare the permissions your plugin needs in `plugin.json`. The user is

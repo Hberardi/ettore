@@ -99,8 +99,11 @@ export class PluginRuntime {
     if (!name || typeof name !== 'string') {
       throw new PluginLoadError('plugin name is required', { plugin: name });
     }
+    // Already running: the same shape as a fresh enable, so a caller reading
+    // `result.manifest.version` does not fall over — `/plugins enable` on an
+    // enabled plugin used to answer "Cannot read properties of undefined".
     if (this._registry.has(name)) {
-      return this._registry.get(name).manifest;
+      return { manifest: this._registry.get(name).manifest, persistedOnDisk: true, alreadyEnabled: true };
     }
 
     // Locate the plugin directory.

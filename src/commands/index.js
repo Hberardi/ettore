@@ -2311,6 +2311,7 @@ Use /approvals clear${kind ? ` ${kind}` : ''} to reset them.`;
         if (!name) return 'Usage: /plugins enable <name>';
         try {
           const result = await runtime.enable(name);
+          if (result.alreadyEnabled) return `Plugin "${name}" is already enabled (v${result.manifest.version}).`;
           if (context.rebuildAgent) {
             try { await context.rebuildAgent(); } catch {}
           }

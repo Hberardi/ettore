@@ -44,9 +44,32 @@ test('a command that throws is an error, not a crash', async () => {
 });
 
 test('a prompt that merely starts with a slash still goes to the model', async () => {
+  const noPluginCommands = async () => ({ registry: { getAllCommands: () => ({}) } });
   for (const prompt of ['/tmp/app.log spiegami questo errore', '/unknown thing', 'connect me', ' /etc/hosts cosa contiene?']) {
-    assert.equal((await runSlashCommand(prompt, { commands })).handled, false, prompt);
+    assert.equal((await runSlashCommand(prompt, { commands, plugins: noPluginCommands })).handled, false, prompt);
   }
+});
+
+test('a plugin command runs from the shell too — `ettore /ci`', async () => {
+  const seen = [];
+  const plugins = async () => ({
+    registry: {
+      getAllCommands: () => ({
+        ci: { handler: async (args, ctx) => { seen.push([args, ctx.extra.workspace]); return { handled: true, output: 'CI on main: success' }; } },
+      }),
+    },
+  });
+  const result = await runSlashCommand('/ci main', { commands, plugins });
+  assert.deepEqual(result, { handled: true, ok: true, output: 'CI on main: success' });
+  assert.deepEqual(seen, [['main', process.cwd()]]);
+});
+
+test('/plugins from the shell gets a plugin runtime to work with', async () => {
+  let given = null;
+  const table = { plugins: { aliases: ['plugin'], handler: async (_args, ctx) => { given = ctx.pluginRuntime; return 'ok'; } } };
+  const runtime = { list: () => [] };
+  await runSlashCommand('/plugins list', { commands: table, plugins: async () => ({ runtime, registry: {} }) });
+  assert.equal(given, runtime);
 });
 
 test('the real command table is used by default', async () => {

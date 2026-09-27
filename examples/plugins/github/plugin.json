@@ -1,0 +1,10 @@
+{
+  "name": "github",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "main": "index.js",
+  "description": "GitHub from the agent: CI runs and why they failed — the failing tests pulled out of the job log — pull requests, issues, and, with your confirmation each time, opening a PR, filing an issue or commenting. Uses the GitHub CLI (gh).",
+  "author": "ettore",
+  "license": "MIT",
+  "permissions": ["shell:exec", "network:https"]
+}

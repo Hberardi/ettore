@@ -1,4 +1,4 @@
-import { toolHandlers, toolDefinitions, setToolAbortSignal, setToolWorkspaceRoot, setAgentTodoSink, setSubagentRunner, runWithToolAbortSignal, validateToolArgs, coerceToolArgsToSchema } from '../tools/index.js';
+import { toolHandlers, toolDefinitions, confirmWithUser, setToolAbortSignal, setToolWorkspaceRoot, setAgentTodoSink, setSubagentRunner, runWithToolAbortSignal, validateToolArgs, coerceToolArgsToSchema } from '../tools/index.js';
 import { EventEmitter, setMaxListeners as setTargetMaxListeners } from 'events';
 import { createHash } from 'crypto';
 import { stat } from 'fs/promises';
@@ -500,6 +500,9 @@ export class Agent {
             workspace: this._workdir,
             agentMode: this.mode,
             safetyProfile: this.safetyProfile,
+            // For a plugin tool that acts outside the project — publishing,
+            // posting — to ask first. Resolves { allowed, reason }.
+            confirm: (title, detail) => confirmWithUser({ title, detail }),
           }),
         });
       }

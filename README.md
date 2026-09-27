@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.13.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.14.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -28,7 +28,7 @@ What changed in each release is in the [changelog](https://github.com/Hberardi/e
 - 🔍 **Delegated search** - `explore` answers one question about the codebase in a separate read-only context and returns a short report with `file:line` references; the greps and full-file reads behind it never enter the main conversation
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn, and its steps drive the progress panel and the auto-continue, so a plan left half-done is resumed instead of dropped
 - ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev reads each request before the turn (asks you first when it is ambiguous, plans only when the work needs it, picks the tools and the reasoning effort the turn will actually use, and runs the `explore` sub-agent — several in parallel for independent parts — when a codebase-wide search is needed), watches the turn while it runs and steps in when it goes round in circles, keeps what the context compression was about to throw away, switches to a working tool when one is blocked, asks before risky shell commands the regex does not know, and judges each finished turn — one line per turn in the chat; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
-- 🧩 **Nine plugins included** - PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts, and a security-tool wrapper for authorised testing (`kali`) — installed with `/plugins install`, and you can write your own
+- 🧩 **Ten plugins included** - GitHub (CI failures pulled out of the logs, pull requests, issues), PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts, and a security-tool wrapper for authorised testing (`kali`) — installed with `/plugins install`, and you can write your own
 
 ## Installation
 
@@ -702,7 +702,7 @@ check instead of doing the work.
 
 ## Plugins
 
-ETTORE ships nine plugins and can load your own. A plugin adds **tools** the
+ETTORE ships ten plugins and can load your own. A plugin adds **tools** the
 agent can call and **slash commands** you can type — they merge with the
 built-in set rather than replacing it.
 
@@ -720,6 +720,7 @@ built-in set rather than replacing it.
 
 | Plugin | Adds | Needs |
 |---|---|---|
+| **github** | GitHub from the agent: the CI runs of a branch and **why they failed** — the failing tests and their errors pulled out of the job logs (Node, pytest, Jest, Go) instead of thousands of log lines — pull requests, issues; `/ci` and `/pr`. Opening a PR, filing an issue or commenting asks you every time, whatever `/auto-approve` says | the [GitHub CLI](https://cli.github.com), signed in |
 | **pgadmin** | PostgreSQL from the terminal: list and describe databases, schemas, tables, views, indexes, constraints and functions; run queries; `EXPLAIN`/`ANALYZE`; `pg_dump` and `pg_restore`, the latter through a local web wizard | `pg` |
 | **excel-full** | Read, create and edit `.xlsx`: formulas, cell styles, number formats, sheet management, charts, one-page reports | `exceljs`, `pureimage` |
 | **edi-ftp** | EDI files over FTP, FTPS or SFTP: list a remote directory, fetch or peek a file, inspect an undocumented tracciato, and parse fixed-width, delimited or EDIFACT/X12 into records — with a saved layout or with the structure inferred. Connection profiles are stored locally, password encrypted at rest | — for FTP/FTPS; `ssh2`, installed separately, for SFTP |
@@ -806,8 +807,11 @@ export const tools = {
 
 It is an ES module: use `import`, and `createRequire(import.meta.url)` if you
 need to reach an optional dependency. Handlers receive a controlled `ctx`
-(`{ plugin, tool, signal, workspace, agentMode, safetyProfile }`) and never see
-the agent's internals. `examples/plugins/README.md` has the full guide and the
+(`{ plugin, tool, signal, workspace, agentMode, safetyProfile, confirm }`) and
+never see the agent's internals. `await ctx.confirm(title, detail)` asks the
+user a yes/no question and resolves `{ allowed }` — for a tool that acts outside
+the project, like publishing to a service; it is never auto-approved, and with
+no one at the keyboard the answer is no. `examples/plugins/README.md` has the full guide and the
 reserved tool names a plugin cannot override.
 
 **A plugin runs with your privileges.** The `permissions` in the manifest state

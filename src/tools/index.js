@@ -530,6 +530,17 @@ async function requestConfirmation({ title, detail, allowNonInteractive = true }
 }
 
 /**
+ * A yes/no question to the user, for plugins that act outside the project —
+ * publishing a pull request, posting a comment. Handed to plugin tools as
+ * `ctx.confirm`. It never auto-approves: `/auto-approve` covers the project,
+ * and these act somewhere else, in the user's name. With no one at the
+ * keyboard the answer is no.
+ */
+export async function confirmWithUser({ title, detail = '' } = {}) {
+  return requestConfirmation({ title: String(title || 'Confermi?'), detail: String(detail || ''), allowNonInteractive: false });
+}
+
+/**
  * Everything that has to be asked before a shell command runs. Returns the
  * tool result for a command that must not run, or null to run it.
  *

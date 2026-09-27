@@ -8,6 +8,44 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-09-27
+
+### Added — a `github` plugin: why CI failed, pull requests, issues
+
+ETTORE saw the repository on disk and nothing of what happened after a push.
+"CI is red" meant copying a log into the chat, or the agent wading through
+thousands of lines of runner output for the one assertion that failed.
+
+The new bundled plugin (`/plugins install github`, needs the GitHub CLI signed
+in) adds `gh_ci_status` and `gh_ci_failure` — the second fetches the failed
+jobs' logs and returns the failing tests with their errors, reading Node's TAP,
+pytest, Jest, Go and GitHub's `##[error]` annotations, and the log's tail when
+none match — plus `gh_pr_view`, `gh_pr_list`, `gh_issue_list`,
+`gh_issue_view`, and the `/ci` and `/pr` commands. Tried on this repository's
+own failed runs, it returns the three failing tests and their errors in about
+3,000 characters.
+
+Opening a pull request, filing an issue and commenting (`gh_pr_create`,
+`gh_issue_create`, `gh_comment`) act in the user's name outside the project, so
+each asks for confirmation every time, whatever `/auto-approve` says, and is
+refused with no one to ask. gh always runs with an argument array, never
+through a shell.
+
+### Added — plugins can ask the user
+
+Plugin tools get `ctx.confirm(title, detail)`: a yes/no question to the user
+that resolves `{ allowed, reason }`, never auto-approved.
+
+### Fixed
+
+- **A plugin's command did not run from the shell.** `ettore /ci` went to the
+  model as a question; plugin commands are now found there too, and
+  `ettore /plugins install <name>` no longer answers "Plugin system not
+  initialized".
+- **`/plugins enable` on a plugin already enabled failed** with "Cannot read
+  properties of undefined (reading 'version')"; it now says it is already
+  enabled.
+
 ## [1.13.0] — 2026-09-27
 
 ### Changed — `/auto-approve on` asks only before deleting or leaving the project

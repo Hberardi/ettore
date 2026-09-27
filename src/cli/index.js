@@ -84,6 +84,38 @@ export function attachVerboseTokenLogger(em) {
  *
  * @returns {Promise<{handled: boolean, output?: string, ok?: boolean}>}
  */
+let pluginSystem = null;
+
+/**
+ * The plugin registry and runtime for a one-shot run, booted once per process
+ * and only when something needs them — a prompt for the agent, `/plugins`, or
+ * a plugin's own command such as `/ci`.
+ */
+export function bootPluginSystem() {
+  if (!pluginSystem) {
+    pluginSystem = (async () => {
+      const { toolDefinitions, toolHandlers } = await import('../tools/index.js');
+      const { PluginRegistry, PluginRuntime } = await import('../plugins/index.js');
+      const registry = new PluginRegistry({
+        builtInTools: toolDefinitions,
+        builtInHandlers: toolHandlers,
+        builtInCommands: {},
+      });
+      const runtime = new PluginRuntime({ registry });
+      try {
+        const bootReport = await runtime.boot();
+        for (const f of bootReport.failed || []) {
+          process.stderr.write(`⚠ Plugin "${f.name}" failed to load: ${f.error}\n`);
+        }
+      } catch (err) {
+        process.stderr.write(`⚠ Plugin system error: ${err.message}\n`);
+      }
+      return { registry, runtime };
+    })();
+  }
+  return pluginSystem;
+}
+
 /**
  * Hand the terminal to a provider's own sign-in (`claude auth login`) and say
  * whether it succeeded. Only with a person at the keyboard: a script or a pipe
@@ -105,24 +137,34 @@ async function interactiveLogin(provider) {
   });
 }
 
-export async function runSlashCommand(prompt, { commands = null, manager = connectionManager, login = interactiveLogin } = {}) {
+export async function runSlashCommand(prompt, {
+  commands = null,
+  manager = connectionManager,
+  login = interactiveLogin,
+  plugins = bootPluginSystem,
+} = {}) {
   const match = /^\/([a-z][\w-]*)(?:\s+([\s\S]*))?$/i.exec(String(prompt || '').trim());
   if (!match) return { handled: false };
   const table = commands || (await import('../commands/index.js')).builtinCommands;
   const name = match[1].toLowerCase();
   const command = table[name]
     || Object.values(table).find(entry => (entry.aliases || []).includes(name));
-  if (!command?.handler) return { handled: false };
+  if (!command?.handler) return runPluginCommand(name, match[2] || '', plugins);
   const args = match[2] ? match[2].trim().split(/\s+/).filter(Boolean) : [];
+  const context = { connectionManager: manager, oneShot: true };
+  // `/plugins install|enable|…` manages the runtime, so it needs one.
+  if (name === 'plugins' || name === 'plugin') {
+    if (plugins) context.pluginRuntime = (await plugins()).runtime;
+  }
   let result;
   try {
-    result = await command.handler(args, { connectionManager: manager, oneShot: true });
+    result = await command.handler(args, context);
     // What the TUI does, and what the README has always promised: a keyless
     // provider with nobody signed in hands over to its sign-in and connects
     // again, instead of telling the user to go and do it themselves.
     if (name === 'connect' && args[0] && typeof result === 'string' && /Next: sign in/.test(result) && login) {
       if (await login(args[0])) {
-        result = await command.handler(args, { connectionManager: manager, oneShot: true });
+        result = await command.handler(args, context);
       }
     }
   } catch (error) {
@@ -141,6 +183,24 @@ export async function runSlashCommand(prompt, { commands = null, manager = conne
     };
   }
   return { handled: true, ok: true, output: '' };
+}
+
+/**
+ * A plugin's own command given on the command line — `ettore /ci`. Only a
+ * command an enabled plugin registered is taken; anything else goes on to the
+ * model as before.
+ */
+async function runPluginCommand(name, argText, plugins) {
+  if (!plugins) return { handled: false };
+  const { registry } = await plugins();
+  const command = registry?.getAllCommands?.()[name];
+  if (!command?.handler) return { handled: false };
+  const result = await command.handler(String(argText).trim(), {
+    signal: null,
+    extra: { workspace: process.cwd() },
+  });
+  const output = String(result?.output ?? '');
+  return { handled: true, ok: !/^Error:/.test(output), output };
 }
 
 export async function runPrompt(prompt, options = {}) {
@@ -173,24 +233,7 @@ For local models, start Ollama and run /connect ollama.`);
   // logged to stderr so the user knows a plugin is broken without
   // changing the run's exit code — the rest of the prompt proceeds
   // against the built-in tool set.
-  const { toolDefinitions, toolHandlers } = await import('../tools/index.js');
-  const { PluginRegistry, PluginRuntime } = await import('../plugins/index.js');
-  const pluginRegistry = new PluginRegistry({
-    builtInTools: toolDefinitions,
-    builtInHandlers: toolHandlers,
-    builtInCommands: {},
-  });
-  const pluginRuntime = new PluginRuntime({ registry: pluginRegistry });
-  try {
-    const bootReport = await pluginRuntime.boot();
-    if (bootReport.failed.length > 0) {
-      for (const f of bootReport.failed) {
-        process.stderr.write(`⚠ Plugin "${f.name}" failed to load: ${f.error}\n`);
-      }
-    }
-  } catch (err) {
-    process.stderr.write(`⚠ Plugin system error: ${err.message}\n`);
-  }
+  const { registry: pluginRegistry } = await bootPluginSystem();
   config.pluginRegistry = pluginRegistry;
   const client = createClient(config);
   const agent = new Agent(client, config);
