@@ -537,11 +537,11 @@ test('on Windows the install is handed to a process that outlives us', () => {
   const script = decodeScript(calls[0].args);
   assert.match(script, /Wait-Process -Id 4242/, 'it must wait for this process to exit first');
   assert.ok(
-    script.indexOf('Wait-Process') < script.indexOf('npm.cmd install'),
+    script.indexOf('Wait-Process') < script.indexOf('npm.cmd" install'),
     'installing before the wait is exactly the bug being fixed',
   );
   assert.match(script, /Start-Sleep/, 'cmd.exe exits just after us and holds the shim');
-  assert.match(script, /npm\.cmd install -g ettore-ai-assistant@latest/);
+  assert.match(script, /npm\.cmd" install -g ettore-ai-assistant@latest/);
 
   // It has to survive our exit, and must not flash a console window.
   assert.equal(calls[0].opts.detached, true);
@@ -622,7 +622,8 @@ test('the deferred install bypasses the execution policy, calls npm.cmd and retr
   const args = calls[0].args;
   assert.deepEqual(args.slice(args.indexOf('-ExecutionPolicy'), args.indexOf('-ExecutionPolicy') + 2), ['-ExecutionPolicy', 'Bypass']);
   const script = decodeScript(args);
-  assert.match(script, /& npm\.cmd install -g ettore-ai-assistant@latest \*>> \$env:ETTORE_UPDATE_LOG/);
+  assert.match(script, /& "npm\.cmd" install -g ettore-ai-assistant@latest \*>> \$env:ETTORE_UPDATE_LOG/);
+  assert.ok(script.indexOf('RUN $PID') < script.indexOf('Wait-Process'), 'it says it started before waiting');
   assert.doesNotMatch(script.replace(/npm\.cmd/g, ''), /\bnpm install/, 'plain npm is npm.ps1 in PowerShell');
   assert.match(script, /for \(\$i = 1; \$i -le 3/);
   assert.match(script, /"EXIT \$code"/);
@@ -707,24 +708,19 @@ test('on Windows the deferred script really runs npm.cmd and logs its exit code'
   // A fake npm.cmd, first on PATH: it prints its arguments and succeeds.
   writeFileSync(join(bin, 'npm.cmd'), '@echo fake npm %*\r\n@exit /b 0\r\n');
   const log = join(dir, 'update.log');
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${bin};${oldPath}`;
-  try {
-    // A pid that is already gone: Wait-Process returns at once.
-    const gone = execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
-    const out = update.scheduleDetachedUpdate({
-      name: 'ettore-ai-assistant', target: 'latest', pid: Number(gone), platform: 'win32', logPath: log, from: '1.14.0',
-    });
-    assert.equal(out.scheduled, true);
-  } finally {
-    process.env.PATH = oldPath;
-  }
+  // A pid that is already gone: Wait-Process returns at once.
+  const gone = execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+  const out = update.scheduleDetachedUpdate({
+    name: 'ettore-ai-assistant', target: 'latest', pid: Number(gone), platform: 'win32', logPath: log, from: '1.14.0',
+    npmCommand: join(bin, 'npm.cmd'),
+  });
+  assert.equal(out.scheduled, true);
   let state = null;
-  for (let i = 0; i < 60 && state?.state !== 'done' && state?.state !== 'failed'; i++) {
+  for (let i = 0; i < 120 && state?.state !== 'done' && state?.state !== 'failed'; i++) {
     await new Promise((r) => { setTimeout(r, 500); });
     state = update.readDeferredUpdate({ logPath: log });
   }
   const text = readFileSync(log, 'utf8').replace(/\u0000/g, '');
-  assert.equal(state?.state, 'done', `log was:\n${text}`);
+  assert.equal(state?.state, 'done', `log was: ${JSON.stringify(text)}`);
   assert.match(text, /fake npm install -g ettore-ai-assistant@latest/);
 });

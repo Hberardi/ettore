@@ -612,6 +612,8 @@ export function scheduleDetachedUpdate({
   logPath = getDeferredLogPath(),
   now = Date.now(),
   from = readLocalPackage().version,
+  // The npm to run: npm.cmd from PATH, or a full path (tests use a fake).
+  npmCommand = 'npm.cmd',
 } = {}) {
   if (platform !== 'win32') return { scheduled: false, reason: 'only Windows needs the deferred install' };
   const wanted = String(target || 'latest').trim();
@@ -633,12 +635,16 @@ export function scheduleDetachedUpdate({
   // the cmd.exe that launched us, which exits just after we do and is the one
   // actually holding ettore.cmd open. The log path travels in the
   // environment, so no quoting of a user's folder name reaches the script.
+  if (/[\r\n"`$]/.test(String(npmCommand))) return { scheduled: false, reason: `invalid npm path "${npmCommand}"` };
   const script = [
+    // First sign of life: a log with START and no RUN means PowerShell never
+    // got going; RUN and no EXIT, that npm is still at work (or hung).
+    '"RUN $PID" | Out-File -FilePath $env:ETTORE_UPDATE_LOG -Append -Encoding utf8',
     `Wait-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
     'Start-Sleep -Milliseconds 1500',
     '$code = 1',
     'for ($i = 1; $i -le 3; $i++) {',
-    `  & npm.cmd install -g ${name}@${wanted} *>> $env:ETTORE_UPDATE_LOG`,
+    `  & "${npmCommand}" install -g ${name}@${wanted} *>> $env:ETTORE_UPDATE_LOG`,
     '  $code = $LASTEXITCODE',
     '  if ($code -eq 0) { break }',
     '  Start-Sleep -Seconds 10',
@@ -657,6 +663,10 @@ export function scheduleDetachedUpdate({
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
       { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, ETTORE_UPDATE_LOG: logPath } },
     );
+    // A missing powershell.exe is reported as an event, not thrown.
+    child.on?.('error', (error) => {
+      try { writeFileSync(logPath, `\nSPAWN ERROR ${String(error?.message || error)}\nEXIT -1\n`, { flag: 'a' }); } catch { /* nowhere to say it */ }
+    });
     child.unref?.();
     return { scheduled: true, log: logPath };
   } catch (error) {
@@ -714,7 +724,7 @@ export function readDeferredUpdate({ logPath = getDeferredLogPath(), now = Date.
   }
   const code = Number(exit[1]);
   if (code === 0) return { state: 'done', target, from };
-  const lines = clean.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^(START|EXIT) /.test(l));
+  const lines = clean.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^(START|EXIT|RUN) /.test(l));
   const detail = lines.find((l) => /npm (ERR!|error)|EBUSY|EPERM|EACCES|disabled on this system|not recognized/i.test(l))
     || lines.at(-1) || '';
   return { state: 'failed', target, from, code, detail: detail.slice(0, 200) };
