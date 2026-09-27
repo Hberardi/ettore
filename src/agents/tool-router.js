@@ -319,6 +319,14 @@ export function selectToolDefinitions(definitions = [], context = {}) {
     contextualPriority.push('bash', 'bash_session');
   }
 
+  // Tools the harness insists on this turn: the stand-in Jev chose for one
+  // that will not work here. Ahead of the intent families under the cap —
+  // a suggested tool the model cannot call is not a suggestion.
+  for (const name of context.forceTools || []) {
+    selected.add(name);
+    contextualPriority.unshift(name);
+  }
+
   const maxTools = Math.max(4, Number(context.maxTools) || 16);
   const byName = new Map(definitions.map(tool => [tool.function?.name, tool]));
 

@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.10.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.11.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -27,7 +27,7 @@ What changed in each release is in the [changelog](https://github.com/Hberardi/e
 - ⚡ **Fast on every provider** - requests are shaped so the provider can reuse its prompt cache, context summaries are written by a fast model of the same provider, and `--verbose-tokens` reports time-to-first-token and cached tokens per call
 - 🔍 **Delegated search** - `explore` answers one question about the codebase in a separate read-only context and returns a short report with `file:line` references; the greps and full-file reads behind it never enter the main conversation
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn, and its steps drive the progress panel and the auto-continue, so a plan left half-done is resumed instead of dropped
-- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev reads each request before the turn (asks you first when it is ambiguous, plans only when the work needs it, picks the tools and the reasoning effort the turn will actually use, and runs the `explore` sub-agent — several in parallel for independent parts — when a codebase-wide search is needed), watches the turn while it runs and steps in when it goes round in circles, keeps what the context compression was about to throw away, asks before risky shell commands the regex does not know, and judges each finished turn — one line per turn in the chat; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
+- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev reads each request before the turn (asks you first when it is ambiguous, plans only when the work needs it, picks the tools and the reasoning effort the turn will actually use, and runs the `explore` sub-agent — several in parallel for independent parts — when a codebase-wide search is needed), watches the turn while it runs and steps in when it goes round in circles, keeps what the context compression was about to throw away, switches to a working tool when one is blocked, asks before risky shell commands the regex does not know, and judges each finished turn — one line per turn in the chat; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
 - 🧩 **Nine plugins included** - PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts, and a security-tool wrapper for authorised testing (`kali`) — installed with `/plugins install`, and you can write your own
 
 ## Installation
@@ -589,7 +589,23 @@ Jev is asked about the handful of results actually about to be cut, against the
 goal of the turn; a decisive "still needed" keeps one whole. Each result is
 judged at most once, and only once a batch has piled up.
 
-**9. It watches the turn while it runs.** Every eight tool calls, after two
+**9. It swaps a tool that will not work for one that will.** A tool can be
+unusable for the whole turn rather than unlucky: ripgrep is not installed, a
+browser cannot start, the shell session died, a call times out every time. The
+model used to retry the same call or report it could not do the job, while a
+tool that would have worked sat in the same list. When a tool fails that way,
+Jev picks a stand-in from a list ETTORE knows to be sound — `bash` running `rg`
+for `grep`, the test command for `run_tests`, OCR for a PDF with no text layer —
+and the note lands in that tool's result, where the model reads it; the
+stand-in is added to the turn's tools if it was not there. A failure that is an
+answer — a file that does not exist, a failing test, a wrong argument — is left
+alone, and a plan-mode turn is only ever handed read-only stand-ins.
+
+```
+◆ Jev (310ms) — `run_tests` non funziona qui: passo a `bash`
+```
+
+**10. It watches the turn while it runs.** Every eight tool calls, after two
 batches that all failed, or when one call keeps coming back, Jev is shown the
 last ten calls and asked whether the agent is going round in circles, stuck on
 the same error, or working on something the request did not ask for. The first
@@ -600,7 +616,7 @@ after that, the tools are taken away and the turn closes with what it has.
 ◆ Jev (380ms) — dopo 9 tool l'agente gira a vuoto: gli chiedo di cambiare strada
 ```
 
-**10. It reads shell commands before they run.** The `bash` tools already ask
+**11. It reads shell commands before they run.** The `bash` tools already ask
 before `rm -rf`, `git push --force`, `sudo` and the other spellings a regex
 knows. Jev reads what a command would *do*, so `Remove-Item -Recurse -Force`,
 `find … -delete`, `curl … | sh` or `> config.json` get the same question. It
@@ -613,7 +629,7 @@ about the approach, the request, seven tool families and six skills costs one
 round trip. The pre-turn call runs only for a fresh, non-trivial build request —
 never for a continuation, a short message, or a lite model.
 
-Items 2 to 10 exist only with Jev on. They are reached through a decisive
+Items 2 to 11 exist only with Jev on. They are reached through a decisive
 verdict, and there is no verdict when Jev is off, unreachable or unsure.
 
 ### Checking it is really working

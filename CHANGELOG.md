@@ -8,6 +8,31 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-09-27
+
+### Added — Jev swaps a blocked tool for one that works
+
+A tool can be unusable for the whole turn rather than unlucky: ripgrep is not
+installed, a browser cannot start, the shell session died, a call times out
+every time. The harness retried a transient error and then handed the model
+`Error: …`, and the model retried the same call or reported that it could not
+do the job while a tool that would have worked sat in the same tool list.
+
+With Jev on, a failure that says the tool itself could not run — a missing
+program (`spawn rg ENOENT`, `command not found`), a timeout, a permission
+error, an unknown tool — gets a stand-in chosen by Jev from a list ETTORE knows
+to be sound: `bash` running the platform search for `grep`, the project's test
+command for `run_tests`, OCR for a PDF with no text layer, a real browser for a
+fetch that cannot get through. The note is appended to that tool's result,
+where the model reads it, and the stand-in is added to the turn's tools when it
+was not already there. Jev may also answer that nothing fits.
+
+A failure that is an answer is left alone — a file that does not exist
+(`ENOENT: no such file or directory, open …` is the model's path, not a missing
+program), a failing test, a wrong argument — because routing around it would
+hide it. Each distinct failure is judged once per turn, and a plan-mode turn is
+only ever handed read-only stand-ins.
+
 ## [1.10.0] — 2026-09-24
 
 ### Added — Jev decides what a turn costs, not only whether it was done

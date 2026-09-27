@@ -1353,6 +1353,11 @@ export async function startApp(options = {}) {
     if (shown.length) pushJev(`(${ms}ms) — ${shown.join(' · ')}`);
   });
 
+  // A tool could not run here and Jev named the one to use instead.
+  emitter.on('jevFallback', ({ tool, pick, ms }) => {
+    pushJev(`(${ms}ms) — \`${tool}\` non funziona qui: passo a \`${pick}\``);
+  });
+
   // Jev kept some tool results whole that the compressor was about to cut.
   emitter.on('jevKeep', ({ kept, judged, ms }) => {
     pushJev(`(${ms}ms) — compressione: tengo ${kept} risultat${kept === 1 ? 'o' : 'i'} su ${judged} che servono ancora`);

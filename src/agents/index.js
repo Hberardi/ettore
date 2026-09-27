@@ -70,8 +70,15 @@ import { shortenPath } from '../utils/platform.js';
 // At most this many sub-agents explore at once: three model streams is already
 // three times the tokens per second, and past that the reports stop fitting.
 const PARALLEL_EXPLORE_MAX = 3;
+// Stand-ins a plan-mode turn may be handed: it promised to read and not to
+// change anything, and being stuck is not a reason to break that.
+const PLAN_SAFE_FALLBACKS = new Set([
+  'read', 'list_dir', 'glob', 'grep', 'repo_map', 'repo_find_symbol',
+  'read_pdf', 'read_doc', 'webfetch', 'websearch', 'browser_check', 'audio_transcribe',
+]);
 import { judgePreTurn, judgeTurn, resolveVerdict } from '../jev/turn-judge.js';
 import { judgeContextKeep, MIN_CANDIDATES } from '../jev/context-keep.js';
+import { alternativesFor, fallbackNote, judgeToolFallback, looksBlocked } from '../jev/tool-fallback.js';
 import {
   createProgressGuardState,
   decideProgressAction,
@@ -1372,6 +1379,60 @@ export class Agent {
   }
 
   /**
+   * When a tool will not work here, the note telling the model which tool to
+   * use instead — or null, which leaves the failure exactly as it was.
+   *
+   * Only for a failure that says the tool itself could not run: a wrong path,
+   * a bad argument or a failing test is an answer, and routing around it would
+   * hide it. Each distinct failure is judged once per turn, and the chosen
+   * stand-in is added to the turn's tool list so the model can actually call
+   * it. See src/jev/tool-fallback.js.
+   */
+  async _jevToolFallback(call, output, emitter, signal = null) {
+    if (!looksBlocked(output)) return null;
+    const client = getJevClient();
+    if (!client) return null;
+    if (!this._jevFallbackAsked) this._jevFallbackAsked = new Map();
+    const key = `${call.name}:${String(output).replace(/\s+/g, ' ').slice(0, 120)}`;
+    if (this._jevFallbackAsked.has(key)) return this._jevFallbackAsked.get(key);
+
+    const handlers = this._getAllToolHandlers();
+    const routed = new Set(this.workingMemory.routedTools || []);
+    const candidates = alternativesFor(call.name)
+      // A stand-in has to exist here, and in plan mode it has to be one of the
+      // tools that mode is allowed to have — the promise not to change
+      // anything outranks getting unstuck.
+      .filter(alt => handlers[alt.name])
+      .filter(alt => this.mode !== 'plan' || PLAN_SAFE_FALLBACKS.has(alt.name));
+    if (!candidates.length) {
+      this._jevFallbackAsked.set(key, null);
+      return null;
+    }
+
+    const { pick, confidence, ms, error } = await judgeToolFallback(client, {
+      goal: this.workingMemory.goal,
+      tool: call.name,
+      args: call.args,
+      error: output,
+      candidates,
+    }, { signal });
+    if (error) this._debugLog(emitter, 'jev.fallback_unavailable', { error });
+    if (!pick) {
+      this._jevFallbackAsked.set(key, null);
+      return null;
+    }
+    const note = fallbackNote(call.name, pick);
+    this._jevFallbackAsked.set(key, note);
+    if (!routed.has(pick.name)) {
+      this._forcedTools = this._forcedTools || new Set();
+      this._forcedTools.add(pick.name);
+    }
+    emitter?.emit('jevFallback', { tool: call.name, pick: pick.name, confidence, ms });
+    this._debugLog(emitter, 'jev.tool_fallback', { tool: call.name, pick: pick.name, confidence, ms });
+    return note;
+  }
+
+  /**
    * Which tool results the next elision must leave whole, or null.
    *
    * Asked only about results that are actually about to be cut, only once a
@@ -1614,6 +1675,9 @@ export class Agent {
     this._jevPreTurn = null;
     this._jevDifficulty = null;
     this._jevFamilies = null;
+    // Stand-ins Jev chose for tools that would not work; see _jevToolFallback.
+    this._forcedTools = new Set();
+    this._jevFallbackAsked = new Map();
     if (planningEnabled) {
       this.messages.push({ role: 'user', content: PLANNING_REMINDER });
       this._planningActive = true;
@@ -1885,6 +1949,7 @@ export class Agent {
           verificationNeeded: editIntentLikely,
           maxTools: this.maxToolsPerRequest,
           families: this._jevFamilies || null,
+          forceTools: this._forcedTools?.size ? [...this._forcedTools].sort() : null,
           includePluginTools: Boolean(this._pluginRegistry),
           editIntentSticky: this._editIntentActive,
         };
@@ -2803,6 +2868,11 @@ export class Agent {
           imageAttachment = { ...output.attachment, sourceUrl: output.sourceUrl };
           output = output.message;
         }
+        // A tool that cannot run here is a dead end the model used to sit in,
+        // retrying the same call or reporting it could not do the job. Jev
+        // picks the stand-in; the model makes the call.
+        const fallback = await this._jevToolFallback(p, output, emitter, controller.signal);
+        if (fallback) output = `${output}${fallback}`;
         const contextOutput = this._summarizeToolOutputForContext(p.name, p.args, output);
         const summarized = contextOutput !== String(output);
         if (cacheKey && !String(output).startsWith('Error:')) {

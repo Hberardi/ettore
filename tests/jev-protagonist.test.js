@@ -506,3 +506,125 @@ test('parts that depend on each other stay one exploration', async () => {
   }).run('aggiorna login.html, register.html e dashboard.html con il nuovo header', emitter);
   assert.equal(started.length, 1, 'an unsure verdict explores once, as before');
 });
+
+// ── a tool that will not work here ───────────────────────────────────────
+
+test('only a tool that cannot run is routed around, not a failing answer', async () => {
+  const { looksBlocked, alternativesFor } = await import('../src/jev/tool-fallback.js');
+  for (const blocked of [
+    'Error: spawn rg ENOENT',
+    'Error: tool "browser_app" timed out after 30s',
+    'Error: pdftotext not installed',
+    'Error: permission denied',
+    'Unknown tool: repo_map',
+    'out\n[exit code 127]',
+  ]) assert.equal(looksBlocked(blocked), true, blocked);
+
+  for (const answer of [
+    'No matches',
+    'Error: ENOENT: no such file or directory, open \'/tmp/missing.js\'',
+    'FAIL tests/a.test.js\n[exit code 1]',
+    'Error: grep requires a pattern',
+  ]) assert.equal(looksBlocked(answer), false, answer);
+
+  // Only stand-ins the turn actually has.
+  const names = alternativesFor('grep', new Set(['bash'])).map(a => a.name);
+  assert.deepEqual(names, ['bash']);
+  assert.equal(alternativesFor('todo_write').length, 0, 'a tool with no stand-in has none invented for it');
+});
+
+test('judgeToolFallback picks a stand-in only when it is sure', async () => {
+  const { judgeToolFallback, alternativesFor } = await import('../src/jev/tool-fallback.js');
+  const { JevClient } = await import('../src/jev/index.js');
+  const candidates = alternativesFor('grep');
+  const answering = (choice, confidence) => new JevClient({
+    apiKey: 'k',
+    fetchImpl: async () => jsonResponse({
+      model: 'jev-1.13.0',
+      answers: { fallback: { type: 'choice', choice, confidence } },
+      usage: {},
+    }),
+  });
+
+  const sure = await judgeToolFallback(answering('option_0', 0.9), { tool: 'grep', error: 'spawn rg ENOENT', candidates });
+  assert.equal(sure.pick.name, candidates[0].name);
+  const unsure = await judgeToolFallback(answering('option_0', 0.3), { tool: 'grep', error: 'spawn rg ENOENT', candidates });
+  assert.equal(unsure.pick, null, 'below the confidence floor nothing changes');
+  const none = await judgeToolFallback(answering('none', 0.95), { tool: 'grep', error: 'spawn rg ENOENT', candidates });
+  assert.equal(none.pick, null, 'Jev may say no stand-in fits');
+});
+
+test('a blocked tool tells the model what to use instead, and hands it the tool', async () => {
+  await activate();
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.questions.fallback) {
+      // Pick the bash stand-in, whichever position it is in.
+      const key = Object.keys(body.questions.fallback.criteria).find(k => /Use `bash`/.test(body.questions.fallback.criteria[k]));
+      return jsonResponse({ model: 'jev-1.13.0', answers: { fallback: { type: 'choice', choice: key, confidence: 0.92 } }, usage: {} });
+    }
+    return fakeJev({ families: { web: 0.02 } })(_url, init);
+  };
+
+  const originalRunTests = toolHandlers.run_tests;
+  toolHandlers.run_tests = async () => 'Error: tool "run_tests" timed out after 300s';
+  try {
+    let turns = 0;
+    let toolsOnSecondTurn = [];
+    let resultSeen = '';
+    const fallbacks = [];
+    const emitter = new EventEmitter();
+    emitter.on('jevFallback', e => fallbacks.push(e));
+    await agentInBuild({
+      async turn(messages, tools) {
+        turns++;
+        if (turns === 1) {
+          const call = { id: 'g1', type: 'function', function: { name: 'run_tests', arguments: '{}' } };
+          return { type: 'tool_calls', tool_calls: [call], message: { role: 'assistant', content: '', tool_calls: [call] } };
+        }
+        toolsOnSecondTurn = (tools || []).map(t => t.function.name);
+        resultSeen = messages.filter(m => m.role === 'tool').map(m => String(m.content)).join('\n');
+        return { type: 'text', content: 'Ho cercato con bash.' };
+      },
+    }).run('lancia i test del progetto', emitter);
+
+    assert.equal(fallbacks[0]?.tool, 'run_tests');
+    assert.equal(fallbacks[0]?.pick, 'bash');
+    assert.match(resultSeen, /Use `bash` instead/, 'the model reads it where it hit the failure');
+    assert.match(resultSeen, /Do not retry `run_tests`/);
+    assert.ok(toolsOnSecondTurn.includes('bash'), 'a stand-in it cannot call is not a suggestion');
+  } finally {
+    toolHandlers.run_tests = originalRunTests;
+  }
+});
+
+test('with Jev off a blocked tool is left exactly as it was', async () => {
+  const fetchFn = fakeJev();
+  globalThis.fetch = fetchFn;
+  const originalRunTests = toolHandlers.run_tests;
+  toolHandlers.run_tests = async () => 'Error: tool "run_tests" timed out after 300s';
+  try {
+    let turns = 0;
+    let resultSeen = '';
+    const fallbacks = [];
+    const emitter = new EventEmitter();
+    emitter.on('jevFallback', e => fallbacks.push(e));
+    await agentInBuild({
+      async turn(messages) {
+        turns++;
+        if (turns === 1) {
+          const call = { id: 'g1', type: 'function', function: { name: 'run_tests', arguments: '{}' } };
+          return { type: 'tool_calls', tool_calls: [call], message: { role: 'assistant', content: '', tool_calls: [call] } };
+        }
+        resultSeen = messages.filter(m => m.role === 'tool').map(m => String(m.content)).join('\n');
+        return { type: 'text', content: 'Non ci riesco.' };
+      },
+    }).run('lancia i test del progetto', emitter);
+    assert.deepEqual(fallbacks, []);
+    assert.equal(fetchFn.calls.length, 0);
+    assert.match(resultSeen, /timed out after 300s/);
+    assert.doesNotMatch(resultSeen, /Jev/);
+  } finally {
+    toolHandlers.run_tests = originalRunTests;
+  }
+});
