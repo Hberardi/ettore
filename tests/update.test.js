@@ -512,9 +512,15 @@ test('bin/cli.js shows the banner for a deprecated version, not only an outdated
 
 
 // The script travels as -EncodedCommand: base64 of UTF-16LE.
+// It is handed to Start-Process by a launcher: the launcher's -Command
+// carries the -EncodedCommand argument list.
 function decodeScript(args) {
-  assert.equal(args.at(-2), '-EncodedCommand');
-  return Buffer.from(args.at(-1), 'base64').toString('utf16le');
+  assert.equal(args.at(-2), '-Command');
+  const launch = args.at(-1);
+  assert.match(launch, /^Start-Process -FilePath powershell -WindowStyle Hidden -ArgumentList /);
+  const encoded = /'-EncodedCommand','([A-Za-z0-9+/=]+)'/.exec(launch)?.[1];
+  assert.ok(encoded, 'the script travels encoded');
+  return Buffer.from(encoded, 'base64').toString('utf16le');
 }
 
 // Every schedule below writes its log here, never to the real config dir.
@@ -543,8 +549,8 @@ test('on Windows the install is handed to a process that outlives us', () => {
   assert.match(script, /Start-Sleep/, 'cmd.exe exits just after us and holds the shim');
   assert.match(script, /npm\.cmd' install -g ettore-ai-assistant@latest/);
 
-  // It has to survive our exit, and must not flash a console window.
-  assert.equal(calls[0].opts.detached, true);
+  // It has to survive our exit — Start-Process makes it a process of its
+  // own — and must not flash a console window.
   assert.equal(calls[0].opts.stdio[0], 'ignore', 'no stdin to wait on');
   assert.equal(calls[0].opts.windowsHide, true);
 });
@@ -621,6 +627,7 @@ test('the deferred install bypasses the execution policy, calls npm.cmd and retr
   assert.equal(out.log, log);
   const args = calls[0].args;
   assert.deepEqual(args.slice(args.indexOf('-ExecutionPolicy'), args.indexOf('-ExecutionPolicy') + 2), ['-ExecutionPolicy', 'Bypass']);
+  assert.match(args.at(-1), /'-ExecutionPolicy','Bypass'/, 'and so does the PowerShell it starts');
   const script = decodeScript(args);
   assert.match(script, /& 'npm\.cmd' install -g ettore-ai-assistant@latest 2>&1 \| Out-String \| Add-Content -LiteralPath \$log/);
   assert.ok(script.indexOf('"RUN $PID"') < script.indexOf('Wait-Process'), 'it says it started before waiting');

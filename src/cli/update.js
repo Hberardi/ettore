@@ -588,8 +588,8 @@ export function runUpdate({ target = 'latest', stream = true, force = false } = 
  * parent, not by us. POSIX has no such restriction, which is why the same code
  * has always worked on Linux and never on Windows.
  *
- * So the install is handed to a detached PowerShell that waits for this
- * process to exit and then runs npm. The update lands while the user is doing
+ * So the install is handed to a PowerShell of its own — started through
+ * Start-Process — that waits for this process to exit and then runs npm. The update lands while the user is doing
  * something else and the next launch is the new version — automatic, one
  * session later than on POSIX.
  *
@@ -638,8 +638,8 @@ export function scheduleDetachedUpdate({
   if (/[\r\n]/.test(String(logPath))) return { scheduled: false, reason: 'invalid log path' };
   const script = buildDeferredScript({ logPath, pid, npmCommand, name, target: wanted });
 
-  // PowerShell's own output — a parse error, a policy refusal — goes to a
-  // file beside the log rather than nowhere.
+  // The launcher's own output — Start-Process refused, powershell missing —
+  // goes to a file beside the log rather than nowhere.
   let outFd = 'ignore';
   try {
     outFd = openSync(`${logPath}.out`, 'w');
@@ -649,12 +649,20 @@ export function scheduleDetachedUpdate({
   try {
     // -EncodedCommand, not -Command: a multi-line script with quotes in it
     // does not survive the Windows command line intact. Base64 of UTF-16LE
-    // is what PowerShell decodes, with nothing left to quote.
+    // is what PowerShell decodes, with nothing left to quote — and it has no
+    // quote of its own, so it sits safely inside the '…' below.
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    // Started by Start-Process, from a PowerShell that exits right after.
+    // Spawned `detached` from Node, the same script never ran at all on the
+    // Windows CI runner — not one line in its log — while Start-Process runs
+    // it every time, as a process of its own that outlives ETTORE and the
+    // console it was launched from.
+    const launch = 'Start-Process -FilePath powershell -WindowStyle Hidden -ArgumentList '
+      + `'-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand','${encoded}'`;
     const child = spawnFn(
       'powershell',
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
-      { detached: true, stdio: ['ignore', outFd, outFd], windowsHide: true },
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', launch],
+      { stdio: ['ignore', outFd, outFd], windowsHide: true },
     );
     // A missing powershell.exe is reported as an event, not thrown.
     child.on?.('error', (error) => {
