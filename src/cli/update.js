@@ -636,28 +636,7 @@ export function scheduleDetachedUpdate({
   // actually holding ettore.cmd open.
   if (/[\r\n"`$]/.test(String(npmCommand))) return { scheduled: false, reason: `invalid npm path "${npmCommand}"` };
   if (/[\r\n]/.test(String(logPath))) return { scheduled: false, reason: 'invalid log path' };
-  // A PowerShell single-quoted string takes everything literally but the
-  // quote itself, which is doubled. The script is sent encoded (below), so
-  // nothing here passes through the command line's own quoting.
-  const psQuote = (text) => `'${String(text).replace(/'/g, "''")}'`;
-  const script = [
-    `$log = ${psQuote(logPath)}`,
-    // First sign of life: a log with START and no RUN means PowerShell never
-    // got going; RUN and no EXIT, that npm is still at work (or hung).
-    'Add-Content -LiteralPath $log -Value "RUN $PID"',
-    `Wait-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
-    'Start-Sleep -Milliseconds 1500',
-    '$code = 1',
-    'for ($i = 1; $i -le 3; $i++) {',
-    // Piped through Out-String, npm's output is appended as text in the
-    // log's own encoding; `*>>` would switch to UTF-16 halfway down the file.
-    `  & ${psQuote(npmCommand)} install -g ${name}@${wanted} 2>&1 | Out-String | Add-Content -LiteralPath $log`,
-    '  $code = $LASTEXITCODE',
-    '  if ($code -eq 0) { break }',
-    '  Start-Sleep -Seconds 10',
-    '}',
-    'Add-Content -LiteralPath $log -Value "EXIT $code"',
-  ].join('\n');
+  const script = buildDeferredScript({ logPath, pid, npmCommand, name, target: wanted });
 
   // PowerShell's own output — a parse error, a policy refusal — goes to a
   // file beside the log rather than nowhere.
@@ -692,6 +671,37 @@ export function scheduleDetachedUpdate({
     }
   }
 }
+
+/**
+ * The PowerShell that installs the update once `pid` is gone, logging to
+ * `logPath` (see scheduleDetachedUpdate). Callers validate the arguments.
+ */
+export function buildDeferredScript({ logPath, pid, npmCommand = 'npm.cmd', name, target = 'latest' }) {
+  const wanted = target;
+  // A PowerShell single-quoted string takes everything literally but the
+  // quote itself, which is doubled. The script is sent encoded (below), so
+  // nothing here passes through the command line's own quoting.
+  const psQuote = (text) => `'${String(text).replace(/'/g, "''")}'`;
+  return [
+    `$log = ${psQuote(logPath)}`,
+    // First sign of life: a log with START and no RUN means PowerShell never
+    // got going; RUN and no EXIT, that npm is still at work (or hung).
+    'Add-Content -LiteralPath $log -Value "RUN $PID"',
+    `Wait-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
+    'Start-Sleep -Milliseconds 1500',
+    '$code = 1',
+    'for ($i = 1; $i -le 3; $i++) {',
+    // Piped through Out-String, npm's output is appended as text in the
+    // log's own encoding; `*>>` would switch to UTF-16 halfway down the file.
+    `  & ${psQuote(npmCommand)} install -g ${name}@${wanted} 2>&1 | Out-String | Add-Content -LiteralPath $log`,
+    '  $code = $LASTEXITCODE',
+    '  if ($code -eq 0) { break }',
+    '  Start-Sleep -Seconds 10',
+    '}',
+    'Add-Content -LiteralPath $log -Value "EXIT $code"',
+  ].join('\n');
+}
+
 
 /** Where the deferred Windows install writes what happened. */
 export function getDeferredLogPath() {

@@ -737,3 +737,51 @@ test('a quote in the log path is doubled, not left to end the string', () => {
   const script = decodeScript(calls[0]);
   assert.match(script, /^\$log = '[^\n]*o''brien-[^\n]*update\.log'\n/);
 });
+
+// ─── How the deferred script is started, tried for real on Windows ──────────
+// The same script, three ways to start it: run and waited for, spawned
+// detached, and handed to Start-Process by a short-lived PowerShell. They
+// tell apart "the script is wrong" from "the way it is started is".
+
+function windowsFixture() {
+  const dir = mkdtempSync(join(tmpdir(), 'ettore-deferred-how-'));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'npm.cmd'), '@echo fake npm %*\r\n@exit /b 0\r\n');
+  const log = join(dir, 'update.log');
+  writeFileSync(log, 'START latest 2026-09-27T10:00:00.000Z 1.14.0\n');
+  const gone = Number(execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }));
+  const script = update.buildDeferredScript({ logPath: log, pid: gone, npmCommand: join(bin, 'npm.cmd'), name: 'ettore-ai-assistant' });
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return { log, encoded };
+}
+
+async function waitForExit(log, ms = 60000) {
+  const until = Date.now() + ms;
+  let state = null;
+  while (Date.now() < until) {
+    state = update.readDeferredUpdate({ logPath: log });
+    if (state?.state === 'done' || state?.state === 'failed') break;
+    await new Promise((r) => { setTimeout(r, 500); });
+  }
+  return state;
+}
+
+test('windows: the deferred script works when run and waited for', { skip: process.platform !== 'win32' }, async () => {
+  const { log, encoded } = windowsFixture();
+  const { spawnSync } = await import('node:child_process');
+  const r = spawnSync('powershell', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], { encoding: 'utf8', timeout: 60000 });
+  const text = readFileSync(log, 'utf8');
+  assert.equal(update.readDeferredUpdate({ logPath: log })?.state, 'done',
+    `status ${r.status} error ${r.error?.message} stdout ${JSON.stringify(r.stdout)} stderr ${JSON.stringify(r.stderr)} log ${JSON.stringify(text)}`);
+});
+
+test('windows: the deferred script works when handed to Start-Process', { skip: process.platform !== 'win32' }, async () => {
+  const { log, encoded } = windowsFixture();
+  const { spawnSync } = await import('node:child_process');
+  const launch = `Start-Process -FilePath powershell -WindowStyle Hidden -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand','${encoded}'`;
+  const r = spawnSync('powershell', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', launch], { encoding: 'utf8', timeout: 60000 });
+  const state = await waitForExit(log);
+  assert.equal(state?.state, 'done',
+    `launcher status ${r.status} stderr ${JSON.stringify(r.stderr)} log ${JSON.stringify(readFileSync(log, 'utf8'))}`);
+});
