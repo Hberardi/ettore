@@ -13,7 +13,7 @@
 // output the user would have seen if they had run npm themselves.
 
 import { execFile, execFileSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, realpathSync, openSync, closeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -633,35 +633,49 @@ export function scheduleDetachedUpdate({
 
   // Wait-Process returns as soon as our pid is gone; the extra pause covers
   // the cmd.exe that launched us, which exits just after we do and is the one
-  // actually holding ettore.cmd open. The log path travels in the
-  // environment, so no quoting of a user's folder name reaches the script.
+  // actually holding ettore.cmd open.
   if (/[\r\n"`$]/.test(String(npmCommand))) return { scheduled: false, reason: `invalid npm path "${npmCommand}"` };
+  if (/[\r\n]/.test(String(logPath))) return { scheduled: false, reason: 'invalid log path' };
+  // A PowerShell single-quoted string takes everything literally but the
+  // quote itself, which is doubled. The script is sent encoded (below), so
+  // nothing here passes through the command line's own quoting.
+  const psQuote = (text) => `'${String(text).replace(/'/g, "''")}'`;
   const script = [
+    `$log = ${psQuote(logPath)}`,
     // First sign of life: a log with START and no RUN means PowerShell never
     // got going; RUN and no EXIT, that npm is still at work (or hung).
-    '"RUN $PID" | Out-File -FilePath $env:ETTORE_UPDATE_LOG -Append -Encoding utf8',
+    'Add-Content -LiteralPath $log -Value "RUN $PID"',
     `Wait-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
     'Start-Sleep -Milliseconds 1500',
     '$code = 1',
     'for ($i = 1; $i -le 3; $i++) {',
-    `  & "${npmCommand}" install -g ${name}@${wanted} *>> $env:ETTORE_UPDATE_LOG`,
+    // Piped through Out-String, npm's output is appended as text in the
+    // log's own encoding; `*>>` would switch to UTF-16 halfway down the file.
+    `  & ${psQuote(npmCommand)} install -g ${name}@${wanted} 2>&1 | Out-String | Add-Content -LiteralPath $log`,
     '  $code = $LASTEXITCODE',
     '  if ($code -eq 0) { break }',
     '  Start-Sleep -Seconds 10',
     '}',
-    '"EXIT $code" | Out-File -FilePath $env:ETTORE_UPDATE_LOG -Append -Encoding utf8',
+    'Add-Content -LiteralPath $log -Value "EXIT $code"',
   ].join('\n');
 
+  // PowerShell's own output — a parse error, a policy refusal — goes to a
+  // file beside the log rather than nowhere.
+  let outFd = 'ignore';
+  try {
+    outFd = openSync(`${logPath}.out`, 'w');
+  } catch {
+    outFd = 'ignore';
+  }
   try {
     // -EncodedCommand, not -Command: a multi-line script with quotes in it
-    // did not survive the Windows command line intact — on the CI's Windows
-    // runner the log got its START line and npm was never called. Base64 of
-    // UTF-16LE is what PowerShell decodes, with nothing left to quote.
+    // does not survive the Windows command line intact. Base64 of UTF-16LE
+    // is what PowerShell decodes, with nothing left to quote.
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     const child = spawnFn(
       'powershell',
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
-      { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, ETTORE_UPDATE_LOG: logPath } },
+      { detached: true, stdio: ['ignore', outFd, outFd], windowsHide: true },
     );
     // A missing powershell.exe is reported as an event, not thrown.
     child.on?.('error', (error) => {
@@ -671,6 +685,11 @@ export function scheduleDetachedUpdate({
     return { scheduled: true, log: logPath };
   } catch (error) {
     return { scheduled: false, reason: String(error?.message || error) };
+  } finally {
+    // The child has its own copy of the handle.
+    if (typeof outFd === 'number') {
+      try { closeSync(outFd); } catch { /* already closed */ }
+    }
   }
 }
 
@@ -720,7 +739,13 @@ export function readDeferredUpdate({ logPath = getDeferredLogPath(), now = Date.
   const from = start[3] && start[3] !== '?' ? start[3] : null;
   const exit = /EXIT (-?\d+)\s*$/.exec(clean.trim());
   if (!exit) {
-    return now - startedAt > DEFERRED_STALE_MS ? { state: 'lost', target, from } : { state: 'running', target, from, startedAt };
+    if (now - startedAt <= DEFERRED_STALE_MS) return { state: 'running', target, from, startedAt };
+    // What PowerShell itself said, when it said anything (see the .out file).
+    let said = '';
+    try {
+      said = readFileSync(`${logPath}.out`, 'utf8').replace(/[\uFEFF\uFFFD\u0000]/g, '').split(/\r?\n/).map((l) => l.trim()).find(Boolean) || '';
+    } catch { /* nothing */ }
+    return { state: 'lost', target, from, ...(said ? { detail: said.slice(0, 200) } : {}) };
   }
   const code = Number(exit[1]);
   if (code === 0) return { state: 'done', target, from };
@@ -751,7 +776,7 @@ export function planDeferredUpdate({ deferred = null, from, to, name = readLocal
   }
   if (deferred?.state === 'failed' || deferred?.state === 'lost') {
     const why = deferred.state === 'lost'
-      ? 'it never finished'
+      ? `it never finished${deferred.detail ? ` — ${deferred.detail}` : ''}`
       : `npm exited with ${deferred.code}${deferred.detail ? ` — ${deferred.detail}` : ''}`;
     return {
       schedule: true,

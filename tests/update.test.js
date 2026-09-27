@@ -537,15 +537,15 @@ test('on Windows the install is handed to a process that outlives us', () => {
   const script = decodeScript(calls[0].args);
   assert.match(script, /Wait-Process -Id 4242/, 'it must wait for this process to exit first');
   assert.ok(
-    script.indexOf('Wait-Process') < script.indexOf('npm.cmd" install'),
+    script.indexOf('Wait-Process') < script.indexOf("npm.cmd' install"),
     'installing before the wait is exactly the bug being fixed',
   );
   assert.match(script, /Start-Sleep/, 'cmd.exe exits just after us and holds the shim');
-  assert.match(script, /npm\.cmd" install -g ettore-ai-assistant@latest/);
+  assert.match(script, /npm\.cmd' install -g ettore-ai-assistant@latest/);
 
   // It has to survive our exit, and must not flash a console window.
   assert.equal(calls[0].opts.detached, true);
-  assert.equal(calls[0].opts.stdio, 'ignore');
+  assert.equal(calls[0].opts.stdio[0], 'ignore', 'no stdin to wait on');
   assert.equal(calls[0].opts.windowsHide, true);
 });
 
@@ -622,12 +622,12 @@ test('the deferred install bypasses the execution policy, calls npm.cmd and retr
   const args = calls[0].args;
   assert.deepEqual(args.slice(args.indexOf('-ExecutionPolicy'), args.indexOf('-ExecutionPolicy') + 2), ['-ExecutionPolicy', 'Bypass']);
   const script = decodeScript(args);
-  assert.match(script, /& "npm\.cmd" install -g ettore-ai-assistant@latest \*>> \$env:ETTORE_UPDATE_LOG/);
-  assert.ok(script.indexOf('RUN $PID') < script.indexOf('Wait-Process'), 'it says it started before waiting');
+  assert.match(script, /& 'npm\.cmd' install -g ettore-ai-assistant@latest 2>&1 \| Out-String \| Add-Content -LiteralPath \$log/);
+  assert.ok(script.indexOf('"RUN $PID"') < script.indexOf('Wait-Process'), 'it says it started before waiting');
   assert.doesNotMatch(script.replace(/npm\.cmd/g, ''), /\bnpm install/, 'plain npm is npm.ps1 in PowerShell');
   assert.match(script, /for \(\$i = 1; \$i -le 3/);
   assert.match(script, /"EXIT \$code"/);
-  assert.equal(calls[0].opts.env.ETTORE_UPDATE_LOG, log, 'the path travels in the environment, not the script');
+  assert.ok(script.startsWith(`$log = '${log.replace(/'/g, "''")}'`), 'the log path is a literal in the encoded script');
   assert.equal(readFileSync(log, 'utf8'), 'START latest 2026-09-27T10:00:00.000Z 1.14.0\n');
 });
 
@@ -721,6 +721,19 @@ test('on Windows the deferred script really runs npm.cmd and logs its exit code'
     state = update.readDeferredUpdate({ logPath: log });
   }
   const text = readFileSync(log, 'utf8').replace(/\u0000/g, '');
-  assert.equal(state?.state, 'done', `log was: ${JSON.stringify(text)}`);
+  let said = '';
+  try { said = readFileSync(`${log}.out`, 'utf8'); } catch { /* none */ }
+  assert.equal(state?.state, 'done', `log was: ${JSON.stringify(text)}; PowerShell said: ${JSON.stringify(said)}`);
   assert.match(text, /fake npm install -g ettore-ai-assistant@latest/);
+});
+
+test('a quote in the log path is doubled, not left to end the string', () => {
+  const calls = [];
+  update.scheduleDetachedUpdate({
+    name: 'p', target: 'latest', platform: 'win32',
+    logPath: join(mkdtempSync(join(tmpdir(), "ettore-o'brien-")), 'update.log'),
+    spawnFn: (file, args) => { calls.push(args); return { unref() {} }; },
+  });
+  const script = decodeScript(calls[0]);
+  assert.match(script, /^\$log = '[^\n]*o''brien-[^\n]*update\.log'\n/);
 });
