@@ -53,7 +53,11 @@ test('a sub-agent\'s turn is never filed as an experience of the project', async
       workdir: root, contextWindow: 128000, verifyAfterEdit: false,
     }, 'build');
 
+    // The constructor creates .ettore/memory.md and ecosystem.md in the
+    // background; waiting for it keeps that write from racing both the
+    // assertions and the cleanup (ENOTEMPTY on Windows).
     const sub = make();
+    await sub._memoryReady;
     sub._isSubagent = true;
     await sub._learnFromTurn('You are an exploration sub-agent. QUESTION: dove?', 'Sta in src/a.js:1.');
     const journal = () => { try { return readFileSync(join(root, '.ettore', 'ecosystem.md'), 'utf8'); } catch { return ''; } };
@@ -63,6 +67,7 @@ test('a sub-agent\'s turn is never filed as an experience of the project', async
     // the main agent's turn here edits a file and runs the tests, as a real
     // one would.
     const main = make();
+    await main._memoryReady;
     main.workingMemory.toolCalls = {
       'edit:1': { name: 'edit', args: { file_path: 'src/parser.js' }, count: 1 },
       'bash:2': { name: 'bash', args: { command: 'npm test' }, count: 1 },
@@ -90,6 +95,7 @@ test('a turn that ran no tool and taught nothing leaves the journal alone', asyn
       provider: 'test', model: 'gpt-4o', modelCapability: 'full',
       workdir: root, contextWindow: 128000, verifyAfterEdit: false,
     }, 'build');
+    await agent._memoryReady;
     await agent._learnFromTurn('che ore sono?', 'Fatto.');
     let journal = '';
     try { journal = readFileSync(join(root, '.ettore', 'ecosystem.md'), 'utf8'); } catch { /* no journal at all */ }
