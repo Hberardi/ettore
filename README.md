@@ -892,7 +892,8 @@ runs that way, so it never touches the memory of the checkout it runs in).
 The learned playbook (`/ecosystem`) records the turns you ran in the project —
 not the ones the `explore` sub-agent ran on its behalf — and each update
 replaces the file in one step, so two sessions open on the same project cannot
-leave it half-written. If an older version left garbled entries in it, open
+leave it half-written (on Windows, where a file briefly held by another writer
+or the antivirus refuses to be replaced, the step is retried for a moment). If an older version left garbled entries in it, open
 the file `/ecosystem path` points to and delete them, or delete the file: it is
 started afresh on the next turn.
 

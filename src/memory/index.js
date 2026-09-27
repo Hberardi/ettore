@@ -159,11 +159,31 @@ export async function loadEcosystemMemory(projectRoot) {
  * every later system prompt. Writing beside it and renaming over it means a
  * reader sees the old file or the new one, never half of each.
  */
+//
+// Windows refuses a rename over a file that is open at that instant — another
+// writer mid-rename, the antivirus scanning what was just written — with
+// EPERM, EACCES or EBUSY. The lock is gone a few milliseconds later, so the
+// rename is retried for a while before giving up; graceful-fs does the same.
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RENAME_ATTEMPTS = 20;
+
+async function renameWithRetry(from, to) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      if (!RENAME_RETRY_CODES.has(error?.code) || attempt >= RENAME_ATTEMPTS) throw error;
+      await new Promise(resolve => { setTimeout(resolve, Math.min(100, 10 * attempt)); });
+    }
+  }
+}
+
 async function writeFileAtomic(path, content) {
   const temp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
   try {
     await writeFile(temp, content, 'utf-8');
-    await rename(temp, path);
+    await renameWithRetry(temp, path);
   } catch (error) {
     try { await unlink(temp); } catch { /* never written */ }
     throw error;

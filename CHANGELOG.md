@@ -30,6 +30,13 @@ documented under the `Changed` heading rather than the Semantic Versioning
 - **Two Windows-only tests for the `claude.cmd` lookup compared a path with
   mixed separators**, so they failed on a real Windows runner while passing on
   Linux. The code was right; both sides of the comparison are normalised now.
+- **On Windows the one-step replace needs a retry.** Windows refuses to rename
+  over a file that is open at that instant — another writer mid-rename, the
+  antivirus scanning what was just written — with `EPERM`, `EACCES` or `EBUSY`.
+  The rename is retried for a moment before giving up. Without it the journal
+  silently stopped learning on Windows.
+- **A self-critique test wrote to `/tmp/foo.txt`**, which on Windows is the root
+  of the current drive; it uses a temporary directory of its own now.
 
 ## [1.11.1] — 2026-09-27
 

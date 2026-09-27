@@ -51,19 +51,28 @@ function mockClientWithToolCall(toolName, args) {
 }
 
 test('Self-critique: emits critiqueCheck event after a write mutation', async () => {
-  const client = mockClientWithToolCall('write', {
-    file_path: '/tmp/foo.txt',
-    content: 'hello',
-  });
-  const agent = new Agent(client, agentConfig(process.cwd()));
-  const { emitter, critiques } = makeEmitter();
-  await agent.run('write a file', emitter);
-  assert.equal(critiques.length, 1);
-  assert.equal(critiques[0].tool, 'write');
-  assert.equal(critiques[0].passed, true);
-  assert.match(critiques[0].summary, /wrote \/tmp\/foo\.txt/);
-  assert.ok(critiques[0].at);
-  assert.equal(critiques[0].iteration, 1);
+  // A directory of its own: `/tmp/foo.txt` is a POSIX path, which on Windows
+  // lands at the root of the current drive and is shared with anything else
+  // that ever wrote there.
+  const dir = await mkdtemp(join(tmpdir(), 'ettore-critique-'));
+  const target = join(dir, 'foo.txt');
+  try {
+    const client = mockClientWithToolCall('write', {
+      file_path: target,
+      content: 'hello',
+    });
+    const agent = new Agent(client, agentConfig(process.cwd()));
+    const { emitter, critiques } = makeEmitter();
+    await agent.run('write a file', emitter);
+    assert.equal(critiques.length, 1);
+    assert.equal(critiques[0].tool, 'write');
+    assert.equal(critiques[0].passed, true, `the write failed: ${critiques[0].output}`);
+    assert.ok(critiques[0].summary.includes(`wrote ${target}`), critiques[0].summary);
+    assert.ok(critiques[0].at);
+    assert.equal(critiques[0].iteration, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('Self-critique: large content is redacted in the args payload', async () => {
