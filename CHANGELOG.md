@@ -8,6 +8,29 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-09-27
+
+### Changed — `/auto-approve on` asks only before deleting or leaving the project
+
+`/auto-approve on` switched off two prompts, edits and project installs, and
+left every other one in place: any `sudo`, any download or clone, any command
+matching a destructive pattern, any command Jev flagged. With the agent at work
+that was still a question every few steps.
+
+It now follows one rule: ask only before files are deleted — `rm` with any
+flags, `rmdir`, `del`, `Remove-Item`, `find -delete`, `git clean`/`rm`/
+`reset --hard`/`checkout --`/`restore`/`stash drop`, `git push --force` — and
+before anything changes outside the working directory: a write or edit there,
+a redirect or copy into another folder, a download saved elsewhere, `sudo`,
+system package managers, global installs, `curl … | sh`. A new `commands` part
+joins `edits` and `installs` (`/auto-approve commands on|off`); `/auto-approve
+on` sets all three, and a setting saved by an earlier version counts as all
+three. With Jev on, auto-approve asks it exactly this question for commands the
+patterns cannot read. With auto-approve off nothing changes.
+
+Creating a new file outside the working directory used to ask nothing at all,
+even when editing an existing one there did; under auto-approve it now asks.
+
 ## [1.12.0] — 2026-09-27
 
 ### Added — answer the agent's questions in your own words

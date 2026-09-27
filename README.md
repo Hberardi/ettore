@@ -1,7 +1,7 @@
 # ETTORE - Advanced AI CLI Assistant
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.12.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.13.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/node-18+-green" alt="Node.js">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey" alt="Platform">
@@ -245,6 +245,28 @@ For web pages, the agent can discover image URLs with `webfetch` and inspect the
 through its protected `web_image` tool. Redirects and resolved addresses are
 validated to block private-network access.
 
+### Approvals
+
+By default the agent asks before it edits a file, installs a dependency, or runs
+a command that looks destructive. `/auto-approve on` switches that off, with two
+exceptions it keeps asking about every time:
+
+- **Deleting files** — `rm` with any flags, `rmdir`, `del`, `Remove-Item`,
+  `find … -delete`, `git clean`, `git rm`, and throwing work away:
+  `git reset --hard`, `git checkout -- …`, `git restore`, `git stash drop`,
+  `git push --force`.
+- **Changing anything outside the working directory** — a `write` or `edit` on
+  a path outside it, a redirect or `cp`/`mv`/`touch` into another folder, a
+  download saved elsewhere, and anything that changes the machine rather than
+  the project: `sudo`, system package managers, `npm -g`, `curl … | sh`.
+
+Everything else inside the project — edits, new files, builds, tests, project
+installs, `git commit`/`push` — goes ahead without a question. With Jev on, it
+is asked this same question about commands the patterns cannot read (a script
+that deletes, for instance), and adds a confirmation only when it is sure.
+`/auto-approve edits|installs|commands on|off` sets each part on its own, and
+the setting is remembered; an earlier `/auto-approve on` counts as all three.
+
 When the agent needs a decision from you it asks in a small window with its
 suggested answers. Pick one with the arrows and Enter, or just start typing:
 the last line, *✎ or type your own answer*, takes an answer in your words, and
@@ -279,7 +301,7 @@ installed, ETTORE keeps its native PDF and binary-text fallbacks.
 | `/reconnect [provider]` | Re-validate saved keys and reconnect |
 | `/theme <name>` | Switch theme (`default`, `midnight`, `matrix`, `forest`) |
 | `/sidebar [auto\|wide\|narrow\|<n>]` | Width of the right panel: `auto` follows the terminal (about a third of it), `wide` nearly half, `narrow` the old 32 columns, or exactly `n` columns. Saved across sessions. |
-| `/auto-approve [edits\|installs] on\|off` | Skip approval prompts (sensitive commands still prompt) |
+| `/auto-approve [edits\|installs\|commands] on\|off` | Stop asking for approval, except before deleting files and before changing anything outside the working directory ([details](#approvals)) |
 | `/config [key] [value] [--local]` | Show/set configuration; `--local` writes `.ettore/config.json` |
 | `/config max-iterations <1-200> [--local]` | Set the agent loop budget (default: 50) |
 | `/config max-tools <4-28> [--local]` | How many tool schemas reach the model per turn (default: 20) |

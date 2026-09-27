@@ -876,11 +876,17 @@ ${setupHint()}`;
   },
 
   'auto-approve': {
-    description: 'Skip approval prompts for edits and/or project installs',
-    usage: 'auto-approve [on|off|edits on|off|installs on|off|status]',
+    description: 'Stop asking for approval except before deleting files or changing anything outside the working directory',
+    usage: 'auto-approve [on|off|status|edits on|off|installs on|off|commands on|off]',
     aliases: ['aa'],
     handler: async (args) => {
-      const fmt = (s) => `auto-approve  edits: ${s.edits ? 'on' : 'off'}  installs: ${s.installs ? 'on' : 'off'}\n(System installs like sudo/apt/brew and destructive commands like rm -rf / git push --force always still prompt.)`;
+      const fmt = (s) => {
+        const all = s.edits && s.installs && s.commands;
+        return `auto-approve  edits: ${s.edits ? 'on' : 'off'}  installs: ${s.installs ? 'on' : 'off'}  commands: ${s.commands ? 'on' : 'off'}\n`
+          + (all
+            ? 'The agent asks only before deleting files and before changing anything outside the working directory.'
+            : 'With all three on, the agent asks only before deleting files and before changing anything outside the working directory.');
+      };
 
       if (args.length === 0 || /^(status|show)$/i.test(args[0] || '')) {
         return fmt(getAutoApprove());
@@ -896,14 +902,14 @@ ${setupHint()}`;
       };
 
       let next;
-      if (first === 'edits' || first === 'installs') {
+      if (first === 'edits' || first === 'installs' || first === 'commands') {
         const v = parseBool(second);
         if (v === null) return `Usage: /auto-approve ${first} on|off`;
         next = { ...getAutoApprove(), [first]: v };
       } else {
         const v = parseBool(first);
-        if (v === null) return `Usage: /auto-approve on|off  (or: /auto-approve edits on|off, /auto-approve installs on|off)`;
-        next = { edits: v, installs: v };
+        if (v === null) return 'Usage: /auto-approve on|off  (or: /auto-approve edits|installs|commands on|off)';
+        next = { edits: v, installs: v, commands: v };
       }
 
       setAutoApprove(next);
@@ -911,6 +917,7 @@ ${setupHint()}`;
       return `✓ ${fmt(next)}`;
     }
   },
+
   
   config: {
     description: 'Show/set configuration. Use --local to save in project directory (.ettore/config.json)',

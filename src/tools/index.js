@@ -11,6 +11,7 @@ import { uiBridge } from './bridge.js';
 import { runShellCommand } from './shell-run.js';
 import { runWarmShellCommand } from './warm-shell.js';
 import { judgeCommand } from '../jev/command-judge.js';
+import { approvalTitle, isOutsideRoot, shellApprovalReason } from './approval-policy.js';
 import { detachOptions, killProcessTree, resolveBinary, resolvePython, shellInvocation } from '../utils/platform.js';
 import { searchFiles } from './grep-fallback.js';
 import { applyEol, detectEol, toLf } from './line-endings.js';
@@ -148,6 +149,20 @@ const INSTALL_BASH_PATTERNS = [
 
 const installSessionApproval = new Set();
 const editSessionApproval = { all: false };
+// Shell commands under auto-approve: only deletion and changes outside the
+// working directory still ask. See src/tools/approval-policy.js.
+const commandAutoApproval = { all: false };
+
+// The working directory the user granted: the line between "inside the
+// project" and "outside" for the approval rules. Set by the agent for each
+// run; process.cwd() when no agent has said otherwise.
+let toolWorkspaceRoot = null;
+export function setToolWorkspaceRoot(root) {
+  toolWorkspaceRoot = root ? String(root) : null;
+}
+function workspaceRoot() {
+  return toolWorkspaceRoot || process.cwd();
+}
 // Session-wide project-install bypass. Flipped to true either by the user
 // answering "Sì, sempre per questa sessione" once, or by /auto-approve.
 const projectInstallApproval = { all: false };
@@ -162,18 +177,20 @@ export function clearEditSessionApproval() {
 
 // Toggle auto-approve flags from the UI / commands / config bootstrap.
 // `edits` covers write+edit prompts; `installs` covers project-kind installs
-// (npm/pip/yarn/poetry/etc). System installs (sudo, apt, brew) and
-// destructive commands (rm -rf, force push) STILL require explicit confirmation
-// — those have real blast radius beyond the project tree.
-export function setAutoApprove({ edits, installs } = {}) {
+// (npm/pip/yarn/poetry/etc); `commands` covers every other shell prompt. With
+// all three on, the agent asks only before deleting files and before changing
+// anything outside the working directory — see approval-policy.js.
+export function setAutoApprove({ edits, installs, commands } = {}) {
   if (typeof edits === 'boolean') editSessionApproval.all = edits;
   if (typeof installs === 'boolean') projectInstallApproval.all = installs;
+  if (typeof commands === 'boolean') commandAutoApproval.all = commands;
 }
 
 export function getAutoApprove() {
   return {
     edits: editSessionApproval.all === true,
     installs: projectInstallApproval.all === true,
+    commands: commandAutoApproval.all === true,
   };
 }
 
@@ -513,6 +530,73 @@ async function requestConfirmation({ title, detail, allowNonInteractive = true }
 }
 
 /**
+ * Everything that has to be asked before a shell command runs. Returns the
+ * tool result for a command that must not run, or null to run it.
+ *
+ * With `/auto-approve on` it is one rule: ask before deleting files and before
+ * changing anything outside the working directory — Jev, when it is on, is
+ * asked that same question for what the patterns cannot parse. Without it,
+ * the familiar prompts: installs, destructive commands, Jev's general check.
+ */
+async function guardShellCommand(command, workdir) {
+  if (commandAutoApproval.all) {
+    const cwd = workdir || process.cwd();
+    let reason = shellApprovalReason(command, { cwd, root: workspaceRoot() });
+    let title = reason ? approvalTitle(reason) : '';
+    if (!reason) {
+      const verdict = await judgeCommand(command, { cwd, policy: 'auto', signal: getToolAbortSignal() });
+      if (verdict.checked) {
+        uiBridge.emit('jevCommand', { command, value: verdict.value, flagged: verdict.flagged, ms: verdict.ms, cached: Boolean(verdict.cached) });
+      }
+      if (verdict.flagged) {
+        reason = { kind: 'jev', label: 'Jev' };
+        title = `◆ Jev: il comando cancella file o modifica fuori dalla directory di lavoro (${Number(verdict.value).toFixed(2)})`;
+      }
+    }
+    if (!reason) return null;
+    const what = reason.kind === 'delete' ? 'deletes files' : 'changes things outside the working directory';
+    const ok = await requestConfirmation({ title, detail: `$ ${command}`, allowNonInteractive: false });
+    if (ok.allowed) return null;
+    if (ok.reason === 'non_interactive') {
+      return `Blocked: this command ${what} and needs an interactive confirmation. Run it from interactive mode.`;
+    }
+    return `Cancelled by user: refused to run a command that ${what}. Find another way, or ask the user how to proceed.`;
+  }
+
+  const installAction = detectInstallAction(command);
+  if (installAction) {
+    const ok = await requestInstallConfirmation({
+      label: installAction.label,
+      kind: installAction.kind,
+      command,
+    });
+    if (!ok.allowed) {
+      if (ok.reason === 'non_interactive') {
+        return `Blocked: "${installAction.label}" requires interactive confirmation. Run this command from interactive mode.`;
+      }
+      return `Cancelled by user: refused to run "${installAction.label}" command.`;
+    }
+  }
+
+  const danger = detectDestructive(command);
+  if (danger) {
+    const ok = await requestConfirmation({
+      title: `⚠ Comando potenzialmente distruttivo (${danger})`,
+      detail: `$ ${command}`,
+      allowNonInteractive: false,
+    });
+    if (!ok.allowed) {
+      if (ok.reason === 'non_interactive') {
+        return `Blocked: "${danger}" requires interactive confirmation. Run this command from interactive mode.`;
+      }
+      return `Cancelled by user: refused to run "${danger}" command.`;
+    }
+    return null;
+  }
+  return confirmIfJevFlags(command, workdir);
+}
+
+/**
  * The second opinion on a command the regex let through: Jev, when it is on
  * and sure the command could do damage, turns it into a confirmation. Returns
  * the tool result for a refused command, or null to run it. Jev can only add
@@ -613,7 +697,36 @@ function buildEditDiff({ filePath, oldString, newString, fileContent = '', maxBl
   return out.join('\n');
 }
 
+/**
+ * Under auto-approve, a change to a file outside the working directory still
+ * asks: that is one of the two things the user wants to see before it happens.
+ * Returns null whenever the ordinary rules should decide instead — a file
+ * inside the project; auto-approve off, where the ordinary confirmation already
+ * shows the path; or no one at the keyboard to ask.
+ */
+async function confirmOutsideWorkdir({ filePath, diff = '' }) {
+  if (!editSessionApproval.all) return null;
+  if (uiBridge.listenerCount('askUser') === 0) return null;
+  if (!isOutsideRoot(filePath, workspaceRoot())) return null;
+  const answer = await new Promise((resolve) => {
+    uiBridge.emit('askUser', {
+      question: `📁 Modifica fuori dalla directory di lavoro\n${filePath}\n(directory di lavoro: ${workspaceRoot()})${diff ? `\n\n${diff}` : ''}`,
+      options: ['Sì, procedi', 'No, annulla'],
+      resolve,
+    });
+  });
+  if (answer === '__cancelled__' || /^No/i.test(String(answer))) {
+    return { allowed: false, interactive: true, reason: 'cancelled' };
+  }
+  return { allowed: true, interactive: true };
+}
+
 async function requestEditConfirmation({ filePath, oldString, newString, fileContent = '', allowNonInteractive = true }) {
+  const outside = await confirmOutsideWorkdir({
+    filePath,
+    diff: buildEditDiff({ filePath, oldString, newString, fileContent }),
+  });
+  if (outside) return outside;
   if (editSessionApproval.all) return { allowed: true, remembered: true };
   if (uiBridge.listenerCount('askUser') === 0) {
     if (allowNonInteractive) return { allowed: true, interactive: false };
@@ -2049,38 +2162,10 @@ export const toolHandlers = {
 
   async bash({ command, workdir, timeout_ms }) {
     try {
-      const installAction = detectInstallAction(command);
-      if (installAction) {
-        const ok = await requestInstallConfirmation({
-          label: installAction.label,
-          kind: installAction.kind,
-          command,
-        });
-        if (!ok.allowed) {
-          if (ok.reason === 'non_interactive') {
-            return `Blocked: "${installAction.label}" requires interactive confirmation. Run this command from interactive mode.`;
-          }
-          return `Cancelled by user: refused to run "${installAction.label}" command.`;
-        }
-      }
-
-      const danger = detectDestructive(command);
-      if (danger) {
-        const ok = await requestConfirmation({
-          title: `⚠ Comando potenzialmente distruttivo (${danger})`,
-          detail: `$ ${command}`,
-          allowNonInteractive: false,
-        });
-        if (!ok.allowed) {
-          if (ok.reason === 'non_interactive') {
-            return `Blocked: "${danger}" requires interactive confirmation. Run this command from interactive mode.`;
-          }
-          return `Cancelled by user: refused to run "${danger}" command.`;
-        }
-      } else {
-        const refused = await confirmIfJevFlags(command, workdir);
-        if (refused) return refused;
-      }
+      // Installs, destructive commands, Jev — or, under /auto-approve on,
+      // only deletion and changes outside the working directory.
+      const refused = await guardShellCommand(command, workdir);
+      if (refused) return refused;
       const startedAt = Date.now();
       const timeoutMs = Math.max(1000, Math.min(Number(timeout_ms) || 120_000, 600_000));
       const heartbeat = setInterval(() => {
@@ -2146,38 +2231,10 @@ export const toolHandlers = {
       if (typeof command !== 'string' || !command.trim()) {
         return 'Error: bash_session requires a non-empty `command`.';
       }
-      const installAction = detectInstallAction(command);
-      if (installAction) {
-        const ok = await requestInstallConfirmation({
-          label: installAction.label,
-          kind: installAction.kind,
-          command,
-        });
-        if (!ok.allowed) {
-          if (ok.reason === 'non_interactive') {
-            return `Blocked: "${installAction.label}" requires interactive confirmation. Run this command from interactive mode.`;
-          }
-          return `Cancelled by user: refused to run "${installAction.label}" command.`;
-        }
-      }
-
-      const danger = detectDestructive(command);
-      if (danger) {
-        const ok = await requestConfirmation({
-          title: `⚠ Comando potenzialmente distruttivo (${danger})`,
-          detail: `$ ${command}`,
-          allowNonInteractive: false,
-        });
-        if (!ok.allowed) {
-          if (ok.reason === 'non_interactive') {
-            return `Blocked: "${danger}" requires interactive confirmation. Run this command from interactive mode.`;
-          }
-          return `Cancelled by user: refused to run "${danger}" command.`;
-        }
-      } else {
-        const refused = await confirmIfJevFlags(command, workdir);
-        if (refused) return refused;
-      }
+      // Installs, destructive commands, Jev — or, under /auto-approve on,
+      // only deletion and changes outside the working directory.
+      const refused = await guardShellCommand(command, workdir);
+      if (refused) return refused;
 
       const timeoutMs = Math.max(1000, Math.min(Number(timeout_ms) || 120_000, 600_000));
       const session = getBashSession(workdir || process.cwd());
@@ -2436,6 +2493,13 @@ export const toolHandlers = {
             return `Blocked: overwrite/edit requires interactive confirmation. Run this command from interactive mode.`;
           }
           return `Cancelled by user: refused to overwrite ${file_path}.`;
+        }
+      } else {
+        // A new file asks nothing inside the project — but outside the working
+        // directory it does, auto-approve or not.
+        const ok = await confirmOutsideWorkdir({ filePath: file_path });
+        if (ok && !ok.allowed) {
+          return `Cancelled by user: refused to create ${file_path} outside the working directory.`;
         }
       }
       const body = targetEol ? applyEol(content, targetEol) : content;

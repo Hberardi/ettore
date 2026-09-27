@@ -357,9 +357,13 @@ export async function startApp(options = {}) {
   // re-toggle on every session start.
   const savedAutoApprove = getConfig('autoApprove');
   if (savedAutoApprove && typeof savedAutoApprove === 'object') {
+    const bothOn = savedAutoApprove.edits === true && savedAutoApprove.installs === true;
     setAutoApprove({
       edits: savedAutoApprove.edits === true,
       installs: savedAutoApprove.installs === true,
+      // Saved before `commands` existed: `/auto-approve on` wrote edits and
+      // installs only, and meant "stop asking" — which now includes commands.
+      commands: typeof savedAutoApprove.commands === 'boolean' ? savedAutoApprove.commands : bothOn,
     });
   }
 

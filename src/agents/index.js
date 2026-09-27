@@ -1,4 +1,4 @@
-import { toolHandlers, toolDefinitions, setToolAbortSignal, setAgentTodoSink, setSubagentRunner, runWithToolAbortSignal, validateToolArgs, coerceToolArgsToSchema } from '../tools/index.js';
+import { toolHandlers, toolDefinitions, setToolAbortSignal, setToolWorkspaceRoot, setAgentTodoSink, setSubagentRunner, runWithToolAbortSignal, validateToolArgs, coerceToolArgsToSchema } from '../tools/index.js';
 import { EventEmitter, setMaxListeners as setTargetMaxListeners } from 'events';
 import { createHash } from 'crypto';
 import { stat } from 'fs/promises';
@@ -1637,6 +1637,9 @@ export class Agent {
     // triggering MaxListenersExceededWarning.
     try { setTargetMaxListeners(0, controller.signal); } catch {}
     setToolAbortSignal(controller.signal);
+    // The line the approval rules draw: inside this folder the agent works
+    // freely under auto-approve, outside it asks. See approval-policy.js.
+    setToolWorkspaceRoot(this._workdir);
     const workspacePolicy = this.safetyProfile
       ? { root: this._workdir, profile: this.safetyProfile }
       : null;
