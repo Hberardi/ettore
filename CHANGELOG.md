@@ -8,6 +8,8 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-09-29
+
 ### Added — MiniMax-M3.1 Flash Preview
 
 The `minimax` provider now lists `MiniMax-M3.1-Flash-Preview` (1M context,
