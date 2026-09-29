@@ -218,7 +218,7 @@ export const PROVIDER_REGISTRY = [
   {
     id: 'minimax',
     name: 'MiniMax (Token Plan)',
-    description: 'MiniMax-M3 — Coding Plan subscription',
+    description: 'MiniMax-M3, M3.1 — Coding Plan subscription',
     icon: '🎯',
     requiresKey: true,
     keyHint: 'Token Plan API key',

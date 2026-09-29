@@ -46,6 +46,18 @@ test('levels above high are capped to what the OpenAI field accepts', () => {
   assert.deepEqual(reasoningParamsFor('openai', 'gpt-5', 'xhigh'), { reasoning_effort: 'high' });
 });
 
+test('MiniMax-M3.1 gets the whole effort ladder, uncapped', () => {
+  // It thinks at `max` when the field is omitted: capping `max` to `high`
+  // would make the strongest setting weaker than no setting at all.
+  assert.deepEqual(reasoningParamsFor('minimax', 'MiniMax-M3.1-Flash-Preview', 'low'), { reasoning_effort: 'low' });
+  assert.deepEqual(reasoningParamsFor('minimax', 'MiniMax-M3.1-Flash-Preview', 'xhigh'), { reasoning_effort: 'xhigh' });
+  assert.deepEqual(reasoningParamsFor('minimax', 'MiniMax-M3.1-Flash-Preview', 'max'), { reasoning_effort: 'max' });
+  // No setting, no field: the API's own default (max) applies.
+  assert.deepEqual(reasoningParamsFor('minimax', 'MiniMax-M3.1-Flash-Preview', null), {});
+  // M3 does not take the field at all.
+  assert.deepEqual(reasoningParamsFor('minimax', 'MiniMax-M3', 'low'), {});
+});
+
 test('no effort is sent where it would switch thinking on or is not understood', () => {
   // Hybrid or non-reasoning models: any effort would enable thinking, or 400.
   assert.deepEqual(reasoningParamsFor('openrouter', 'anthropic/claude-sonnet-4.5', 'low'), {});

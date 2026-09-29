@@ -148,10 +148,13 @@ triggered it.
 
 `effort` reaches more than Claude: it is sent as `reasoning_effort` to OpenAI
 o-series and GPT-5, to gpt-oss wherever it is hosted, and to Gemini 2.5+, and
-as OpenRouter's `reasoning` field for the same models routed through it. It is
-deliberately not sent to hybrid models, where any effort at all switches
-thinking *on* and would make a `low` request slower than no setting at all. An
-endpoint that refuses the field gets the request again without it.
+as OpenRouter's `reasoning` field for the same models routed through it. On
+MiniMax-M3.1 it is sent uncapped, `xhigh` and `max` included: that model always
+thinks, and at `max` when nothing is set, so there `low` is the setting that
+makes turns faster. It is deliberately not sent to hybrid models, where any
+effort at all switches thinking *on* and would make a `low` request slower than
+no setting at all. An endpoint that refuses the field gets the request again
+without it.
 
 `maxTokens` is a stop, not a target: you are billed for what the model writes,
 not for the room it was given. It matters because on a model with adaptive

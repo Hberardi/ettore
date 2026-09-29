@@ -8,6 +8,24 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Added — MiniMax-M3.1 Flash Preview
+
+The `minimax` provider now lists `MiniMax-M3.1-Flash-Preview` (1M context,
+available on the Token Plan only). It sits under MiniMax-M3, which stays the
+default a new connection picks, so a pay-as-you-go key never lands on a model
+it cannot call. Already connected: `/models` picks it up on the next refresh.
+
+- **Thinking depth follows `/config effort`.** M3.1 always thinks and refuses a
+  request that turns thinking off; its `reasoning_effort` takes the whole
+  ladder, `low` to `max`, and defaults to `max`. The effort is sent to it
+  uncapped — the usual cap at `high` would have made `max` shallower than no
+  setting at all — and only when you set one, so an unset effort keeps the
+  API's default. Context compression runs it at `low`.
+- **Room to think.** The reasoning counts against `max_tokens`, so the
+  conservative 8192 kept for unknown models would cut a deep turn off. M3.1
+  now gets the 32768 the other known models get, clamped to the 524288 its API
+  accepts.
+
 ## [1.15.1] — 2026-09-27
 
 ### Changed — the prompts sent in your name speak your language

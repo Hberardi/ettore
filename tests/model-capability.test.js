@@ -16,6 +16,8 @@ test('getModelCapability: MiniMax M3 is full (matches the M[23] family pattern)'
   assert.equal(getModelCapability('MiniMax-M3'), 'full');
   // Lowercase, dot-separated aliases should also work.
   assert.equal(getModelCapability('minimax-m3'), 'full');
+  // A point release with a suffix is the same family, not a lite "flash".
+  assert.equal(getModelCapability('MiniMax-M3.1-Flash-Preview'), 'full');
   // The pattern must not over-match unrelated ids.
   assert.notEqual(getModelCapability('minimax-text-01'), 'full');
 });

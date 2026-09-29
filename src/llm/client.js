@@ -17,10 +17,17 @@ const EPHEMERAL_BLOCKS = new WeakSet();
 // Models that always reason, whatever they are asked, and whose effort knob
 // therefore only trades depth for speed: OpenAI's o-series and GPT-5 (not the
 // `-chat` variants, which do not reason), gpt-oss wherever it is hosted, and
-// Gemini 2.5+ except Flash-Lite, which does not think unless asked to. A hybrid
+// Gemini 2.5+ except Flash-Lite, which does not think unless asked to, and
+// MiniMax-M3.1, which refuses a request that turns thinking off. A hybrid
 // model is deliberately absent — there, sending any effort at all switches
 // thinking ON, which would make a "low" request slower rather than faster.
-const ALWAYS_REASONING_RE = /(?:^|\/)(?:o[134](?:-(?:mini|pro))?(?:-\d{4}-\d{2}-\d{2})?$|gpt-5(?![\w.]*-chat)|gpt-oss)|gemini-(?:2\.5|[3-9](?:\.\d+)?)-(?![\w.-]*lite)/i;
+const ALWAYS_REASONING_RE = /(?:^|\/)(?:o[134](?:-(?:mini|pro))?(?:-\d{4}-\d{2}-\d{2})?$|gpt-5(?![\w.]*-chat)|gpt-oss|minimax-m3\.1)|gemini-(?:2\.5|[3-9](?:\.\d+)?)-(?![\w.-]*lite)/i;
+
+// Models whose `reasoning_effort` takes the whole ladder, `xhigh` and `max`
+// included. MiniMax-M3.1 thinks at `max` when the field is omitted, so the
+// usual cap at `high` would make `/config effort max` think less than sending
+// nothing at all.
+const FULL_EFFORT_LADDER_RE = /(?:^|\/)minimax-m3\.1/i;
 
 /**
  * The request fields that set reasoning effort on an OpenAI-compatible
@@ -29,17 +36,19 @@ const ALWAYS_REASONING_RE = /(?:^|\/)(?:o[134](?:-(?:mini|pro))?(?:-\d{4}-\d{2}-
  * Only `effort` used to be honoured on the Anthropic transports, so `/effort
  * low` and the compressor's low-effort summary made no difference to every
  * other model. OpenRouter takes its unified `reasoning` object; the others take
- * OpenAI's `reasoning_effort`, which tops out at `high`.
+ * OpenAI's `reasoning_effort`, which tops out at `high` except on the models
+ * that accept the full ladder.
  */
 export function reasoningParamsFor(provider, model, effort) {
   const level = normalizeEffort(effort);
   if (!level) return {};
-  if (!ALWAYS_REASONING_RE.test(String(model || ''))) return {};
+  const id = String(model || '');
+  if (!ALWAYS_REASONING_RE.test(id)) return {};
   const capped = level === 'xhigh' || level === 'max' ? 'high' : level;
   if (String(provider || '').toLowerCase() === 'openrouter') {
     return { reasoning: { effort: capped } };
   }
-  return { reasoning_effort: capped };
+  return { reasoning_effort: FULL_EFFORT_LADDER_RE.test(id) ? level : capped };
 }
 
 // A 400 that names the reasoning field: the endpoint does not take it for this

@@ -30,6 +30,16 @@ test('a model we know nothing about keeps the conservative default', () => {
   assert.equal(resolveOutputCap(null), DEFAULT_OUTPUT_TOKENS);
 });
 
+test('MiniMax-M3.1 gets room to think, clamped to what its API accepts', () => {
+  // It always thinks and the reasoning counts against max_tokens, so the
+  // 8192 default would cut deep turns off. Above 524288 the API answers 2013.
+  assert.equal(modelOutputLimit('MiniMax-M3.1-Flash-Preview'), 524_288);
+  assert.equal(resolveOutputCap('MiniMax-M3.1-Flash-Preview'), AGENTIC_OUTPUT_TOKENS);
+  assert.equal(resolveOutputCap('MiniMax-M3.1-Flash-Preview', 1_000_000), 524_288);
+  // M3's row is untouched: `minimax-m3.1` must not match plain M3.
+  assert.equal(modelOutputLimit('MiniMax-M3'), null);
+});
+
 test('a model with a low ceiling is never asked for more than it takes', () => {
   // Claude 3 rejects anything above 4096 with a 400 before generating a token.
   assert.equal(resolveOutputCap('claude-3-opus-20240229'), 4096);

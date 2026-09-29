@@ -36,6 +36,17 @@ test('MiniMaxProvider: listModels exposes MiniMax-M3 as the recommended first en
   assert.match(res.models[0].description, /recommended/i);
 });
 
+test('MiniMaxProvider: listModels offers M3.1 Flash Preview, but never as the default', async () => {
+  // Token Plan only: as the first entry it would become the model a
+  // pay-as-you-go key connects with, and every turn would fail.
+  const p = new MiniMaxProvider('sk-test');
+  const { models } = await p.listModels();
+  const m31 = models.find(m => m.id === 'MiniMax-M3.1-Flash-Preview');
+  assert.ok(m31, 'M3.1 must be listed');
+  assert.equal(m31.capability, 'full');
+  assert.notEqual(models[0].id, m31.id);
+});
+
 test('MiniMaxProvider: validateKey probes with M3 by default', async () => {
   delete process.env.MINIMAX_MODEL;
   const calls = [];

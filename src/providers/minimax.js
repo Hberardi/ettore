@@ -2,6 +2,10 @@ import OpenAI from 'openai';
 
 const MINIMAX_MODELS = [
   { id: 'MiniMax-M3', description: 'M3 - Top reasoning & coding (recommended)', capability: 'full' },
+  // Preview, Token Plan only: kept below M3 so it never becomes the default a
+  // pay-as-you-go key connects with. It always thinks — `/config effort` sets
+  // how deep (see reasoningParamsFor).
+  { id: 'MiniMax-M3.1-Flash-Preview', description: 'M3.1 Flash (preview) - tunable thinking depth, Token Plan only', capability: 'full' },
   { id: 'MiniMax-M2.7-highspeed', description: 'M2.7 - Faster inference', capability: 'full' },
   { id: 'MiniMax-M2.7', description: 'M2.7 - Top reasoning & coding', capability: 'full' },
   { id: 'MiniMax-M2.5-highspeed', description: 'M2.5 - Faster inference', capability: 'full' },
@@ -65,7 +69,7 @@ export class MiniMaxProvider {
   static getInfo() {
     return {
       name: 'MiniMax (Token Plan)',
-      description: 'MiniMax-M3 — Coding Plan subscription',
+      description: 'MiniMax-M3, M3.1 — Coding Plan subscription',
       models: MINIMAX_MODELS
     };
   }

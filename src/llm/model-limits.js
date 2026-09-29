@@ -36,6 +36,10 @@ const OUTPUT_LIMITS = [
   ['claude-3-5-sonnet', 8192],
   ['claude-3-5-haiku', 8192],
   ['claude-3-7-sonnet', 8192],
+  // Always thinks, and the reasoning counts against max_tokens: the 8192
+  // default would cut a deep turn off mid-thought. The API refuses anything
+  // above 524288 (error 2013).
+  ['minimax-m3.1', 524_288],
 ];
 
 // The `claude` CLI resolves these to the current model of that tier.
