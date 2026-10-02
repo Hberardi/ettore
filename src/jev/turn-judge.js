@@ -180,6 +180,24 @@ export const INDEPENDENT_PARTS_QUESTION = {
   },
 };
 
+// Whether the request is big enough to hand out in pieces. A yes here starts
+// the orchestrator (src/agents/orchestrator.js): the model splits the request
+// into work packages, a worker sub-agent carries out each one in a context of
+// its own, and the main agent checks the result. That costs a planning call
+// and a whole agent loop per package, so the bar is deliberately higher than
+// `multi_step`: several steps in one place is a plan, not a job for a team.
+export const ORCHESTRATE_QUESTION = {
+  type: 'noul',
+  instructions: {
+    question: 'The request is a large job made of several separate work packages — each one a piece of work in its own right, which could be handed to a different developer with a short brief.',
+    note: 'Several steps of one change are not separate packages. Neither is a request that is long but about one thing, a question, or anything a single developer would do in one sitting.',
+  },
+  criteria: {
+    true: 'Several sizeable, separable pieces: a feature across several modules with its tests and documentation, a batch of unrelated fixes, the same migration over many files.',
+    false: 'One change, a few steps in one place, a question, or steps so entangled that splitting them would lose more than it saves.',
+  },
+};
+
 // Which families of tools the turn needs. The router picks these with regular
 // expressions over the request — "image" and "foto" pull in the web tools,
 // "app" and "ui" the runtime ones — which both adds schemas the turn never
@@ -253,13 +271,14 @@ export function buildSkillQuestions(skills = []) {
  * off, unreachable or unsure, every field comes back undecided and the agent
  * keeps the heuristics it already had.
  *
- * @returns {Promise<{approach: object, difficulty: object, independentParts: object, families: Record<string, boolean>, flags: Record<string, object>, skills: Record<string, object>, error: string|null, ms: number}>}
+ * @returns {Promise<{approach: object, difficulty: object, independentParts: object, orchestrate: object, families: Record<string, boolean>, flags: Record<string, object>, skills: Record<string, object>, error: string|null, ms: number}>}
  */
-export async function judgePreTurn(client, { prompt, skills = [] } = {}, { signal = null } = {}) {
+export async function judgePreTurn(client, { prompt, skills = [], orchestrate = false } = {}, { signal = null } = {}) {
   const empty = {
     approach: { choice: null, confidence: null, decisive: false },
     difficulty: { choice: null, confidence: null, decisive: false },
     independentParts: { value: null, yes: false, decisive: false },
+    orchestrate: { value: null, yes: false, decisive: false },
     families: {},
     flags: {},
     skills: {},
@@ -276,6 +295,9 @@ export async function judgePreTurn(client, { prompt, skills = [] } = {}, { signa
         approach: APPROACH_QUESTION,
         difficulty: DIFFICULTY_QUESTION,
         independent_parts: INDEPENDENT_PARTS_QUESTION,
+        // Left out when the caller could not act on a yes, rather than asked
+        // and ignored.
+        ...(orchestrate ? { orchestrate: ORCHESTRATE_QUESTION } : {}),
         ...PRETURN_FLAGS,
         ...buildToolFamilyQuestions(),
         ...questions,
@@ -288,6 +310,7 @@ export async function judgePreTurn(client, { prompt, skills = [] } = {}, { signa
       approach: readChoice(answers?.approach),
       difficulty: readChoice(answers?.difficulty),
       independentParts: readNoul(answers?.independent_parts),
+      orchestrate: readNoul(answers?.orchestrate),
       families: readToolFamilies(answers),
       flags: Object.fromEntries(Object.keys(PRETURN_FLAGS).map(key => [key, readNoul(answers?.[key])])),
       skills: skillVerdicts,

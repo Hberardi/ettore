@@ -410,12 +410,12 @@ ${setupHint()}`;
 
   jev: {
     description: 'Jev (TypeSafe System One) as the agent\'s judgment layer',
-    usage: 'jev [active <api key>|out|status|test]',
+    usage: 'jev [active <api key>|out|status|test|orchestrate on|off]',
     aliases: ['typesafe'],
     handler: async (args, _context = {}) => {
       const {
         activateJev, deactivateJev, getJevClient, isJevEnabled, getJevKey,
-        getJevStats, JEV_DEFAULT_MODEL,
+        getJevStats, JEV_DEFAULT_MODEL, isOrchestrationEnabled, setOrchestrationEnabled,
       } = await import('../jev/index.js');
       const { maskSecret } = await import('../utils/secrets.js');
       const [rawSub = 'status', ...rest] = args;
@@ -443,7 +443,8 @@ ${setupHint()}`;
         const head = isJevEnabled()
           ? `Jev: on — model ${model}, key ${maskSecret(getJevKey())}.\nIt reads each request, watches each turn and its shell commands, and judges each finished turn. Turn it off with /jev out.`
           : `Jev: off — key ${maskSecret(getJevKey())} is saved but not in use.\nTurn it back on with /jev active.`;
-        return [head, ...trafficLines()].join('\n');
+        const orchestrator = `Orchestrator (splitting a large request among worker sub-agents): ${isOrchestrationEnabled() ? 'on' : 'off'} — /jev orchestrate on|off.`;
+        return [head, orchestrator, ...trafficLines()].join('\n');
       };
 
       // `active` is what the user types; the rest are the words people reach
@@ -496,13 +497,29 @@ ${setupHint()}`;
         }
       }
 
+      // The orchestrator is the one thing Jev starts that costs a model call
+      // per work package, so it can be switched off on its own.
+      if (['orchestrate', 'orchestrator', 'orchestra'].includes(sub)) {
+        const want = String(rest[0] || '').toLowerCase();
+        if (['on', 'off'].includes(want)) setOrchestrationEnabled(want === 'on');
+        else if (want) return 'Usage: /jev orchestrate [on|off]';
+        const on = isOrchestrationEnabled();
+        return on
+          ? `Orchestrator: on${isJevEnabled() ? '' : ' (but Jev itself is off, so it never starts)'}.\n`
+            + 'When Jev is sure a request is a large job made of separate work packages, the request is split, '
+            + 'a worker sub-agent carries out each package in a context of its own — research together, changes one at a time — '
+            + 'and the main agent checks the result. Turn it off with /jev orchestrate off.'
+          : 'Orchestrator: off. Large requests are carried out by the main agent alone, as before. Turn it on with /jev orchestrate on.';
+      }
+
       if (sub === 'status') return statusLine();
 
       return `Unknown /jev subcommand: ${rawSub}\n\n`
-        + '  /jev active <api key>   turn Jev on (key saved, encrypted)\n'
-        + '  /jev out                turn Jev off (add "forget" to delete the key)\n'
-        + '  /jev status             show the current state\n'
-        + '  /jev test               check the key and the connection';
+        + '  /jev active <api key>      turn Jev on (key saved, encrypted)\n'
+        + '  /jev out                   turn Jev off (add "forget" to delete the key)\n'
+        + '  /jev status                show the current state\n'
+        + '  /jev test                  check the key and the connection\n'
+        + '  /jev orchestrate [on|off]  let Jev split a large request among worker sub-agents';
     }
   },
 

@@ -2,6 +2,7 @@ import { toolHandlers, toolDefinitions, confirmWithUser, setToolAbortSignal, set
 import { EventEmitter, setMaxListeners as setTargetMaxListeners } from 'events';
 import { createHash } from 'crypto';
 import { stat } from 'fs/promises';
+import { resolve as resolvePath } from 'path';
 import {
   loadProjectMemory,
   injectMemoryIntoPrompt,
@@ -66,8 +67,9 @@ import { executeToolHandler } from './tool-executor.js';
 import { guardToolCall, parseToolCall } from './tool-call-guard.js';
 import { ReleaseGateCoordinator } from './release-gate-coordinator.js';
 import { commandWriteTargets, diffSnapshots, snapshotWorkspace } from './workspace-changes.js';
-import { getJevClient } from '../jev/index.js';
+import { getJevClient, isOrchestrationEnabled } from '../jev/index.js';
 import { shortenPath } from '../utils/platform.js';
+import { changedFiles, orchestrationReport, planWork, runWorkPlan, workerBrief, WORKER_REPORT_MAX_CHARS } from './orchestrator.js';
 // At most this many sub-agents explore at once: three model streams is already
 // three times the tokens per second, and past that the reports stop fitting.
 const PARALLEL_EXPLORE_MAX = 3;
@@ -158,6 +160,18 @@ const SUBAGENT_REPORT_MAX_CHARS = 6000;
 // that will not converge is cancelled and reported rather than left running
 // behind a tool result the parent has already given up on.
 const SUBAGENT_TIMEOUT_MS = 480_000;
+
+// A worker carries out one work package of an orchestrated request (see
+// orchestrator.js). It does real work, so it gets more room than an
+// exploration — but less than a whole turn: a package that needs fifty steps
+// was not a package, and the main agent picks up what a worker leaves open.
+const WORKER_MAX_ITERATIONS = 30;
+const WORKER_MAX_TOOL_CALLS = 60;
+const WORKER_TIMEOUT_MS = 900_000;
+// The planning call is one answer with no tools; a model that has not produced
+// it by now is not going to, and the turn goes on without workers.
+const ORCHESTRATION_PLAN_TIMEOUT_MS = 120_000;
+const FILE_MUTATION_TOOLS = new Set(['write', 'edit', 'apply_patch_structured']);
 
 const AGENT_TURN_TIMEOUT_MS = 300_000;
 // A ceiling on the whole provider call, on top of the silence timeout.
@@ -1273,7 +1287,10 @@ export class Agent {
    *                  turn. It used to be a suggestion the model was free to
    *                  ignore, and models searching by hand ignored it;
    *   - none       → answer directly, without touring the codebase;
-   *   - multi_step → the planning reminder the word heuristics missed.
+   *   - multi_step → the planning reminder the word heuristics missed;
+   *   - orchestrate → the request is split into work packages and a worker
+   *                  sub-agent carries out each one NOW; the turn opens with
+   *                  their reports and the main agent checks the result.
    * An unsure, failing or absent Jev leaves the turn with the heuristics it
    * already had.
    */
@@ -1281,7 +1298,16 @@ export class Agent {
     const client = getJevClient();
     if (!client) return null;
     const skills = this.skillSystem.getAllSkills().filter(skill => skill.enabled);
-    const judged = await judgePreTurn(client, { prompt: promptText, skills }, { signal });
+    // Asked only where a yes could be acted on: a worker does not hand its
+    // package out again, and the user can switch the orchestrator off.
+    // Nor does it run where a plan is required before any work
+    // (`explicitPlan: 'always'`): the workers would have done the work by then.
+    const mayOrchestrate = !this._isSubagent
+      && this.config.orchestrator !== false
+      && this.config.requireExplicitPlan !== true
+      && this.config.explicitPlan !== 'always'
+      && isOrchestrationEnabled();
+    const judged = await judgePreTurn(client, { prompt: promptText, skills, orchestrate: mayOrchestrate }, { signal });
     const { approach, flags = {}, skills: verdicts, error, ms } = judged;
     if (error) {
       this._debugLog(emitter, 'jev.preturn_unavailable', { error });
@@ -1314,7 +1340,13 @@ export class Agent {
     const overlays = [];
     if (difficulty) actions.push(`effort:${this._effortForMode() || 'default'}`);
     if (Object.keys(this._jevFamilies).length) actions.push('tools');
+    // A large job made of separate packages goes to the orchestrator — but not
+    // one nobody understands yet, and not one Jev also calls trivial: two
+    // verdicts that disagree are not a decision.
+    const orchestrate = mayOrchestrate && sure(judged.orchestrate) && !ambiguous && difficulty !== 'trivial';
 
+    let exploration = '';
+    let exploreCameBackEmpty = false;
     if (ambiguous) {
       overlays.push(buildTurnOverlay('jev_clarify'));
       actions.push('clarify');
@@ -1325,20 +1357,43 @@ export class Agent {
       emitter?.emit('jevRoute', { choice: approach.choice, confidence: approach.confidence, decisive: true, ms, actions: ['explore'] });
       const report = await this._jevExploreFirst(promptText, emitter, signal, { parallel });
       if (report) {
+        exploration = report;
         actions.push('explore');
       } else {
-        // The sub-agent could not deliver; fall back to pointing at it.
-        overlays.push(buildTurnOverlay('explore_first'));
-        actions.push('explore_hint');
+        exploreCameBackEmpty = true;
       }
-    } else if (approach.decisive && approach.choice === 'none' && !multiStep) {
+    } else if (approach.decisive && approach.choice === 'none' && !multiStep && !orchestrate) {
       overlays.push(buildTurnOverlay('jev_answer_directly'));
       actions.push('answer');
     }
 
+    // After the exploration, so the split is made by a planner that knows
+    // where things live rather than one guessing from the wording.
+    if (orchestrate && !signal?.aborted) {
+      emitter?.emit('jevRoute', { choice: approach.choice, confidence: judged.orchestrate.value, decisive: true, ms, actions: ['orchestrate'] });
+      this._jevOrchestration = await this._jevOrchestrate(promptText, emitter, signal, { exploration });
+      // No plan worth running — the request did not split after all — leaves
+      // the turn to the main agent, with whatever else Jev decided.
+      if (this._jevOrchestration) actions.push('orchestrate');
+    }
+    if (exploreCameBackEmpty && !this._jevOrchestration) {
+      // The sub-agent could not deliver; fall back to pointing at it.
+      overlays.push(buildTurnOverlay('explore_first'));
+      actions.push('explore_hint');
+    }
+
     const planAllowed = this.config.requireExplicitPlan !== false
       && !['off', 'never'].includes(this.config.explicitPlan);
-    if ((multiStep || difficulty === 'hard') && !ambiguous && !planningEnabled && planAllowed) {
+    if (this._jevOrchestration) {
+      // The work has been planned and carried out already: asking the main
+      // agent for a `<plan>` now would have it plan what is done.
+      const at = this.messages.findIndex(m => m.role === 'user' && m.content === PLANNING_REMINDER);
+      if (at !== -1) {
+        this.messages.splice(at, 1);
+        this._planningActive = false;
+        emitter?.emit('planningSkipped', { prompt: promptText, source: 'jev' });
+      }
+    } else if ((multiStep || difficulty === 'hard') && !ambiguous && !planningEnabled && planAllowed) {
       this.messages.push({ role: 'user', content: PLANNING_REMINDER });
       this._planningActive = true;
       emitter?.emit('planningStarted', { prompt: promptText, source: 'jev' });
@@ -1590,43 +1645,6 @@ export class Agent {
       return 'Error: explore is not available inside an exploration sub-agent. Answer from what you can read yourself.';
     }
 
-    const sub = new Agent(this.client, {
-      ...this.config,
-      maxIterations: SUBAGENT_MAX_ITERATIONS,
-      maxToolCallsPerTurn: SUBAGENT_MAX_TOOL_CALLS,
-      maxAutoContinues: 1,
-      // The brief already states what to produce; a planning handshake on top
-      // of it spends a turn of an already small budget.
-      requireExplicitPlan: false,
-      explicitPlan: 'off',
-      verifyAfterEdit: false,
-      // Plugin tools belong to the parent's task, and a plugin's handler
-      // cannot be assumed read-only just because the mode is.
-      pluginRegistry: null,
-      // Already loaded — re-reading the catalogue per call is pure waste.
-      skillSystem: this.skillSystem,
-    }, 'plan');
-    sub._isSubagent = true;
-
-    const childEmitter = new EventEmitter();
-    // An unhandled 'error' on an EventEmitter throws. A sub-agent that fails
-    // is a tool result the parent can read and work around, not a crash of
-    // the parent's turn.
-    childEmitter.on('error', () => {});
-    for (const name of ['toolStart', 'toolEnd']) {
-      childEmitter.on(name, payload => emitter?.emit(name, { ...payload, subagent: true }));
-    }
-    // The sub-agent's own model output never reaches the parent — it is the
-    // point of the sub-agent — but the parent's stall watchdog is counting
-    // from the moment the user pressed enter. Without a sign of life, a
-    // sub-agent thinking for long enough is killed as a stalled turn. The text
-    // is dropped; only the fact that something arrived is passed on.
-    childEmitter.on('token', () => emitter?.emit('subagentProgress'));
-
-    const cancelSub = () => { try { sub.cancel(); } catch {} };
-    parentSignal?.addEventListener?.('abort', cancelSub, { once: true });
-    const timer = setTimeout(cancelSub, SUBAGENT_TIMEOUT_MS);
-
     const prompt = briefing
       ? `${SUBAGENT_BRIEF}\n\nQUESTION: ${question}\n\nCONTEXT FROM THE MAIN TASK: ${briefing}`
       : `${SUBAGENT_BRIEF}\n\nQUESTION: ${question}`;
@@ -1634,7 +1652,13 @@ export class Agent {
     emitter?.emit('subagentStart', { question });
     this._debugLog(emitter, 'subagent.started', { question: String(question).slice(0, 160) });
     try {
-      const report = String(await sub.run(prompt, childEmitter) || '').trim();
+      const { report } = await this._runSubagent({
+        prompt,
+        mode: 'plan',
+        maxIterations: SUBAGENT_MAX_ITERATIONS,
+        maxToolCalls: SUBAGENT_MAX_TOOL_CALLS,
+        timeoutMs: SUBAGENT_TIMEOUT_MS,
+      }, emitter, parentSignal);
       if (!report) {
         return 'The exploration sub-agent came back with nothing. Investigate directly with grep/glob/read.';
       }
@@ -1647,10 +1671,205 @@ export class Agent {
       this._debugLog(emitter, 'subagent.failed', { error: String(err?.message || err) });
       return `Error: the exploration sub-agent failed (${err?.message || err}). Investigate directly with grep/glob/read.`;
     } finally {
-      clearTimeout(timer);
-      parentSignal?.removeEventListener?.('abort', cancelSub);
       emitter?.emit('subagentEnd', { question });
     }
+  }
+
+  /**
+   * One nested agent loop in a context of its own, and what it answered.
+   *
+   * `mode` is the enforcement, not the brief: a 'plan' sub-agent is read-only
+   * by construction, a 'build' one can write and run commands, and asks for
+   * the same approvals the main agent would.
+   *
+   * @returns {Promise<{report: string, error: string}>} `report` is empty when
+   *   the sub-agent produced nothing; `error` is what it failed with, if it did.
+   */
+  async _runSubagent({ prompt, mode = 'plan', maxIterations, maxToolCalls, timeoutMs, onToolEnd = null }, emitter, parentSignal) {
+    const sub = new Agent(this.client, {
+      ...this.config,
+      maxIterations,
+      maxToolCallsPerTurn: maxToolCalls,
+      maxAutoContinues: 1,
+      // The brief already states what to produce; a planning handshake on top
+      // of it spends a turn of an already small budget.
+      requireExplicitPlan: false,
+      explicitPlan: 'off',
+      // A read-only sub-agent has nothing to verify. One that writes keeps the
+      // session's setting: its edits are checked like anyone else's.
+      ...(mode === 'plan' ? { verifyAfterEdit: false } : {}),
+      // Plugin tools belong to the parent's task, and a plugin's handler
+      // cannot be assumed read-only just because the mode is.
+      pluginRegistry: null,
+      // Already loaded — re-reading the catalogue per call is pure waste.
+      skillSystem: this.skillSystem,
+    }, mode);
+    sub._isSubagent = true;
+
+    const childEmitter = new EventEmitter();
+    // An unhandled 'error' on an EventEmitter throws. A sub-agent that fails
+    // is a result the parent can read and work around, not a crash of the
+    // parent's turn.
+    let error = '';
+    childEmitter.on('error', (e) => { error = typeof e === 'string' ? e : String(e?.message || e || ''); });
+    for (const name of ['toolStart', 'toolEnd']) {
+      childEmitter.on(name, payload => emitter?.emit(name, { ...payload, subagent: true }));
+    }
+    if (onToolEnd) childEmitter.on('toolEnd', onToolEnd);
+    // The sub-agent's own model output never reaches the parent — it is the
+    // point of the sub-agent — but the parent's stall watchdog is counting
+    // from the moment the user pressed enter. Without a sign of life, a
+    // sub-agent thinking for long enough is killed as a stalled turn. The text
+    // is dropped; only the fact that something arrived is passed on.
+    childEmitter.on('token', () => emitter?.emit('subagentProgress'));
+
+    const cancelSub = () => { try { sub.cancel(); } catch {} };
+    parentSignal?.addEventListener?.('abort', cancelSub, { once: true });
+    const timer = setTimeout(cancelSub, timeoutMs);
+    try {
+      const report = String(await sub.run(prompt, childEmitter) || '').trim();
+      return { report, error };
+    } finally {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener?.('abort', cancelSub);
+    }
+  }
+
+  /**
+   * Carry out one work package of an orchestrated request in a sub-agent, and
+   * report how it went. A research package runs read-only; a change package
+   * runs in build mode. Never throws: a worker that fails is a report the main
+   * agent reads.
+   *
+   * @returns {Promise<{ok: boolean, output: string, files: string[]}>}
+   */
+  async _runWorker(task, { index = 0, total = 1, reports = [], request = '' } = {}, emitter, parentSignal) {
+    const id = `jev-worker-${task.id}-${Date.now()}`;
+    const args = { task: task.title, kind: task.kind, package: `${index + 1}/${total}`, by: 'jev' };
+    // What the worker wrote through the file tools. What its shell commands
+    // changed is read off the workspace afterwards — see _jevOrchestrate.
+    const files = new Set();
+    let outcome = { ok: false, output: 'Error: interrupted' };
+
+    emitter?.emit('toolStart', { id, name: 'worker', args, jev: true });
+    emitter?.emit('subagentStart', { question: task.title });
+    this._debugLog(emitter, 'worker.started', { package: args.package, kind: task.kind, title: task.title });
+    try {
+      const { report, error } = await this._runSubagent({
+        prompt: workerBrief(task, { request, index, total, reports }),
+        mode: task.kind === 'research' ? 'plan' : 'build',
+        maxIterations: WORKER_MAX_ITERATIONS,
+        maxToolCalls: WORKER_MAX_TOOL_CALLS,
+        timeoutMs: WORKER_TIMEOUT_MS,
+        onToolEnd: ({ name, args: toolArgs, output }) => {
+          if (FILE_MUTATION_TOOLS.has(name) && toolArgs?.file_path && mutationApplied(output)) files.add(toolArgs.file_path);
+        },
+      }, emitter, parentSignal);
+      if (parentSignal?.aborted) {
+        outcome = { ok: false, output: 'Error: interrupted before the package was finished.' };
+      } else if (!report) {
+        outcome = { ok: false, output: `Error: the worker returned no report${error ? ` (${error})` : ''}.` };
+      } else {
+        outcome = {
+          ok: true,
+          output: report.length > WORKER_REPORT_MAX_CHARS
+            ? `${report.slice(0, WORKER_REPORT_MAX_CHARS)}\n[report truncated at ${WORKER_REPORT_MAX_CHARS} characters]`
+            : report,
+        };
+      }
+    } catch (err) {
+      outcome = { ok: false, output: `Error: the worker failed (${err?.message || err}).` };
+    } finally {
+      this._debugLog(emitter, outcome.ok ? 'worker.completed' : 'worker.failed', { package: args.package, files: files.size });
+      emitter?.emit('toolEnd', { id, name: 'worker', args, output: outcome.output, jev: true });
+      emitter?.emit('subagentEnd', { question: task.title });
+    }
+    return { ...outcome, files: [...files] };
+  }
+
+  /**
+   * Split the request into work packages, have a worker sub-agent carry out
+   * each one, and open the turn with their reports. Returns what happened, or
+   * null when nothing did — no usable plan, or no worker ever started — and
+   * the turn then proceeds exactly as it would have.
+   *
+   * Jev decided that the request is worth splitting; it does not write, so the
+   * split is one call to the model the session is on. Research packages run
+   * together, changes one after another: see runWorkPlan.
+   *
+   * The reports go into the conversation as a message, like the exploration
+   * report: they have to be there for every step of the turn that follows.
+   */
+  async _jevOrchestrate(promptText, emitter, signal, { exploration = '' } = {}) {
+    if (this._isSubagent) return null;
+    const startedAt = Date.now();
+    const request = String(promptText).slice(0, 8000);
+
+    // The planner cannot see the codebase. Without an exploration to go on, a
+    // map of the repository is what lets it name real paths instead of
+    // plausible ones.
+    let repoMap = '';
+    if (!exploration) {
+      try { repoMap = String(await toolHandlers.repo_map({ path: this._workdir, max_depth: 2, max_entries: 200 }) || ''); } catch { /* plan from the request alone */ }
+      if (/^Error:/.test(repoMap)) repoMap = '';
+    }
+
+    const planSignal = typeof AbortSignal.any === 'function' && signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(ORCHESTRATION_PLAN_TIMEOUT_MS)])
+      : signal;
+    // The plan is read whole, never shown — but the stall watchdog has been
+    // counting since the user pressed enter, and a planner writing for a
+    // minute in silence would be cancelled as a stalled turn. As with a
+    // sub-agent, only the fact that something arrived is passed on.
+    const plan = await planWork(this.client, { request, exploration, repoMap }, {
+      signal: planSignal,
+      onToken: () => emitter?.emit('subagentProgress'),
+      turnOptions: {
+        effort: this._effortForMode(),
+        onActivity: phase => emitter?.emit('modelActivity', { phase }),
+      },
+    });
+    if (!plan || signal?.aborted) {
+      this._debugLog(emitter, 'jev.orchestrate_no_plan', { ms: Date.now() - startedAt });
+      return null;
+    }
+    emitter?.emit('orchestrationPlan', {
+      rationale: plan.rationale,
+      tasks: plan.tasks.map(({ id, title, kind }) => ({ id, title, kind })),
+    });
+    this._debugLog(emitter, 'jev.orchestrate_planned', { tasks: plan.tasks.map(t => `${t.kind}:${t.title}`) });
+
+    let before = null;
+    try { before = await snapshotWorkspace(this._workdir); } catch { /* not a git work tree */ }
+    const results = await runWorkPlan(plan, {
+      signal,
+      runWorker: (task, ctx) => this._runWorker(task, { ...ctx, request }, emitter, signal),
+    });
+    if (!results.some(r => !r.skipped)) return null;
+
+    // Absolute, so the path a worker passed to `edit` and the one git reports
+    // for the same file count once.
+    const files = new Set(changedFiles(results).map(file => resolvePath(this._workdir, file)));
+    if (before) {
+      try {
+        for (const file of diffSnapshots(before, await snapshotWorkspace(this._workdir))) files.add(file);
+      } catch { /* keep what the file tools reported */ }
+    }
+    if (files.size) {
+      // Cached reads are keyed by the path as the model spelled it, which need
+      // not be the spelling here: drop them all rather than serve one stale.
+      for (const key of this.toolCache.keys()) {
+        if (key.startsWith('read|')) this.toolCache.delete(key);
+      }
+      this._recordWorkspaceChange([...files], 'worker');
+    }
+
+    this.messages.push({ role: 'user', content: orchestrationReport(plan, results, { files: [...files] }) });
+    const done = results.filter(r => r.ok).length;
+    const ms = Date.now() - startedAt;
+    emitter?.emit('orchestrationDone', { total: results.length, done, files: files.size, ms });
+    this._debugLog(emitter, 'jev.orchestrated', { total: results.length, done, files: files.size, ms });
+    return { plan, results, files: [...files] };
   }
 
   async run(userPrompt, emitter, options = {}) {
@@ -1733,6 +1952,8 @@ export class Agent {
     this._jevPreTurn = null;
     this._jevDifficulty = null;
     this._jevFamilies = null;
+    // What the orchestrator did before this turn's first step, if it ran.
+    this._jevOrchestration = null;
     // Stand-ins Jev chose for tools that would not work; see _jevToolFallback.
     this._forcedTools = new Set();
     this._jevFallbackAsked = new Map();
@@ -1884,14 +2105,18 @@ export class Agent {
     // signal, todo sink, retry notifier and runner, and clears all four on its
     // way out. Without putting the parent's back, the next tool in the very
     // same batch runs with no abort signal and a dead todo sink.
+    const restoreTurnSingletons = () => {
+      setToolAbortSignal(controller.signal);
+      setToolWorkspaceRoot(this._workdir);
+      setAgentTodoSink(todoSink);
+      setRetryNotifier(parentRetryNotifier);
+      setSubagentRunner(subagentRunner);
+    };
     const subagentRunner = async (request) => {
       try {
         return await this._exploreWithSubagent(request, emitter, controller.signal);
       } finally {
-        setToolAbortSignal(controller.signal);
-        setAgentTodoSink(todoSink);
-        setRetryNotifier(parentRetryNotifier);
-        setSubagentRunner(subagentRunner);
+        restoreTurnSingletons();
       }
     };
     setSubagentRunner(subagentRunner);
@@ -1954,13 +2179,37 @@ export class Agent {
     // change something: a continuation already carries the previous turn's
     // intent, a lite model has no sub-agent to delegate to, and a two-word
     // message is not worth the round trip.
+    // Nor for a sub-agent: its "request" is a brief the harness wrote, already
+    // routed by whoever wrote it.
     if (
       this.mode === 'build'
       && !this._isLite
+      && !this._isSubagent
       && !continuation
       && promptText.trim().length >= 15
     ) {
-      await this._judgePreTurn(promptText, emitter, controller.signal, { planningEnabled });
+      try {
+        await this._judgePreTurn(promptText, emitter, controller.signal, { planningEnabled });
+      } finally {
+        // Jev may have run sub-agents — an exploration, the orchestrator's
+        // workers — and each nested run() clears these on its way out. Left
+        // cleared, this turn's own tools ran with no todo sink and no
+        // `explore`, and a todo_write came back as "not in an agent turn".
+        restoreTurnSingletons();
+      }
+      // Work the orchestrator's workers did counts as this turn's work: the
+      // files they changed are what "done means the tests pass" is about, and
+      // the main agent needs the edit and verification tools to check them.
+      const orchestrated = this._jevOrchestration;
+      if (orchestrated?.files?.length) {
+        mutationToolUsed = true;
+        this._editIntentActive = true;
+        for (const file of orchestrated.files) {
+          touchedFiles.add(file);
+          recordMutation(releaseGate, file, '');
+        }
+        referencedInToolArgs += ` ${orchestrated.files.join(' ')}`;
+      }
     }
 
     try {
@@ -2021,6 +2270,11 @@ export class Agent {
             : this.dynamicToolRouting
               ? selectToolDefinitions(this._getAllToolDefinitions(), toolRouteContext)
               : this.mode === 'plan' ? PLAN_TOOLS : this._getAllToolDefinitions();
+          // A sub-agent cannot delegate again. Plan mode never routes
+          // `explore`; a worker runs in build mode, where it is part of the
+          // base set, and offering a tool that only ever answers "not
+          // available here" costs the worker a step.
+          if (this._isSubagent) routedTools = routedTools.filter(tool => tool?.function?.name !== 'explore');
         }
         const tools = routedTools;
         this.workingMemory.routedTools = selectedToolNames(tools);

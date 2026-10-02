@@ -8,6 +8,47 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Added — an orchestrator, started by Jev
+
+One agent carrying a large request keeps everything it read for the first part
+in the context it writes the last part with. When Jev is sure a request is a
+large job made of separate work packages, ETTORE now splits it and hands each
+package to a worker sub-agent in a context of its own, before the main model's
+first step (`src/agents/orchestrator.js`).
+
+- **Jev decides, the model splits.** One more question rides in the pre-turn
+  request — is this several sizeable, separable pieces of work? — with a bar
+  deliberately above "several steps". Jev does not write, so the split itself
+  is one call to the model the session is on: two to five packages, made from
+  the exploration when Jev ran one first and from a map of the repository
+  otherwise. A planner that answers with a single package ends it there and
+  the turn goes on as before.
+- **Research together, changes one at a time.** Read-only packages run in
+  parallel, up to three at once, in plan mode — read-only by construction.
+  Packages that change files run in order, in build mode, each worker told what
+  the ones before it reported. A change package that fails stops the line, and
+  what is left goes to the main agent.
+- **The main agent checks.** The turn opens with the workers' reports. The
+  files they changed — the ones their file tools wrote, plus what a snapshot of
+  the workspace shows their shell commands changed — count as the turn's own,
+  so the release gate still wants the tests run before "done".
+- **You see it.** One Jev line when the split starts, one listing the packages
+  and their order, one when the workers finish; each worker is a `worker` row
+  in the running-tool display with its own tool calls under it.
+- **`/jev orchestrate [on|off]`** switches it off on its own and leaves the rest
+  of Jev running; `/jev status` says which it is. It is on by default with Jev
+  on, and never starts for a request Jev finds ambiguous or trivial, inside a
+  sub-agent, or where a plan is required before any work.
+
+### Fixed — a turn lost its todo list after Jev's exploration
+
+Every nested agent run clears the module-level abort signal, todo sink, retry
+notifier and sub-agent runner on its way out. The `explore` tool put the
+turn's own back; the exploration Jev runs *before* the first step did not, so
+for the rest of that turn `todo_write` answered "only available during an
+agent turn" and `explore` was gone. They are now restored after the pre-turn
+judgment, whatever it ran.
+
 ### Fixed — `bash_session` commands that sat until the timeout
 
 Three ways a `bash_session` call on Linux and macOS froze for its whole

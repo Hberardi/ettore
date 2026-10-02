@@ -831,9 +831,10 @@ test('both decisions ride in one request, not two', async () => {
     const preTurn = bodies.filter(b => b.questions.approach);
     assert.equal(preTurn.length, 1, 'one pre-turn call, however many skills');
     // Everything the turn is decided by, in one request: how to investigate,
-    // how hard it is, whether it splits into parts, the two request flags, one
-    // question per tool family and one per enabled skill.
-    const expected = 3 + Object.keys(PRETURN_FLAGS).length + Object.keys(TOOL_FAMILY_QUESTIONS).length + SKILLS.length;
+    // how hard it is, whether it splits into parts, whether it is a job for
+    // the orchestrator, the two request flags, one question per tool family
+    // and one per enabled skill.
+    const expected = 4 + Object.keys(PRETURN_FLAGS).length + Object.keys(TOOL_FAMILY_QUESTIONS).length + SKILLS.length;
     assert.equal(Object.keys(preTurn[0].questions).length, expected);
     resetJevStats();
     assert.equal(getJevStats().calls, 0);

@@ -180,6 +180,7 @@ const TOOL_COLORS = {
   browser_app:  C.code,     // blue — driving a web app
   desktop_app:  C.code,     // blue — driving a desktop app
   ask_user:     C.accent,   // cyan — user interaction
+  worker:       C.ok,       // green — a work package handed to a sub-agent
   memory_read:  C.dim,      // gray — memory
   memory_write: C.dim,      // gray — memory
 };
@@ -860,6 +861,11 @@ class TUI {
         break;
       case 'ask_user':
         desc = args.question || '';
+        break;
+      // Not a tool the model calls: one work package of an orchestrated
+      // request, carried out by a sub-agent.
+      case 'worker':
+        desc = `${args.package ? `${args.package} ` : ''}${args.task || ''}`;
         break;
       case 'memory_read':
       case 'memory_write':

@@ -712,6 +712,7 @@ export async function startApp(options = {}) {
       write: ['Apply the requested changes', args.file_path ? `Next: writing ${sanitizeIntentText(args.file_path)}` : 'Next: writing the changes'],
       edit: ['Apply a targeted change to the code', args.file_path ? `Next: editing ${sanitizeIntentText(args.file_path)}` : 'Next: editing the requested file'],
       ask_user: ['Settle a choice that is needed', 'Next: asking the user for a decision'],
+      worker: ['Carry out the request in separate work packages', args.task ? `Next: package ${sanitizeIntentText(args.package || '')} — ${sanitizeIntentText(args.task, 80)}` : 'Next: handing a work package to a sub-agent'],
     }[name] || ['Gather the context needed', 'Next: starting the initial checks'];
 
     return `Plan: ${plan[0]}\n${plan[1]}`;
@@ -1377,9 +1378,13 @@ export async function startApp(options = {}) {
       if (actions.includes('explore')) {
         pushJev(`(${ms}ms) — wide search: running explore before starting (confidence ${Number(confidence).toFixed(2)})`);
       }
+      if (actions.includes('orchestrate')) {
+        pushJev(`(${ms}ms) — large job: splitting it into work packages (confidence ${Number(confidence).toFixed(2)})`);
+      }
       return;
     }
     const ACTION_LABELS = {
+      orchestrate: 'large job: carried out by worker sub-agents, the main agent now checks the result',
       clarify: 'ambiguous request: a question to you first',
       explore_hint: 'wide search: explore did not answer, suggesting it to the model',
       answer: 'no code to look at: answering directly',
@@ -1391,6 +1396,26 @@ export async function startApp(options = {}) {
     };
     const shown = actions.filter(action => ACTION_LABELS[action]).map(action => ACTION_LABELS[action]);
     if (shown.length) pushJev(`(${ms}ms) — ${shown.join(' · ')}`);
+  });
+
+  // The orchestrator's split, before the workers start: which packages there
+  // are and in what order they run, so the wait that follows has a shape.
+  emitter.on('orchestrationPlan', ({ tasks = [] }) => {
+    const titles = kind => tasks.filter(t => t.kind === kind).map(t => `${t.id}. ${t.title}`);
+    const research = titles('research');
+    const changes = titles('change');
+    const parts = [];
+    if (research.length) parts.push(`research, together: ${research.join(' · ')}`);
+    if (changes.length) parts.push(`changes, one at a time: ${changes.join(' → ')}`);
+    pushJev(`— ${tasks.length} work packages — ${parts.join(' — ')}`);
+  });
+
+  emitter.on('orchestrationDone', ({ total, done, files, ms }) => {
+    const took = ms >= 1000 ? `${Math.round(ms / 1000)}s` : `${ms}ms`;
+    const failed = total - done;
+    pushJev(`(${took}) — workers finished: ${done} of ${total} package${total === 1 ? '' : 's'} done`
+      + `${failed ? `, ${failed} left to the main agent` : ''}`
+      + `, ${files} file${files === 1 ? '' : 's'} changed`);
   });
 
   // A tool could not run here and Jev named the one to use instead.

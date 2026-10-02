@@ -507,6 +507,40 @@ test('parts that depend on each other stay one exploration', async () => {
   assert.equal(started.length, 1, 'an unsure verdict explores once, as before');
 });
 
+test('after the exploration Jev ran first, the turn still has its todo list', async () => {
+  await activate();
+  globalThis.fetch = fakeJev({ approach: 'explore', confidence: 0.9 });
+  let mainTurns = 0;
+  let todoResult = '';
+  const todoLists = [];
+  const emitter = new EventEmitter();
+  emitter.on('todoList', items => todoLists.push(items));
+  emitter.on('toolEnd', info => { if (info.name === 'todo_write') todoResult = String(info.output); });
+
+  await agentInBuild({
+    async turn(messages) {
+      const text = textOf(messages);
+      if (/exploration sub-agent/i.test(text) && !/exploration already done/.test(text)) {
+        return { type: 'text', content: 'Sta in src/a.js:1.' };
+      }
+      mainTurns++;
+      // The sub-agent's run() cleared the module-level todo sink on its way
+      // out, and nothing put this turn's back: the call below came back as
+      // "only available during an agent turn".
+      if (mainTurns === 1) {
+        return {
+          type: 'tool_calls',
+          tool_calls: [{ id: 't1', type: 'function', function: { name: 'todo_write', arguments: JSON.stringify({ action: 'set', items: ['uno', 'due'] }) } }],
+        };
+      }
+      return { type: 'text', content: '<done:1>\n<done:2>\nFatto.' };
+    },
+  }).run('capisci dove viene gestito il login in tutto il progetto', emitter);
+
+  assert.doesNotMatch(todoResult, /only available during an agent turn/i);
+  assert.deepEqual(todoLists.at(-1), ['uno', 'due']);
+});
+
 // ── a tool that will not work here ───────────────────────────────────────
 
 test('only a tool that cannot run is routed around, not a failing answer', async () => {

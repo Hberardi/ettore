@@ -260,6 +260,21 @@ export function deactivateJev({ forget = false } = {}) {
   return { forgotten: forget };
 }
 
+/**
+ * Whether Jev may split a large request among worker sub-agents. On unless
+ * switched off: it is the one thing Jev starts that costs a model call per
+ * package, so it gets a switch of its own (`/jev orchestrate off`) that leaves
+ * the rest of Jev running.
+ */
+export function isOrchestrationEnabled() {
+  return getConfig('jevOrchestrate') !== false;
+}
+
+export function setOrchestrationEnabled(on) {
+  saveConfig('jevOrchestrate', Boolean(on));
+  return Boolean(on);
+}
+
 /** The client for the active configuration, or null when Jev is off. */
 export function getJevClient(overrides = {}) {
   if (!isJevEnabled()) return null;

@@ -27,7 +27,7 @@ What changed in each release is in the [changelog](https://github.com/Hberardi/e
 - ⚡ **Fast on every provider** - requests are shaped so the provider can reuse its prompt cache, context summaries are written by a fast model of the same provider, and `--verbose-tokens` reports time-to-first-token and cached tokens per call
 - 🔍 **Delegated search** - `explore` answers one question about the codebase in a separate read-only context and returns a short report with `file:line` references; the greps and full-file reads behind it never enter the main conversation
 - 📋 **Explicit Planning** - non-trivial tasks get a structured `<plan>...</plan>` block on the first turn, and its steps drive the progress panel and the auto-continue, so a plan left half-done is resumed instead of dropped
-- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev reads each request before the turn (asks you first when it is ambiguous, plans only when the work needs it, picks the tools and the reasoning effort the turn will actually use, and runs the `explore` sub-agent — several in parallel for independent parts — when a codebase-wide search is needed), watches the turn while it runs and steps in when it goes round in circles, keeps what the context compression was about to throw away, switches to a working tool when one is blocked, asks before risky shell commands the regex does not know, and judges each finished turn — one line per turn in the chat; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
+- ⚖️ **Optional judgment layer** - with a [TypeSafe](https://docs.typesafe.ai/introduction) key, Jev reads each request before the turn (asks you first when it is ambiguous, plans only when the work needs it, picks the tools and the reasoning effort the turn will actually use, and runs the `explore` sub-agent — several in parallel for independent parts — when a codebase-wide search is needed, and splits a large job among worker sub-agents, each in a context of its own), watches the turn while it runs and steps in when it goes round in circles, keeps what the context compression was about to throw away, switches to a working tool when one is blocked, asks before risky shell commands the regex does not know, and judges each finished turn — one line per turn in the chat; off by default, `/jev active <key>` to enable ([details](#jev--an-optional-judgment-layer-typesafe))
 - 🧩 **Ten plugins included** - GitHub (CI failures pulled out of the logs, pull requests, issues), PostgreSQL, Excel, EDI over FTP, extended git, shell history, palette shortcuts, and a security-tool wrapper for authorised testing (`kali`) — installed with `/plugins install`, and you can write your own
 
 ## Installation
@@ -575,6 +575,7 @@ off.** You need a TypeSafe API key; it is a paid service, billed per input token
 | `/jev out forget` | Turns it off **and** deletes the saved key. |
 | `/jev status` | Whether it is on, which model, and the traffic so far this session. |
 | `/jev test` | Makes one real call and reports the round trip. |
+| `/jev orchestrate [on\|off]` | Whether Jev may split a large request among worker sub-agents (on by default). With no argument, says which it is. |
 
 `/typesafe` is an alias for the same command.
 
@@ -711,13 +712,55 @@ knows. Jev reads what a command would *do*, so `Remove-Item -Recurse -Force`,
 can only add a confirmation, never remove one, and commands that plainly only
 read — `ls`, `git status`, `Get-Content`, a test run — are never sent.
 
-Decisions 3 to 7 are made before the first token, and they travel in a single
-request — Jev evaluates every question in parallel against one state, so asking
-about the approach, the request, seven tool families and six skills costs one
-round trip. The pre-turn call runs only for a fresh, non-trivial build request —
-never for a continuation, a short message, or a lite model.
+**12. It hands a large job out in pieces.** One agent carrying a large request
+keeps everything it read for the first part in the context it writes the last
+part with: the transcript fills with the searches behind work already finished,
+the compressor starts cutting, and by the fourth file the model is working from
+stumps. When Jev is sure the request is a large job made of separate work
+packages — a feature across several modules with its tests and documentation, a
+batch of unrelated fixes, the same migration over many files — ETTORE
+orchestrates it before the main model's first step:
 
-Items 2 to 11 exist only with Jev on. They are reached through a decisive
+1. *The split.* Jev does not write, so the split is one call to the model you
+   are already on: two to five packages, each with a brief of its own. It is
+   made after the exploration of item 4 when there was one, and from a map of
+   the repository otherwise, so the briefs name real paths. A planner that
+   answers "this is one piece of work" ends the orchestration there, and the
+   turn goes on as usual.
+2. *The workers.* Each package goes to a sub-agent in a context of its own.
+   **Research packages are read-only and run together**, up to three at a time.
+   **Packages that change files run one at a time**, in order, and each worker
+   is told what the ones before it reported — two agents editing the same tree
+   at once overwrite each other. A worker asks for the same approvals the main
+   agent would, cannot delegate again, and is bounded at thirty iterations and
+   fifteen minutes.
+3. *The check.* The turn opens with the workers' reports. The main agent has
+   seen none of their work, so its part is to verify it: the files the workers
+   changed count as the turn's own changes, which means [done still means the
+   tests pass](#done-means-the-tests-pass). A change package that fails stops
+   the line, and what it left — with the packages after it — is handed to the
+   main agent to carry out itself.
+
+```
+◆ Jev (260ms) — large job: splitting it into work packages (confidence 0.93)
+◆ Jev — 4 work packages — research, together: 1. Where the strings are read · 2. How the tests run — changes, one at a time: 3. Add German to the site → 4. Cover it in the tests
+◆ Jev (212s) — workers finished: 4 of 4 packages done, 7 files changed
+```
+
+Each worker shows as a `worker` row in the running-tool display, with its own
+tool calls scrolling under it. It is the one thing Jev starts that costs a model
+call per package, so it has a switch of its own: `/jev orchestrate off` leaves
+the rest of Jev running. It never starts for a request Jev finds ambiguous or
+trivial, and never when the configuration asks for a plan before any work
+(`explicitPlan: "always"`) — the workers would have done the work by then.
+
+Decisions 3 to 7 and 12 are made before the first token, and they travel in a
+single request — Jev evaluates every question in parallel against one state, so
+asking about the approach, the request, seven tool families and six skills
+costs one round trip. The pre-turn call runs only for a fresh, non-trivial build
+request — never for a continuation, a short message, or a lite model.
+
+Items 2 to 12 exist only with Jev on. They are reached through a decisive
 verdict, and there is no verdict when Jev is off, unreachable or unsure.
 
 ### Checking it is really working
@@ -726,6 +769,7 @@ A label in the sidebar proves nothing, so `/jev status` reports the traffic:
 
 ```
 Jev: on — model jev-latest, key apik...d2ed.
+Orchestrator (splitting a large request among worker sub-agents): on — /jev orchestrate on|off.
 
 Calls this session: 3 ok, 0 failed.
 Answered by: jev-1.13.0 (reported by the server, not by ETTORE).
@@ -746,7 +790,8 @@ check instead of doing the work.
 ### Why it is safe to leave on
 
 - **Jev decides, it never writes.** No text of its own ever reaches you or the
-  transcript. It answers yes/no questions; what happens next is ETTORE's.
+  transcript. It answers yes/no questions; what happens next is ETTORE's. Even
+  when it starts the orchestrator, the split and the work are the model's.
 - **It can make a turn cheaper, never less safe.** Where speed is the point —
   the plan, the tool list, the effort, what survives compression — a decisive
   verdict may also *remove* what a heuristic added. Confirmations are the

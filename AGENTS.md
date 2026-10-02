@@ -80,5 +80,11 @@ python3 test_display.py            # TUI layout validation
 
 ## Key source files
 - `src/agents/index.js` — Agent class, tool-calling loop, system prompts
+- `src/agents/orchestrator.js` — splitting a large request into work packages
+  and scheduling the worker sub-agents (research in parallel, changes in
+  sequence). Started by Jev's pre-turn judgment (`_judgePreTurn` →
+  `_jevOrchestrate`); knows nothing about the Agent class, which hands it
+  `runWorker`
+- `src/jev/turn-judge.js` — the questions Jev is asked before and after a turn
 - `src/tools/index.js` — tool implementations and definitions
 - `src/providers/index.js` — ConnectionManager
