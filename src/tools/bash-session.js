@@ -19,7 +19,7 @@ import { randomBytes } from 'crypto';
 import { createServer } from 'net';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
-import { killProcessTree, resolveShell } from '../utils/platform.js';
+import { detachOptions, killProcessTree, resolveShell } from '../utils/platform.js';
 
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -86,12 +86,22 @@ export const SHELL_DIALECTS = {
     // fixes both; a command with its own redirect (heredoc, `< file`, an
     // explicit pipe) still wins, because that redirect is applied closer in.
     //
+    // The command never reaches stdin as shell text: it travels as one
+    // single-quoted word and is run by `eval`, still in the session's own
+    // scope. Written into the group as text, a command the shell could not
+    // finish parsing took the framing with it — an unclosed quote or an
+    // unterminated heredoc read the sentinel lines below as more of itself,
+    // so nothing printed and the call sat there for the full timeout; an
+    // unclosed `if` or a stray `}` was a syntax error in the shell's own
+    // input, which ended the session and its state. Under `eval` each of
+    // those is an error message and an exit code, and the session lives.
+    //
     // `$?` is captured into a variable first: the stderr printf below would
     // otherwise overwrite it before the exit code is read. Both printfs sit
     // outside the brace group, so a `2>&1` inside the user's command
     // redirects the command's own output without capturing the framing.
     frame: (command, sentinel) =>
-      `{ ${command}\n} < /dev/null\n__ettore_ec=$?\n`
+      `{ eval '${String(command).replace(/'/g, "'\\''")}'\n} < /dev/null\n__ettore_ec=$?\n`
       + `printf '\\n%s\\n' '${sentinel}' >&2\n`
       + `printf '\\n%sEXIT:%d\\n' '${sentinel}' $__ettore_ec\n`,
   },
@@ -262,6 +272,14 @@ export class BashSession {
         env: { ...process.env, ...this.dialect.env },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        // Its own session on POSIX, as the one-shot `bash` tool has. Sharing
+        // the CLI's terminal meant a command that prompts on /dev/tty rather
+        // than stdin — sudo, ssh, a git credential prompt — waited there for
+        // the whole timeout, and kept reading the user's keystrokes after it:
+        // the timeout signalled a process group that did not exist, so only
+        // the shell died and what it was running lived on. With no terminal
+        // the prompt fails at once, and kill() reaches the whole group.
+        ...detachOptions({ platform: this.platform }),
       });
     this.process = proc;
     this.alive = true;

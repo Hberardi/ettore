@@ -1,6 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getBashSession, killBashSession, sessionDialect, SHELL_DIALECTS } from '../src/tools/bash-session.js';
@@ -202,6 +202,109 @@ test('bash_session: an explicit heredoc still wins over the /dev/null default', 
   }
 });
 
+// ── Commands the shell cannot finish parsing ─────────────────────────────────
+//
+// The command used to be written into the frame as shell text, so one bash
+// could not finish parsing took the framing with it: an unclosed quote read
+// the sentinel lines as more of itself and the call cost the full timeout —
+// two minutes by default — while a syntax error ended the session shell.
+
+test('bash_session: an unclosed quote is an error, not a wait for the timeout', posixOnly, async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    const started = Date.now();
+    const r = await session.run('echo "unterminated', { timeoutMs: 6000 });
+    assert.ok(!r.timedOut, 'the call must not hit the timeout');
+    assert.ok(Date.now() - started < 3000, 'the call must return promptly');
+    assert.notEqual(r.exitCode, 0);
+    assert.ok(r.stderr.trim().length > 0, 'the shell must say what was wrong');
+    assert.doesNotMatch(r.stderr, /__ETTORE_SESSION_END_/, 'the framing was read as part of the command');
+  } finally {
+    killBashSession();
+  }
+});
+
+test('bash_session: a syntax error does not end the session or lose its state', posixOnly, async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    await session.run('ETTORE_KEPT=still_set');
+    for (const broken of ['if true; then echo a', 'echo a; }', 'for i in 1 2; do']) {
+      const r = await session.run(broken, { timeoutMs: 6000 });
+      assert.ok(!r.timedOut, `${broken}: timed out`);
+      assert.ok(!r.sessionDied, `${broken}: the session shell exited`);
+      assert.notEqual(r.exitCode, 0, `${broken}: reported success`);
+    }
+    const after = await session.run('echo "kept=$ETTORE_KEPT"');
+    assert.match(after.stdout, /kept=still_set/);
+  } finally {
+    killBashSession();
+  }
+});
+
+test('bash_session: quotes in the command reach the shell unchanged', posixOnly, async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    const r = await session.run(`printf '%s|' 'it'"'"'s' "a 'b' c" $'tab\\there'; echo 'multi\nline'`);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.equal(r.stdout, "it's|a 'b' c|tab\there|multi\nline");
+  } finally {
+    killBashSession();
+  }
+});
+
+// ── Its own process group, and no terminal ───────────────────────────────────
+//
+// The session shell shared the CLI's terminal and process group. A command
+// that prompts on /dev/tty — sudo, ssh, a git credential prompt — waited there
+// for the whole timeout, and the timeout then signalled a group that did not
+// exist: only the shell died, and the command went on reading the keyboard.
+
+const alive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
+
+test('bash_session: the shell leads its own process group, away from the terminal', posixOnly, async () => {
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    const r = await session.run('echo "pid=$$ pgid=$(ps -o pgid= -p $$ | tr -d " ")"');
+    const [, pid, pgid] = r.stdout.match(/pid=(\d+) pgid=(\d+)/) || [];
+    assert.ok(pid, `could not read the shell's ids: ${JSON.stringify(r)}`);
+    assert.equal(pgid, pid, 'a timeout signals the group, so the shell has to lead one');
+
+    const started = Date.now();
+    const tty = await session.run('read -r X < /dev/tty; echo "rc=$?"', { timeoutMs: 6000 });
+    assert.ok(!tty.timedOut, 'a prompt on the terminal must fail, not wait');
+    assert.ok(Date.now() - started < 3000);
+    assert.match(tty.stdout, /rc=[1-9]/);
+  } finally {
+    killBashSession();
+  }
+});
+
+test('bash_session: a timeout takes down what the command started, not just the shell', posixOnly, async () => {
+  killBashSession();
+  const dir = await mkdtemp(join(tmpdir(), 'ettore-bashsess-kill-'));
+  const pidFile = join(dir, 'pid');
+  try {
+    const session = getBashSession(process.cwd());
+    const r = await session.run(`bash -c 'echo $$ > ${pidFile}; sleep 30'`, { timeoutMs: 800 });
+    assert.equal(r.timedOut, true);
+    const pid = Number((await readFile(pidFile, 'utf8')).trim());
+    assert.ok(Number.isFinite(pid) && pid > 0, 'the command never started');
+
+    // Give the signal a moment to land.
+    for (let i = 0; i < 40 && alive(pid); i++) await new Promise(res => { setTimeout(res, 50); });
+    assert.equal(alive(pid), false, `pid ${pid} survived the timeout`);
+  } finally {
+    killBashSession();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ─── Shell dialects ──────────────────────────────────────────────────────────
 // The session used to be bash-only: `spawn('bash', …)` with no platform
 // branch, so on Windows it never started at all.
@@ -236,6 +339,13 @@ test('both dialects frame the command with the sentinel after the output', () =>
     );
     assert.ok(framed.endsWith('\n'), `${name}: the shell needs the trailing newline to execute`);
   }
+});
+
+test('the bash frame hands the command to eval as one quoted word', () => {
+  // As text in the group, an unclosed quote swallowed the sentinel lines.
+  const framed = SHELL_DIALECTS.bash.frame(`echo "it's`, 'SENT');
+  assert.ok(framed.startsWith(`{ eval 'echo "it'\\''s'\n} < /dev/null\n`), framed);
+  assert.equal(framed.split('SENT').length - 1, 2, 'one sentinel per stream, both outside the command');
 });
 
 test('the PowerShell frame emits a parseable EXIT code and resets it first', () => {

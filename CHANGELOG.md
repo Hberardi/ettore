@@ -8,6 +8,34 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — `bash_session` commands that sat until the timeout
+
+Three ways a `bash_session` call on Linux and macOS froze for its whole
+timeout — two minutes by default — while the one-shot `bash` tool, given the
+same command, answered at once.
+
+- **An unclosed quote or heredoc swallowed the end-of-command marker.** The
+  command was written into the session shell as text, so `echo "unterminated`
+  read the framing lines after it as more of the string: nothing printed, and
+  the call waited out the timeout. The command now travels as one quoted word
+  and is run by `eval`, in the session's own scope as before — the shell
+  reports `unexpected EOF while looking for matching '"'` with exit code 2,
+  straight away.
+- **A syntax error ended the session.** An unclosed `if`, a `for … do` with no
+  `done` or a stray `}` was a syntax error in the shell's own input: the shell
+  exited and took the working directory, exports and functions with it. It is
+  now an error message and an exit code, and the session keeps its state.
+- **A prompt on the terminal waited for an answer nobody could give, and kept
+  the keyboard afterwards.** The session shell shared the CLI's terminal, so a
+  command that asks on `/dev/tty` rather than stdin — a `sudo` password, an
+  `ssh` passphrase, a git credential prompt — sat there until the timeout. The
+  timeout then signalled a process group that did not exist: only the shell
+  died, and the command stayed attached to the terminal, reading the keystrokes
+  meant for the TUI. The session shell now runs in a session of its own, as the
+  one-shot `bash` already did: the prompt fails at once (`a terminal is
+  required`), and a timeout, Esc or quitting stops the shell together with
+  everything it started.
+
 ## [1.16.0] — 2026-09-29
 
 ### Added — MiniMax-M3.1 Flash Preview

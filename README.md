@@ -83,6 +83,13 @@ its error, not just the lines it printed before failing. `bash` runs each
 command on its own; `bash_session` keeps one shell alive, so `cd`, exports and
 functions carry over to the next call.
 
+Neither waits on a command that cannot go on. stdin is closed and, on Linux and
+macOS, the shell has no terminal: a command that asks for input — a `sudo`
+password, an `ssh` passphrase, a git credential prompt — fails at once and says
+so, rather than sitting until the timeout. A command with an unclosed quote or
+a syntax error comes back as that error, and the session keeps its state. When
+a command does run out of time, everything it started is stopped with it.
+
 PowerShell is preferred over Git Bash even when Git Bash is installed: a `bash`
 found on a Windows `PATH` is often WSL's, and that one cannot see `C:\…` the
 way the caller means. To override:
