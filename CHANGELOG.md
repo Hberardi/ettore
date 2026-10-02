@@ -8,6 +8,8 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-10-02
+
 ### Added — an orchestrator, started by Jev
 
 One agent carrying a large request keeps everything it read for the first part
