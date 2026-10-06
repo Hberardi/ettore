@@ -8,6 +8,8 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.17.1] — 2026-10-06
+
 ### Fixed — `bash_session` after a timeout, and what `bash` leaves unsaid
 
 - **A timeout no longer breaks stderr for the rest of the session.** When a
