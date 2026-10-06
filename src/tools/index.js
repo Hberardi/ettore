@@ -4,7 +4,7 @@ import { getBashSession } from './bash-session.js';
 import { sanitizeOutput } from '../utils/output.js';
 import { promisify } from 'util';
 import { readFile, writeFile, readdir, stat, access, readlink } from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
 import { join, extname, dirname } from 'path';
 import { glob as globby } from 'glob';
 import { uiBridge } from './bridge.js';
@@ -549,6 +549,18 @@ async function requestConfirmation({ title, detail, allowNonInteractive = true }
  */
 export async function confirmWithUser({ title, detail = '' } = {}) {
   return requestConfirmation({ title: String(title || 'Confermi?'), detail: String(detail || ''), allowNonInteractive: false });
+}
+
+// A `workdir` that is not there makes spawn fail with "spawn bash ENOENT",
+// which reads as bash being missing and sends the model looking for a shell.
+function missingWorkdir(workdir) {
+  if (!workdir) return null;
+  try {
+    if (statSync(workdir).isDirectory()) return null;
+    return `Error: workdir is not a directory: ${workdir}`;
+  } catch {
+    return `Error: workdir does not exist: ${workdir}`;
+  }
 }
 
 /**
@@ -2188,6 +2200,8 @@ export const toolHandlers = {
       // only deletion and changes outside the working directory.
       const refused = await guardShellCommand(command, workdir);
       if (refused) return refused;
+      const badWorkdir = missingWorkdir(workdir);
+      if (badWorkdir) return badWorkdir;
       const startedAt = Date.now();
       const timeoutMs = Math.max(1000, Math.min(Number(timeout_ms) || 120_000, 600_000));
       const heartbeat = setInterval(() => {
@@ -2231,7 +2245,11 @@ export const toolHandlers = {
         const body = stdout && stderr.trim()
           ? `${stdout.replace(/\n*$/, '')}\n[stderr]\n${stderr}`
           : (stdout || stderr || '(no output)');
-        const suffix = result.code ? `\n[exit code ${result.code}]` : '';
+        // Killed by a signal there is no exit code, and without a word about
+        // it a command that was OOM-killed or segfaulted read as a clean run.
+        const suffix = result.code
+          ? `\n[exit code ${result.code}]`
+          : (result.signal ? `\n[killed by signal ${result.signal}]` : '');
         // Cap and clean so chat clients don't truncate silently. The bash
         // tool is the most common source of runaway output (e.g. a `cat` on
         // a large file, or a Python script that prints verbosely) and the
@@ -2268,6 +2286,8 @@ export const toolHandlers = {
       // only deletion and changes outside the working directory.
       const refused = await guardShellCommand(command, workdir);
       if (refused) return refused;
+      const badWorkdir = missingWorkdir(workdir);
+      if (badWorkdir) return badWorkdir;
 
       const timeoutMs = Math.max(1000, Math.min(Number(timeout_ms) || 120_000, 600_000));
       const session = getBashSession(workdir || process.cwd());
@@ -2277,9 +2297,17 @@ export const toolHandlers = {
         onProgress: (msg) => emitToolProgress('bash_session', { command }, msg),
       });
 
+      // Cleaned and capped as `bash` does it. This used to hand back whatever
+      // the shell printed: colour codes into the transcript, and a `cat` on a
+      // large file whole into the model's context.
+      const out = sanitizeOutput(result.stdout || '', { maxBytes: 50_000 });
+      const err = sanitizeOutput(result.stderr || '', { maxBytes: 20_000 });
       const parts = [];
-      if (result.stdout) parts.push(result.stdout);
-      if (result.stderr) parts.push(`[stderr]\n${result.stderr}`);
+      if (out.output) parts.push(out.output);
+      if (err.output) parts.push(`[stderr]\n${err.output}`);
+      if (out.truncated || err.truncated) {
+        parts.push(`[bash_session output was ${out.originalBytes + err.originalBytes} bytes; capped — pipe through head/tail/grep for narrower output]`);
+      }
       if (result.timedOut) {
         parts.push(`[timeout after ${Math.round(timeoutMs / 1000)}s — session killed, will respawn fresh on next call]`);
       } else if (result.aborted) {

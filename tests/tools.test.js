@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toolHandlers, validateToolArgs } from '../src/tools/index.js';
 import { uiBridge } from '../src/tools/bridge.js';
+import { killBashSession } from '../src/tools/bash-session.js';
 
 async function withTmpDir(fn) {
   const dir = await mkdtemp(join(tmpdir(), 'ettore-test-'));
@@ -105,6 +106,35 @@ test('write: proceeds when user confirms overwrite', async () => {
 test('bash: harmless command runs without confirmation', async () => {
   const r = await toolHandlers.bash({ command: 'echo hi' });
   assert.match(r, /hi/);
+});
+
+const posixOnly = { skip: process.platform === 'win32' };
+
+test('bash: a workdir that does not exist is named, not reported as a missing shell', async () => {
+  const missing = join(tmpdir(), 'ettore-no-such-dir-xyz');
+  for (const tool of ['bash', 'bash_session']) {
+    const r = await toolHandlers[tool]({ command: 'pwd', workdir: missing });
+    assert.match(r, /workdir does not exist/);
+    assert.doesNotMatch(r, /ENOENT/);
+  }
+});
+
+test('bash: a command killed by a signal does not read as a clean run', posixOnly, async () => {
+  const r = await toolHandlers.bash({ command: 'kill -9 $$' });
+  assert.match(r, /killed by signal SIGKILL/);
+});
+
+test('bash_session: output is cleaned of colour codes and capped', posixOnly, async () => {
+  try {
+    const coloured = await toolHandlers.bash_session({ command: "printf '\\033[31mred\\033[0m\\n'" });
+    assert.equal(coloured, 'red');
+    const big = await toolHandlers.bash_session({ command: 'seq 1 30000' });
+    assert.ok(big.length < 60_000, `expected a capped result, got ${big.length} chars`);
+    assert.match(big, /bash_session output was \d+ bytes; capped/);
+    assert.match(big, /30000/);
+  } finally {
+    killBashSession();
+  }
 });
 
 test('bash: destructive commands are gated and refusable', async () => {

@@ -8,6 +8,27 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed — `bash_session` after a timeout, and what `bash` leaves unsaid
+
+- **A timeout no longer breaks stderr for the rest of the session.** When a
+  command ran out of time (or was cancelled with Esc) the shell was killed and
+  a new one started on the next call — but the old shell's stderr closed a
+  moment later, and that close was recorded against the new shell. From then
+  on every command settled without waiting for its stderr: the error output
+  came back empty, or with the internal `__ETTORE_SESSION_END_…__` marker in
+  it. The listeners and the "stderr is closed" fact now belong to the shell
+  the command actually ran in (`src/tools/bash-session.js`).
+- **`bash_session` output is cleaned and capped like `bash`'s.** It used to
+  return whatever the shell printed: colour codes into the transcript and a
+  100KB listing whole into the model's context. stdout is capped at 50KB and
+  stderr at 20KB, head and tail kept, with a line saying so.
+- **A `workdir` that does not exist says so.** Both tools answered
+  `spawn bash ENOENT` (or `shell exited (code -2)`), which reads as bash being
+  missing. They now answer `workdir does not exist: <path>`.
+- **A command killed by a signal is reported.** `bash` showed an OOM-killed or
+  segfaulted command as `(no output)` with no exit code — a clean run. It now
+  adds `[killed by signal SIGKILL]`.
+
 ## [1.17.0] — 2026-10-02
 
 ### Added — an orchestrator, started by Jev

@@ -88,7 +88,14 @@ macOS, the shell has no terminal: a command that asks for input — a `sudo`
 password, an `ssh` passphrase, a git credential prompt — fails at once and says
 so, rather than sitting until the timeout. A command with an unclosed quote or
 a syntax error comes back as that error, and the session keeps its state. When
-a command does run out of time, everything it started is stopped with it.
+a command does run out of time, everything it started is stopped with it. The
+session shell is replaced on the next call, and the new one reports stderr as
+reliably as the first.
+
+Output from both is stripped of colour codes and capped (50KB, head and tail
+kept) so one long listing does not fill the model's context. A command killed
+by a signal is reported as such, and a `workdir` that does not exist is named
+rather than surfacing as a failure to start the shell.
 
 PowerShell is preferred over Git Bash even when Git Bash is installed: a `bash`
 found on a Windows `PATH` is often WSL's, and that one cannot see `C:\…` the

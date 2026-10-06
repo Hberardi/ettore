@@ -105,6 +105,30 @@ test('bash_session: timeout kills the session and reports it', posixOnly, async 
   }
 });
 
+test('bash_session: stderr is still whole in the shell that replaces a timed-out one', posixOnly, async () => {
+  // The killed shell's stderr closes after its replacement has started. That
+  // close used to be recorded against the new shell, which then stopped
+  // waiting for stderr at all: the error output came back empty, or with the
+  // end-of-command sentinel still in it, for the rest of the session.
+  killBashSession();
+  try {
+    const session = getBashSession(process.cwd());
+    const r = await session.run('sleep 5', { timeoutMs: 250 });
+    assert.equal(r.timedOut, true);
+    const first = await session.run('echo out; echo err-first >&2');
+    assert.equal(first.stderr, 'err-first');
+    // Long enough for the old shell's pipes to have closed.
+    await new Promise((done) => { setTimeout(done, 300); });
+    for (let i = 0; i < 10; i++) {
+      const next = await session.run(`echo out${i}; echo err${i} >&2`);
+      assert.equal(next.stdout, `out${i}`);
+      assert.equal(next.stderr, `err${i}`);
+    }
+  } finally {
+    killBashSession();
+  }
+});
+
 test('bash_session: stdout and stderr are separated', posixOnly, async () => {
   killBashSession();
   try {

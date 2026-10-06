@@ -409,6 +409,11 @@ export class BashSession {
       return Promise.resolve({ stdout: '', stderr: '', exitCode: 0 });
     }
     this.ensureStarted();
+    // The shell this command runs in. `this.process` is not it for long: a
+    // timeout or an abort clears it and the next call starts another, while
+    // this one's pipes are still closing. Everything below that listens,
+    // unlistens or records a fact about a pipe has to mean this process.
+    const proc = this.process;
     const sentinel = makeSentinel();
     const startedAt = Date.now();
 
@@ -452,10 +457,13 @@ export class BashSession {
         if (heartbeat) clearInterval(heartbeat);
         clearTimeout(timer);
         if (graceTimer) clearTimeout(graceTimer);
-        this.process?.stdout?.off('data', onStdout);
-        this.process?.stderr?.off('data', onStderr);
-        this.process?.stderr?.off('end', onStderrEnd);
-        this.process?.off('close', onClose);
+        // Off `proc`, not `this.process`: kill() has already cleared that on
+        // a timeout or an abort, and listeners left on the dying shell kept
+        // firing into the session that replaced it.
+        proc.stdout?.off('data', onStdout);
+        proc.stderr?.off('data', onStderr);
+        proc.stderr?.off('end', onStderrEnd);
+        proc.off('close', onClose);
         signal?.removeEventListener?.('abort', onAbort);
         resolve(value);
       };
@@ -501,8 +509,14 @@ export class BashSession {
 
       // The pipe closed: the command redirected or closed stderr, so its
       // sentinel can never arrive. Whatever is buffered is all there is.
+      //
+      // The flag is the session's, so it is only set by the session's current
+      // shell. A killed shell's stderr closes a moment after its replacement
+      // has started, and recording that against the new one declared a live
+      // pipe dead: every later command settled without waiting for stderr —
+      // its error output empty, or with the sentinel still in it.
       const onStderrEnd = () => {
-        this._stderrEnded = true;
+        if (this.process === proc) this._stderrEnded = true;
         if (!stderrSentinelSeen) {
           stderrSentinelSeen = true;
           settleIfFramed();
@@ -566,10 +580,10 @@ export class BashSession {
       }, timeoutMs);
       timer.unref?.();
 
-      this.process.stdout.on('data', onStdout);
-      this.process.stderr.on('data', onStderr);
-      this.process.stderr.on('end', onStderrEnd);
-      this.process.on('close', onClose);
+      proc.stdout.on('data', onStdout);
+      proc.stderr.on('data', onStderr);
+      proc.stderr.on('end', onStderrEnd);
+      proc.on('close', onClose);
       // A pipe that closed during an earlier command stays closed: nothing
       // will ever arrive on it again, so do not wait on it at all.
       if (this._stderrEnded) stderrSentinelSeen = true;
