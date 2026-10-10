@@ -8,6 +8,8 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.18.1] — 2026-10-10
+
 ### Changed — the orchestrator's workers have the plugins
 
 Every sub-agent was started without the plugin registry, so a large job that
