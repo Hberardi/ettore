@@ -8,6 +8,40 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Changed — the orchestrator's workers have the plugins
+
+Every sub-agent was started without the plugin registry, so a large job that
+Jev split among workers lost its plugins exactly when it was delegated: the
+package that had to query the database, read a CI log or write a spreadsheet
+could only be done through the shell, or left to the main agent.
+
+- **Workers get the plugin tools.** A change worker has all of them, with the
+  approvals the main agent would ask for. A research worker, which is
+  read-only, has the ones that declare `risk: 'low'` — the rule plan mode
+  already applied to the main agent. The exploration sub-agent still gets
+  none: it searches the code.
+- **The planner knows what is installed.** The split is made with the list of
+  enabled plugin tools, each marked read-only or not. A package names the
+  plugin tools it needs and its worker is handed exactly those, ahead of
+  whatever the router would have ranked first. A package that names a writing
+  plugin tool is run as a change package even when the planner called it
+  research (`src/agents/orchestrator.js`).
+
+### Fixed — read-only meant "not offered", not "not allowed"
+
+- **A tool that writes could run in plan mode.** Plan mode kept `write`,
+  `bash` and the plugin tools that write out of the list the model was
+  offered, but nothing checked the call itself: a model that named one anyway
+  had it carried out — a file written, a command run, in the mode whose promise
+  is that it changes nothing. The call is now refused in plan mode: the
+  built-in tools the router reserves for build mode (file edits, the shell,
+  test and check runners, starting or driving an app, media generation) and
+  any plugin tool that is not `risk: 'low'`. It holds for the main agent, for
+  the exploration sub-agent and for the orchestrator's read-only workers.
+- **Read-only plugin tools with tool routing off.** `/config tool-routing off`
+  gave plan mode a fixed list with no plugin tools at all; it now includes the
+  low-risk ones, as the router does.
+
 ## [1.18.0] — 2026-10-10
 
 ### Added — a first start that leads somewhere

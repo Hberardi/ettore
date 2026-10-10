@@ -17,6 +17,7 @@ import {
   PLANNER_OPENING,
   WORKER_OPENING,
   buildPlannerMessages,
+  describePluginTools,
   orchestrationReport,
   parseWorkPlan,
   planWork,
@@ -172,6 +173,69 @@ test('a worker is told its package, the request, and what the others did — and
   assert.match(brief, /only your package/);
   assert.match(brief, /Le stringhe sono in site\/i18n/);
   assert.match(workerBrief(plan.tasks[0], { request: 'x' }), /READ-ONLY/);
+});
+
+// ── plugins in the plan ──────────────────────────────────────────────────
+
+const PLUGIN_TOOLS = [
+  { name: 'db_query', plugin: 'fakedb', description: 'Run a read-only SQL query.', readOnly: true },
+  { name: 'db_write', plugin: 'fakedb', description: 'Insert or update rows.', readOnly: false },
+  { name: 'ci_failures', plugin: 'ci', description: 'Why the last CI run failed.', readOnly: true },
+];
+
+test('the planner is told which plugin tools the workers have, and which are read-only', () => {
+  assert.equal(describePluginTools(PLUGIN_TOOLS), [
+    'fakedb:',
+    '- db_query [read-only] — Run a read-only SQL query.',
+    '- db_write — Insert or update rows.',
+    'ci:',
+    '- ci_failures [read-only] — Why the last CI run failed.',
+  ].join('\n'));
+  const [system, user] = buildPlannerMessages({ request: 'fix the report', pluginTools: PLUGIN_TOOLS });
+  assert.match(user.content, /PLUGIN TOOLS THE WORKERS HAVE/);
+  assert.match(user.content, /- db_write — Insert or update rows\./);
+  assert.match(system.content, /"tools":\["<plugin tool name>"/);
+  // No plugins, no section: the planner is not told about tools nobody has.
+  assert.doesNotMatch(buildPlannerMessages({ request: 'fix the report' })[1].content, /PLUGIN TOOLS/);
+});
+
+test('a long catalogue is cut at whole tools and says how many it left out', () => {
+  const many = Array.from({ length: 60 }, (_, i) => ({
+    name: `tool_${i}`, plugin: `plugin_${Math.floor(i / 6)}`, description: 'x'.repeat(130), readOnly: false,
+  }));
+  const text = describePluginTools(many);
+  assert.ok(text.length < 3400, `expected a capped catalogue, got ${text.length} chars`);
+  const shown = (text.match(/^- tool_/gm) || []).length;
+  assert.match(text, new RegExp(`… and ${60 - shown} more plugin tools not listed\\.$`));
+});
+
+test('a package keeps the plugin tools that exist, and one that needs a writing tool is a change', () => {
+  const plan = parseWorkPlan(JSON.stringify({
+    tasks: [
+      { title: 'Read the orders', kind: 'research', brief: 'Query the orders table.', tools: ['db_query', 'no_such_tool', 'db_query'] },
+      { title: 'Fix the totals', kind: 'research', brief: 'Update the wrong rows.', tools: ['db_query', 'db_write'] },
+      { title: 'Update the code', kind: 'change', brief: 'Fix the calculation.' },
+    ],
+  }), { pluginTools: PLUGIN_TOOLS });
+  assert.deepEqual(plan.tasks.map(t => [t.title, t.kind, t.tools]), [
+    ['Read the orders', 'research', ['db_query']],
+    // Called research, but a read-only worker would be refused db_write.
+    ['Fix the totals', 'change', ['db_query', 'db_write']],
+    ['Update the code', 'change', []],
+  ]);
+  // With no plugins installed, a tool the planner made up is dropped.
+  const bare = parseWorkPlan(JSON.stringify({ tasks: [
+    { title: 'a', kind: 'research', brief: 'x', tools: ['db_query'] },
+    { title: 'b', kind: 'change', brief: 'y' },
+  ] }));
+  assert.deepEqual(bare.tasks.map(t => [t.kind, t.tools]), [['research', []], ['change', []]]);
+});
+
+test('a worker is told which plugin tools its package was given', () => {
+  const brief = workerBrief({ id: 1, title: 'Read the orders', kind: 'research', brief: 'Query.', files: [], tools: ['db_query'] }, { request: 'r', total: 2 });
+  assert.match(brief, /PLUGIN TOOLS FOR THIS PACKAGE: db_query\./);
+  const plain = workerBrief({ id: 1, title: 'x', kind: 'change', brief: 'y', files: [], tools: [] }, { request: 'r', total: 2 });
+  assert.doesNotMatch(plain, /PLUGIN TOOLS/);
 });
 
 // ── inside a turn, started by Jev ────────────────────────────────────────
@@ -509,4 +573,181 @@ test('/jev orchestrate switches it on and off and says which it is', async () =>
   assert.equal(isOrchestrationEnabled(), false);
   assert.match(await jev(['orchestrate', 'on']), /Orchestrator: on/);
   assert.match(await jev(['orchestrate', 'forse']), /Usage/);
+});
+
+// ── plugins reach the workers ────────────────────────────────────────────
+
+async function registryWithFakeDb(calls) {
+  const { PluginRegistry } = await import('../src/plugins/index.js');
+  const { toolDefinitions, toolHandlers } = await import('../src/tools/index.js');
+  const registry = new PluginRegistry({ builtInTools: toolDefinitions, builtInHandlers: toolHandlers });
+  registry.register({
+    manifest: { name: 'fakedb', version: '1.0.0' },
+    tools: {
+      db_query: {
+        description: 'Run a read-only SQL query against the orders database.',
+        risk: 'low',
+        parameters: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'] },
+        handler: async ({ sql }) => { calls.push(['db_query', sql]); return '3 rows'; },
+      },
+      db_write: {
+        description: 'Insert or update rows in the orders database.',
+        risk: 'high',
+        parameters: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'] },
+        handler: async ({ sql }) => { calls.push(['db_write', sql]); return '1 row updated'; },
+      },
+    },
+    commands: {},
+    hooks: {},
+  });
+  return registry;
+}
+
+const callTool = (id, name, args) => {
+  const tc = { id, type: 'function', function: { name, arguments: JSON.stringify(args) } };
+  return { type: 'tool_calls', tool_calls: [tc], message: { role: 'assistant', content: '', tool_calls: [tc] } };
+};
+const toolResults = messages => messages.filter(m => m.role === 'tool').map(m => String(m.content));
+
+const DB_PLAN = {
+  rationale: 'leggere, poi correggere',
+  tasks: [
+    { title: 'Leggi gli ordini', kind: 'research', brief: 'Interroga la tabella ordini.', tools: ['db_query'] },
+    { title: 'Correggi i totali', kind: 'change', brief: 'Aggiorna le righe sbagliate.', tools: ['db_write'] },
+  ],
+};
+
+test('workers have the plugins: the planner hears of them, and each package gets the tools it named', async () => {
+  await activate();
+  globalThis.fetch = fakeJev({ orchestrate: 0.93 });
+  const calls = [];
+  const seen = {};
+  const plugins = [];
+  const emitter = new EventEmitter();
+  emitter.on('toolStart', (e) => { if (e.plugin) plugins.push([e.name, e.plugin, Boolean(e.subagent)]); });
+
+  const client = scripted({
+    plan: DB_PLAN,
+    seen,
+    worker: (messages, entry) => {
+      if (toolResults(messages).length) return { type: 'text', content: `Fatto: ${entry.title}. ${toolResults(messages)[0]}` };
+      return entry.title === 'Leggi gli ordini'
+        ? callTool('q1', 'db_query', { sql: 'select * from orders' })
+        : callTool('w1', 'db_write', { sql: 'update orders set total = 1' });
+    },
+  });
+  await agentIn(client, { pluginRegistry: await registryWithFakeDb(calls) }).run(REQUEST, emitter);
+
+  assert.match(seen.planner[0], /PLUGIN TOOLS THE WORKERS HAVE/);
+  assert.match(seen.planner[0], /- db_query \[read-only\]/);
+  assert.match(seen.planner[0], /- db_write — Insert or update rows/);
+
+  // One entry per worker turn; the first of each is what it was offered.
+  const research = seen.workers.find(w => w.title === 'Leggi gli ordini');
+  const change = seen.workers.find(w => w.title === 'Correggi i totali');
+  assert.ok(research.tools.includes('db_query'), `the research worker must be offered db_query, got ${research.tools}`);
+  assert.ok(!research.tools.includes('db_write'), 'a read-only worker is not offered a plugin tool that writes');
+  assert.match(research.brief, /PLUGIN TOOLS FOR THIS PACKAGE: db_query/);
+  assert.ok(change.tools.includes('db_write'), `the change worker must be offered db_write, got ${change.tools}`);
+  assert.ok(change.tools.includes('db_query'));
+
+  assert.deepEqual(calls, [['db_query', 'select * from orders'], ['db_write', 'update orders set total = 1']]);
+  // The TUI names the plugin a tool belongs to, in a worker as in the main agent.
+  assert.deepEqual(plugins, [['db_query', 'fakedb', true], ['db_write', 'fakedb', true]]);
+});
+
+test('a read-only worker that calls a writing plugin tool by name is refused, and the tool does not run', async () => {
+  await activate();
+  globalThis.fetch = fakeJev({ orchestrate: 0.93 });
+  const calls = [];
+  const seen = {};
+  const refused = [];
+  const client = scripted({
+    plan: { rationale: 'x', tasks: [DB_PLAN.tasks[0], { title: 'Documenta', kind: 'change', brief: 'Scrivi le note.' }] },
+    seen,
+    worker: (messages, entry) => {
+      const results = toolResults(messages);
+      if (results.length) { refused.push(...results); return { type: 'text', content: `Fatto: ${entry.title}.` }; }
+      // Not among the tools it was offered — a model can still name it.
+      return entry.title === 'Leggi gli ordini'
+        ? callTool('w1', 'db_write', { sql: 'delete from orders' })
+        : { type: 'text', content: `Fatto: ${entry.title}.` };
+    },
+  });
+  await agentIn(client, { pluginRegistry: await registryWithFakeDb(calls) }).run(REQUEST, new EventEmitter());
+
+  assert.deepEqual(calls, [], 'db_write must not have run');
+  assert.equal(refused.length, 1);
+  assert.match(refused[0], /plugin tool "db_write" can change things, and this agent is read-only/);
+});
+
+test('the exploration sub-agent still gets no plugin tools', async () => {
+  const offered = [];
+  const agent = agentIn({
+    async turn(_messages, tools) {
+      offered.push((tools || []).map(t => t.function.name));
+      return { type: 'text', content: 'found it' };
+    },
+  }, { pluginRegistry: await registryWithFakeDb([]) });
+  const run = options => agent._runSubagent({ prompt: 'where is the orders code?', mode: 'plan', maxIterations: 2, maxToolCalls: 2, timeoutMs: 5000, ...options }, new EventEmitter(), null);
+
+  await run({});
+  assert.ok(!offered[0].some(name => name.startsWith('db_')), `explore must not see plugin tools, got ${offered[0]}`);
+  await run({ plugins: true });
+  assert.ok(offered[1].includes('db_query'));
+  assert.ok(!offered[1].includes('db_write'));
+});
+
+test('with tool routing off, plan mode still offers the read-only plugin tools', async () => {
+  const offered = [];
+  const agent = new Agent({
+    async turn(_messages, tools) {
+      offered.push((tools || []).map(t => t.function.name));
+      return { type: 'text', content: 'ok' };
+    },
+  }, {
+    provider: 'test', model: 'gpt-4o', modelCapability: 'full', workdir: work, contextWindow: 128000,
+    verifyAfterEdit: false, dynamicToolRouting: false, pluginRegistry: await registryWithFakeDb([]),
+  }, 'plan');
+  await agent.run('quanti ordini ci sono?', new EventEmitter());
+  assert.ok(offered[0].includes('db_query'));
+  assert.ok(!offered[0].includes('db_write'));
+  assert.ok(!offered[0].includes('write'));
+});
+
+test('plan mode refuses a built-in tool that changes things, even when the model names it unasked', async () => {
+  const target = join(work, 'written-in-plan-mode.txt');
+  const results = [];
+  let turn = 0;
+  const client = {
+    async turn(messages) {
+      results.push(...toolResults(messages).slice(results.length));
+      turn++;
+      if (turn === 1) return callTool('w1', 'write', { file_path: target, content: 'x' });
+      if (turn === 2) return callTool('b1', 'bash', { command: `touch ${target}`, workdir: work });
+      return { type: 'text', content: 'ok' };
+    },
+  };
+  const config = { provider: 'test', model: 'gpt-4o', modelCapability: 'full', workdir: work, contextWindow: 128000, verifyAfterEdit: false };
+  await new Agent(client, config, 'plan').run('guarda il progetto', new EventEmitter());
+  assert.equal(existsSync(target), false, 'nothing may be written in plan mode');
+  assert.equal(results.length, 2);
+  assert.match(results[0], /"write" changes things, and this agent is read-only/);
+  assert.match(results[1], /"bash" changes things, and this agent is read-only/);
+
+  // The same call in build mode is carried out.
+  turn = 0;
+  results.length = 0;
+  await new Agent(client, config, 'build').run('crea il file', new EventEmitter());
+  assert.equal(existsSync(target), true);
+});
+
+test('what plan mode refuses is what the router keeps out of it, and nothing that only reads', async () => {
+  const { isBuildOnlyTool } = await import('../src/agents/tool-router.js');
+  for (const name of ['write', 'edit', 'apply_patch_structured', 'bash', 'bash_session', 'run_tests', 'run_checks', 'dev_server', 'browser_app', 'desktop_app', 'assemble_music_video']) {
+    assert.equal(isBuildOnlyTool(name), true, `${name} changes things`);
+  }
+  for (const name of ['read', 'grep', 'glob', 'list_dir', 'git_diff', 'websearch', 'webfetch', 'browser_check', 'read_server_console', 'dep_inspect', 'ask_user', 'todo_write', 'explore', 'audio_read', 'read_pdf']) {
+    assert.equal(isBuildOnlyTool(name), false, `${name} only reads`);
+  }
 });

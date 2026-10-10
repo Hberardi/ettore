@@ -58,7 +58,7 @@ import {
   validateMessageHistory,
 } from './message-ledger.js';
 import { TurnStateMachine } from './turn-state.js';
-import { selectToolDefinitions, selectedToolNames, promptHasEditIntent, isContinuationPrompt } from './tool-router.js';
+import { selectToolDefinitions, selectedToolNames, promptHasEditIntent, isContinuationPrompt, isBuildOnlyTool } from './tool-router.js';
 import { authorizeToolAccess, normalizeToolArgsForWorkspace } from '../tools/workspace-policy.js';
 import { buildVisionContent } from '../utils/images.js';
 import { isWebImageResult } from '../tools/web-image.js';
@@ -1156,6 +1156,47 @@ export class Agent {
     return this._toolPluginByName.get(name) || null;
   }
 
+  /**
+   * Every plugin tool there is, for the orchestrator's planner: which plugin
+   * it belongs to, what it does, and whether a read-only worker may use it.
+   */
+  _pluginToolCatalog() {
+    if (!this._pluginRegistry) return [];
+    return this._getAllToolDefinitions()
+      .filter(def => def?._pluginTool && def.function?.name)
+      .map(def => ({
+        name: def.function.name,
+        plugin: def._pluginName || 'plugin',
+        description: String(def.function.description || ''),
+        readOnly: def._risk === 'low',
+      }));
+  }
+
+  /**
+   * Why a tool may not run in plan mode, or null when it may.
+   *
+   * Plan mode is read-only because the model is only offered tools that read.
+   * That holds for as long as the model calls what it was offered — and the
+   * handler map has every tool in it, so a call by name to `write`, to `bash`
+   * or to a plugin tool that writes was simply carried out. The read-only
+   * workers of the orchestrator rest on the same promise, so it is kept at
+   * the call itself: the built-in tools the router reserves for build mode,
+   * and any plugin tool not marked low risk.
+   */
+  _planModeRefusal(name) {
+    if (this.mode !== 'plan') return null;
+    const plugin = this._pluginForTool(name);
+    if (plugin) {
+      const def = this._getAllToolDefinitions().find(d => d?._pluginTool && d.function?.name === name);
+      if (def?._risk === 'low') return null;
+      return `Error: the plugin tool "${name}" can change things, and this agent is read-only. `
+        + 'Use a read-only tool, or say in your answer that this step needs an agent that can make changes.';
+    }
+    if (!isBuildOnlyTool(name)) return null;
+    return `Error: "${name}" changes things, and this agent is read-only (plan mode). `
+      + 'Use the reading tools, or say in your answer what would have to be changed — switching to build mode is the user\'s call.';
+  }
+
   // The recovery overlay used to be appended here. Every provider caches the
   // request by prefix — OpenAI, DeepSeek, Kimi, MiniMax and Gemini implicitly,
   // Anthropic at its breakpoints — and the system prompt sits at the head of
@@ -1706,7 +1747,7 @@ export class Agent {
    * @returns {Promise<{report: string, error: string}>} `report` is empty when
    *   the sub-agent produced nothing; `error` is what it failed with, if it did.
    */
-  async _runSubagent({ prompt, mode = 'plan', maxIterations, maxToolCalls, timeoutMs, onToolEnd = null }, emitter, parentSignal) {
+  async _runSubagent({ prompt, mode = 'plan', maxIterations, maxToolCalls, timeoutMs, onToolEnd = null, plugins = false, forcedTools = [] }, emitter, parentSignal) {
     const sub = new Agent(this.client, {
       ...this.config,
       maxIterations,
@@ -1719,9 +1760,17 @@ export class Agent {
       // A read-only sub-agent has nothing to verify. One that writes keeps the
       // session's setting: its edits are checked like anyone else's.
       ...(mode === 'plan' ? { verifyAfterEdit: false } : {}),
-      // Plugin tools belong to the parent's task, and a plugin's handler
-      // cannot be assumed read-only just because the mode is.
-      pluginRegistry: null,
+      // A worker carries out part of the user's job and needs the plugins the
+      // job needs: without them the package that queries the database or
+      // reads the CI log could only be done by the main agent, or badly
+      // through the shell. Read-only is still enforced — a plan-mode agent is
+      // offered only the plugin tools marked low risk, and is refused any
+      // other at the moment of the call (see _planModeRefusal).
+      // The exploration sub-agent searches the code and has no use for them.
+      pluginRegistry: plugins ? this._pluginRegistry : null,
+      // The plugin tools a package named, put in front of the worker whatever
+      // the router would have ranked first.
+      forcedTools,
       // Already loaded — re-reading the catalogue per call is pure waste.
       skillSystem: this.skillSystem,
     }, mode);
@@ -1785,6 +1834,8 @@ export class Agent {
         onToolEnd: ({ name, args: toolArgs, output }) => {
           if (FILE_MUTATION_TOOLS.has(name) && toolArgs?.file_path && mutationApplied(output)) files.add(toolArgs.file_path);
         },
+        plugins: true,
+        forcedTools: task.tools || [],
       }, emitter, parentSignal);
       if (parentSignal?.aborted) {
         outcome = { ok: false, output: 'Error: interrupted before the package was finished.' };
@@ -1842,7 +1893,7 @@ export class Agent {
     // counting since the user pressed enter, and a planner writing for a
     // minute in silence would be cancelled as a stalled turn. As with a
     // sub-agent, only the fact that something arrived is passed on.
-    const plan = await planWork(this.client, { request, exploration, repoMap }, {
+    const plan = await planWork(this.client, { request, exploration, repoMap, pluginTools: this._pluginToolCatalog() }, {
       signal: planSignal,
       onToken: () => emitter?.emit('subagentProgress'),
       turnOptions: {
@@ -1976,7 +2027,7 @@ export class Agent {
     // What the orchestrator did before this turn's first step, if it ran.
     this._jevOrchestration = null;
     // Stand-ins Jev chose for tools that would not work; see _jevToolFallback.
-    this._forcedTools = new Set();
+    this._forcedTools = new Set(this.config.forcedTools || []);
     this._jevFallbackAsked = new Map();
     if (planningEnabled) {
       this.messages.push({ role: 'user', content: PLANNING_REMINDER });
@@ -2290,7 +2341,13 @@ export class Agent {
             ? []
             : this.dynamicToolRouting
               ? selectToolDefinitions(this._getAllToolDefinitions(), toolRouteContext)
-              : this.mode === 'plan' ? PLAN_TOOLS : this._getAllToolDefinitions();
+              // With routing off, plan mode is the fixed read-only set — plus
+              // the plugin tools marked low risk, as the router gives it. A
+              // read-only plugin is of no use in the mode built for reading
+              // if that mode never offers it.
+              : this.mode === 'plan'
+                ? [...PLAN_TOOLS, ...this._getAllToolDefinitions().filter(def => def?._pluginTool && def._risk === 'low')]
+                : this._getAllToolDefinitions();
           // A sub-agent cannot delegate again. Plan mode never routes
           // `explore`; a worker runs in build mode, where it is part of the
           // base set, and offering a tool that only ever answers "not
@@ -3163,6 +3220,12 @@ export class Agent {
             invalid: admission.reason === 'invalid',
             policyDenied: admission.reason === 'policy',
           };
+        }
+
+        const readOnlyRefusal = this._planModeRefusal(p.name);
+        if (readOnlyRefusal) {
+          await this._recordToolExecution(p.name, p.args, readOnlyRefusal, { skipped: true });
+          return { ...p, output: readOnlyRefusal, contextOutput: readOnlyRefusal, skipped: true, policyDenied: true };
         }
 
         const duplicate = await this._shouldSkipDuplicateTool(p.name, p.args);

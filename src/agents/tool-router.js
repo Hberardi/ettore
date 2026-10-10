@@ -66,6 +66,23 @@ const RUNTIME_TOOLS = ['dev_server', 'browser_app', 'desktop_app', 'browser_chec
 const PLAN_RUNTIME_TOOLS = ['browser_check', 'read_server_console'];
 const DEPENDENCY_TOOLS = ['dep_inspect', 'bash'];
 
+/**
+ * Whether a built-in tool changes something: writes a file, runs a command,
+ * starts or drives a process, or spends money generating media. These are the
+ * tools the selection below keeps out of plan mode — the same lists, named
+ * once so that "not offered in plan mode" and "not allowed in plan mode" cannot
+ * drift apart.
+ */
+export function isBuildOnlyTool(name) {
+  return MUTATION_TOOLS.includes(name)
+    || EXEC_TOOLS.includes(name)
+    || name === 'bash'
+    || (RUNTIME_TOOLS.includes(name) && !PLAN_RUNTIME_TOOLS.includes(name))
+    // The family is build-only as a whole because it bills per clip; the one
+    // member that only listens to a file is not a change.
+    || (MUSIC_VIDEO_TOOLS.includes(name) && name !== 'audio_read');
+}
+
 // Tools that top up whatever slots the intent families leave free.
 //
 // Intent matching decides *priority*; it must not decide *availability* while

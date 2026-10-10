@@ -850,6 +850,14 @@ orchestrates it before the main model's first step:
    at once overwrite each other. A worker asks for the same approvals the main
    agent would, cannot delegate again, and is bounded at thirty iterations and
    fifteen minutes.
+
+   **Workers have your plugins.** The planner is told which plugin tools are
+   enabled — the database, GitHub, Excel, whatever you installed — and a
+   package that needs one names it, which puts that tool in front of its
+   worker. A research worker gets only the plugin tools that declare
+   `risk: 'low'`, so a package that needs any other plugin tool is run as a
+   change package even if it edits no file. The exploration sub-agent (item 4)
+   searches the code and gets none.
 3. *The check.* The turn opens with the workers' reports. The main agent has
    seen none of their work, so its part is to verify it: the files the workers
    changed count as the turn's own changes, which means [done still means the
@@ -992,7 +1000,13 @@ Plan mode is read-only, and that is enforced by the router, not by the prompt:
 nothing that writes, runs a command or launches a process is offered there. Since
 ETTORE cannot inspect what a plugin's handler does, a plugin tool is offered in
 plan mode only if it declares `risk: 'low'`, which is the author stating that it
-does not write.
+does not write. The same rule is applied again when a tool is called: `write`,
+`bash` and the other build-only tools, and any plugin tool that is not low
+risk, are refused in plan mode even if the model names one without having been
+offered it. Both hold for the read-only workers of the
+[orchestrator](#jev--an-optional-judgment-layer-typesafe) too, and with
+`/config tool-routing off`, where plan mode gets its fixed read-only set plus
+the low-risk plugin tools.
 
 Raise or lower the budget with `/config max-tools <4-28>` (add `--local` to
 keep it to this project), or set `"maxToolsPerRequest"` in

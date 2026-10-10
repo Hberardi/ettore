@@ -41,20 +41,61 @@ Rules:
 - Each brief is self-contained: say what to do, where (paths, symbols) when you know, and what "done" looks like. Never write "as discussed" or "as planned".
 - Name files only when they appear in the request or in the context you were given. Do not invent paths.
 - Do not add a final package that only verifies, tests everything or writes the summary: the main agent does that once the workers are done.
+- When PLUGIN TOOLS are listed, the workers have them, and a package that needs one names it in "tools" — that is how its worker is handed it. A research worker can only use the ones marked read-only: a package that needs any other plugin tool is a "change" package, even if it edits no file. Name only tools from the list.
 - Write titles and briefs in the language of the request.
 
 Output JSON only — no prose, no markdown fences. The shape:
 
-{"rationale":"<one sentence: why this split>","tasks":[{"title":"<short name, max 80 chars>","kind":"research"|"change","brief":"<what the worker has to do>","files":["<path>", "..."]}]}`;
+{"rationale":"<one sentence: why this split>","tasks":[{"title":"<short name, max 80 chars>","kind":"research"|"change","brief":"<what the worker has to do>","files":["<path>", "..."],"tools":["<plugin tool name>", "..."]}]}`;
+
+const PLUGIN_TOOLS_MAX_CHARS = 3000;
+
+/**
+ * The plugin tools as the planner reads them: one block per plugin, one line
+ * per tool. A long catalogue is cut at whole tools, and says how many it left
+ * out.
+ *
+ * @param {Array<{name: string, plugin: string, description: string, readOnly: boolean}>} pluginTools
+ */
+export function describePluginTools(pluginTools = []) {
+  const byPlugin = new Map();
+  for (const tool of pluginTools) {
+    if (!tool?.name) continue;
+    const plugin = tool.plugin || 'plugin';
+    if (!byPlugin.has(plugin)) byPlugin.set(plugin, []);
+    byPlugin.get(plugin).push(tool);
+  }
+  const lines = [];
+  let used = 0;
+  let left = pluginTools.filter(tool => tool?.name).length;
+  for (const [plugin, tools] of byPlugin) {
+    const block = [`${plugin}:`];
+    for (const tool of tools) {
+      const what = String(tool.description || '').replace(/\s+/g, ' ').trim().slice(0, 140);
+      block.push(`- ${tool.name}${tool.readOnly ? ' [read-only]' : ''}${what ? ` — ${what}` : ''}`);
+    }
+    const size = block.join('\n').length + 1;
+    if (lines.length && used + size > PLUGIN_TOOLS_MAX_CHARS) break;
+    lines.push(...block);
+    used += size;
+    left -= tools.length;
+  }
+  if (left > 0) lines.push(`… and ${left} more plugin tool${left === 1 ? '' : 's'} not listed.`);
+  return lines.join('\n');
+}
 
 /** The two messages the planner call is made of. */
-export function buildPlannerMessages({ request, exploration = '', repoMap = '', maxTasks = ORCHESTRATE_MAX_TASKS } = {}) {
+export function buildPlannerMessages({ request, exploration = '', repoMap = '', pluginTools = [], maxTasks = ORCHESTRATE_MAX_TASKS } = {}) {
   const parts = [`REQUEST:\n${String(request || '').slice(0, CONTEXT_MAX_CHARS)}`];
   if (exploration) {
     parts.push(`WHAT AN EXPLORATION OF THE CODEBASE ALREADY FOUND:\n${String(exploration).slice(0, CONTEXT_MAX_CHARS)}`);
   } else if (repoMap) {
     parts.push(`MAP OF THE REPOSITORY:\n${String(repoMap).slice(0, CONTEXT_MAX_CHARS / 2)}`);
   }
+  // A planner that does not know a database or a GitHub plugin is installed
+  // cannot hand that part of the job to anyone: it plans around the shell.
+  const plugins = describePluginTools(pluginTools);
+  if (plugins) parts.push(`PLUGIN TOOLS THE WORKERS HAVE, besides the built-in ones:\n${plugins}`);
   parts.push('Return only the JSON object described in the system instructions.');
   return [
     { role: 'system', content: PLANNER_SYSTEM_PROMPT.replace('{MAX}', String(maxTasks)) },
@@ -89,20 +130,34 @@ function readJsonObject(text) {
  *
  * Research packages are moved ahead of the changes, each group keeping the
  * order it was listed in: that is the order they run in.
+ *
+ * A package's `tools` are the plugin tools it asked for, kept only when they
+ * exist. One that asks for a plugin tool that is not read-only is a change,
+ * whatever the planner called it: a research worker is read-only and would be
+ * refused the very tool its package depends on.
  */
-export function parseWorkPlan(text, { maxTasks = ORCHESTRATE_MAX_TASKS } = {}) {
+export function parseWorkPlan(text, { maxTasks = ORCHESTRATE_MAX_TASKS, pluginTools = [] } = {}) {
   const raw = readJsonObject(text);
   const listed = Array.isArray(raw?.tasks) ? raw.tasks : [];
+  const known = new Map(pluginTools.filter(tool => tool?.name).map(tool => [tool.name, tool]));
   const tasks = listed
-    .map((task, i) => ({
-      title: String(task?.title || '').trim().replace(/\s+/g, ' ').slice(0, 120) || `Package ${i + 1}`,
-      kind: String(task?.kind || '').trim().toLowerCase() === 'research' ? 'research' : 'change',
-      brief: String(task?.brief || '').trim().slice(0, BRIEF_MAX_CHARS),
-      files: (Array.isArray(task?.files) ? task.files : [])
-        .map(file => String(file || '').trim())
-        .filter(Boolean)
-        .slice(0, 12),
-    }))
+    .map((task, i) => {
+      const tools = [...new Set((Array.isArray(task?.tools) ? task.tools : []).map(name => String(name || '').trim()))]
+        .filter(name => known.has(name))
+        .slice(0, 8);
+      const research = String(task?.kind || '').trim().toLowerCase() === 'research'
+        && tools.every(name => known.get(name).readOnly);
+      return {
+        title: String(task?.title || '').trim().replace(/\s+/g, ' ').slice(0, 120) || `Package ${i + 1}`,
+        kind: research ? 'research' : 'change',
+        brief: String(task?.brief || '').trim().slice(0, BRIEF_MAX_CHARS),
+        files: (Array.isArray(task?.files) ? task.files : [])
+          .map(file => String(file || '').trim())
+          .filter(Boolean)
+          .slice(0, 12),
+        tools,
+      };
+    })
     .filter(task => task.brief.length > 0)
     .slice(0, Math.max(1, maxTasks));
   if (tasks.length < 2) return null;
@@ -123,7 +178,7 @@ export async function planWork(client, context = {}, { signal = null, maxTasks =
     const messages = buildPlannerMessages({ ...context, maxTasks });
     const result = await client.turn(messages, [], onToken, signal, turnOptions);
     const content = result?.type === 'text' ? result.content : '';
-    return parseWorkPlan(content, { maxTasks });
+    return parseWorkPlan(content, { maxTasks, pluginTools: context.pluginTools || [] });
   } catch {
     return null;
   }
@@ -157,6 +212,9 @@ export function workerBrief(task, { request = '', index = 0, total = 1, reports 
     `YOUR PACKAGE: ${task.title}\n${task.brief}`,
   ];
   if (task.files?.length) lines.push(`FILES IT CONCERNS: ${task.files.join(', ')}`);
+  if (task.tools?.length) {
+    lines.push(`PLUGIN TOOLS FOR THIS PACKAGE: ${task.tools.join(', ')}. They are among your tools: use them for what they are for rather than working around them with the shell.`);
+  }
   lines.push(`THE ORIGINAL REQUEST — for context; the whole of it is not yours to complete:\n${clip(request, 4000)}`);
   if (reports.length) {
     lines.push('WHAT THE PACKAGES BEFORE YOURS REPORTED:\n\n'
