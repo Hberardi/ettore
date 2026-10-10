@@ -8,6 +8,8 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-10-10
+
 ### Added — a first start that leads somewhere
 
 A new user was met by an empty transcript. Typing into it answered "Not
