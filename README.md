@@ -16,12 +16,13 @@ What changed in each release is in the [changelog](https://github.com/Hberardi/e
 - 🤖 **32 providers** - OpenAI, Anthropic, your Claude subscription, Gemini, Ollama (local), NVIDIA, Groq, DeepSeek, MiniMax, Kimi, OpenRouter — and any OpenAI-compatible endpoint
 - 💻 **Tool Execution** - bash, read, write, edit, grep, glob, web search, web fetch, image inspection, delegated codebase search
 - ✅ **Done means the tests pass** - when the agent changes code it runs your project's full test suite before handing the work back; a red suite goes back to the agent to fix, and it never reports "done" over failing tests ([details](#done-means-the-tests-pass))
+- ↩️ **A receipt for every turn, and a way back** - when a request has changed files, a card lists them with their line counts, the test result the harness measured, the time and the cost; `/undo` puts every one of those files back as it was, including what shell commands changed, and `/redo` reverses it ([details](#what-a-turn-changed-and-taking-it-back))
 - 🖱️ **Runs your apps** - opens web apps in a real browser (reads the browser console: errors, exceptions, failed requests) and launches desktop apps (captures stdout/stderr, screenshots, clicks and types) to reproduce bugs before fixing them
 - 🎨 **Native TUI** - Custom ANSI renderer (no React/Ink) with themes and a sidebar that grows with the terminal (`/sidebar auto|wide|narrow|<n>`); long text wraps rather than being cut — your messages, the input as you type it, command output, the model name and folder in the sidebar
 - 🖼️ **Vision** - Reads local images; agent can discover, download, and inspect public web images
 - 📄 **Super OCR for PDF** - Extracts native text first, then automatically handles scanned and low-quality PDFs with preprocessing, deskew, denoise, adaptive thresholding, and multi-pass Tesseract OCR
 - 🪟 **Linux, macOS and Windows** - shell commands, code search and file edits work natively on each; on Windows the `bash` tool keeps PowerShell warm instead of starting it per command; see [Platform support](#platform-support)
-- 🔌 **Easy Setup** - `/connect <provider> <key>` or environment variables
+- 🔌 **Easy Setup** - the first screen lists the ways to get a model that already work on your machine — a running Ollama, the `claude` CLI, a key in your environment — each one keystroke away, then suggests what to ask in the folder you started in ([details](#the-first-start)); `/connect <provider> <key>` and environment variables work as before
 - 💾 **Persistent Config** - API keys saved in a per-user config directory, `0600` on Linux/macOS ([details](#configuration))
 - 🧠 **Context Tools** - compression, project memory, working memory, sessions, auto-approve
 - ⚡ **Fast on every provider** - requests are shaped so the provider can reuse its prompt cache, context summaries are written by a fast model of the same provider, and `--verbose-tokens` reports time-to-first-token and cached tokens per call
@@ -287,6 +288,50 @@ For web pages, the agent can discover image URLs with `webfetch` and inspect the
 through its protected `web_image` tool. Redirects and resolved addresses are
 validated to block private-network access.
 
+### The first start
+
+With no model connected, ETTORE opens on a card instead of an empty prompt. It
+lists what works on this machine, and you pick by typing the number:
+
+```
+ ╭ 👋 WELCOME TO ETTORE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮
+ ┃ Welcome. ETTORE needs a model to work with.                  ┃
+ ┃                                                              ┃
+ ┃ Type a number and press Enter:                               ┃
+ ┃   1  Ollama — already running here                           ┃
+ ┃      6 models, no API key (qwen2.5-coder:32b, …)             ┃
+ ┃   2  Your Claude subscription                                ┃
+ ┃      through the claude CLI installed here — no API key      ┃
+ ┃   3  Paste an API key                                        ┃
+ ┃      OpenAI, Anthropic, Gemini, OpenRouter and 28 more       ┃
+ ╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯
+```
+
+Only what was found is offered: Ollama when it answers on `localhost:11434`
+with at least one model, the Claude subscription when the `claude` CLI is on
+your `PATH`. Pasting a key is always there. A key already exported
+(`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …) is picked up at
+start and skips this card. Until a model is connected the card comes back on
+every start, and whenever you type a message with nothing to send it to.
+
+The first time a model is connected, a second card says which one — and where
+its key came from — and suggests up to three requests for the folder you are
+in, chosen from what is there: explain the project, review your uncommitted
+changes (when git reports any), run the tests and fix what fails (when the
+project has a suite), write a README (when there is none), or start a new
+project (when the folder is empty). Type the number to send one. They are
+written in English; on a system set to Italian, Spanish, French, German or
+Portuguese the request asks for the answer in that language. `/welcome` shows
+the card again at any time.
+
+**The model a provider starts on.** A provider whose model list comes from its
+own `/models` endpoint used to start on the first id in alphabetical order —
+often a preview, an embedding model or a speech model. ETTORE now starts on
+the best general-purpose chat model in the list: it skips what cannot hold a
+conversation, prefers settled releases over previews and models it knows how
+to drive with tools, and takes the newer version between equals. `/select`
+changes it.
+
 ### Approvals
 
 By default the agent asks before it edits a file, installs a dependency, or runs
@@ -339,6 +384,67 @@ the agent is told it is yours rather than one of its options. Esc cancels.
 Confirmations ETTORE asks on its own — before a destructive command, an
 install — stay a plain yes/no.
 
+## What a turn changed, and taking it back
+
+When a request has changed files, it ends with a card:
+
+```
+ ╭ ✓ TURN DONE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮
+ ┃ 3 files changed +98 −13                                ┃
+ ┃   src/tools/bash-session.js  +32 −9                    ┃
+ ┃   src/tools/index.js         +36 −4                    ┃
+ ┃   tests/tools.test.js        new, +30                  ┃
+ ┃ ✓ Tests green: 1564 passed, 0 failed                   ┃
+ ┃ 2m 14s · 18 tool calls · $0.042                        ┃
+ ┃ /undo takes these changes back                         ┃
+ ╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯
+```
+
+The model's closing message is its own account of the turn. The card is the
+harness's: the files as they are now measured against the files as they were,
+the counts the test runner printed, the clock and the token meter. "Tests
+green" appears only when the [release gate](#done-means-the-tests-pass)
+confirmed the run against the final state of the code; a run that predates the
+last edit is shown as "Tests ran", and a gate that gave up as "NOT verified". A
+request that changed nothing — a question answered — gets no card. A turn you
+cancel with Esc, or one that ends in an error, gets one too, saying what it
+left on disk.
+
+`/undo` puts back every file the last request changed, and a request is the
+turn you started plus every continuation ETTORE ran in your name, so one
+`/undo` takes back the whole job. It covers:
+
+- files written by `write`, `edit` and `apply_patch_structured`;
+- files changed by shell commands — `sed -i`, a code generator, `git apply`,
+  `rm` — inside a git work tree. A file that was clean comes back from `HEAD`;
+  one that already had your uncommitted changes comes back with those changes,
+  because they are copied before the command runs;
+- files the request created, which are removed.
+
+Run `/undo` again to go back one more request; `/undo list` shows what is
+there. `/redo` reverses the last `/undo`, until you send a new request. The
+model is told about both, so it does not go on building on edits that are no
+longer on disk.
+
+`/undo` does not guess. It leaves alone, and names:
+
+- a file that has changed again since the request finished — your own work
+  since then; `/undo force` restores it anyway;
+- a file it never saw the earlier state of: larger than 5MB, changed by a
+  shell command outside a git repository, or inside an untracked directory
+  that already existed;
+- commits. If the request ran `git commit`, the files go back and the commit
+  stays; `/undo` says so.
+
+One thing it cannot see at all: a shell command's change to a file git
+ignores (`node_modules`, a build directory, a `.env`). git does not report
+it, so it is neither undone nor listed.
+
+Nothing is written to your repository for this — no stash, no index entry, no
+objects. The copies live in memory for the session (the last 20 requests, up
+to 200MB) and are gone when ETTORE exits. One-shot mode (`ettore "prompt"`)
+keeps none.
+
 ## Commands
 
 Run `/help` inside the TUI for the full list. Most-used commands:
@@ -360,6 +466,7 @@ installed, ETTORE keeps its native PDF and binary-text fallbacks.
 | `/disconnect [provider]` | Drop a saved connection |
 | `/providers` | List supported providers and their default models |
 | `/models [provider] [refresh\|stale]` | List models (with cache control) |
+| `/welcome` | Show the first-start card again: how to connect a model, or what to ask in this project ([details](#the-first-start)) |
 | `/status` | Show active provider, model, and config |
 | `/doctor` | Diagnose setup, config, providers, and permissions |
 | `/keys list\|add\|remove` | Manage saved API keys |
@@ -382,6 +489,8 @@ installed, ETTORE keeps its native PDF and binary-text fallbacks.
 | `/caveman [level\|off]` | Toggle compressed reply style (saves tokens) |
 | `/approvals [list\|clear] [project\|system\|download]` | Inspect or reset session approvals |
 | `/sessions` / `/resume` / `/new` | Session management |
+| `/undo [force\|list]` | Put back every file the last request changed; again for the one before ([details](#what-a-turn-changed-and-taking-it-back)) |
+| `/redo` | Reverse the last `/undo` |
 | `/history [n]` | Show recent commands |
 | `/alias list` | Show command aliases |
 | `/team [create\|list\|show\|delete] [name]` | Multi-agent team orchestration |

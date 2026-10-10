@@ -86,5 +86,16 @@ python3 test_display.py            # TUI layout validation
   `_jevOrchestrate`); knows nothing about the Agent class, which hands it
   `runWorker`
 - `src/jev/turn-judge.js` — the questions Jev is asked before and after a turn
+- `src/agents/checkpoints.js` — the state of each file before a request
+  changed it, behind `/undo` and `/redo`. The agent loop feeds it around every
+  write/edit and every shell command; `src/app/native-ui.js` opens one
+  checkpoint per user request
+- `src/app/first-run.js` — the welcome card: what can connect on this machine
+  (Ollama, the `claude` CLI) and what to ask in this folder. Detection only;
+  `showWelcome` in `src/app/native-ui.js` acts on the number the user types
+- `src/providers/default-model.js` — which model a newly connected provider
+  starts on
+- `src/app/turn-summary.js` — the card shown when a request ends (files, test
+  result, time, cost); plain data, drawn by `_renderTurnSummary` in the TUI
 - `src/tools/index.js` — tool implementations and definitions
 - `src/providers/index.js` — ConnectionManager

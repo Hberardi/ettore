@@ -28,6 +28,9 @@ import { MissionControl } from '../mission/index.js';
 import { autoResumeDecision, DEFAULT_MAX_AUTO_RESUMES } from './auto-resume.js';
 import { checkForUpdate, readLocalPackage } from '../cli/update.js';
 import { baseNameOf } from '../utils/platform.js';
+import { checkpoints } from '../agents/checkpoints.js';
+import { buildTurnSummary, testOutcomeFromTool, turnSummaryText } from './turn-summary.js';
+import { buildWelcome, detectLocalOptions, localeCode, localeLanguage, projectFacts, welcomeChoiceFor, welcomeText } from './first-run.js';
 
 /**
  * Redraw the visible transcript from a restored conversation.
@@ -370,6 +373,13 @@ export async function startApp(options = {}) {
     });
   }
 
+  // Whether this machine has run ETTORE before, read now: the block below
+  // records the version, and from then on every start looks like a return.
+  const hadRunBefore = Boolean(
+    getConfig('lastSeenVersion') || getConfig('theme') || getConfig('provider')
+    || connectionManager.getSavedConnections().length,
+  );
+
   // After an update, what came with it: the headings of every release since
   // the version this machine last ran, from the changelog in the package.
   try {
@@ -464,6 +474,58 @@ export async function startApp(options = {}) {
   // that case far earlier — so the budget can be generous and configurable.
   const MAX_AUTO_RESUMES = Math.max(1, Number(config.maxAutoResumes) || DEFAULT_MAX_AUTO_RESUMES);
   let pendingAutoResume = null;
+
+  // What the request in progress has cost and proved so far, for the card
+  // shown when it is over. One request is the turn the user started plus
+  // every continuation run in their name; see ./turn-summary.js.
+  let turnStats = null;
+  const toolCallsInFlight = new Map();
+  const startTurnStats = () => {
+    toolCallsInFlight.clear();
+    turnStats = {
+      startedAt: Date.now(),
+      toolCalls: 0,
+      costAtStart: tui.sessionCost,
+      inputAtStart: tui.inputTokensTotal,
+      outputAtStart: tui.outputTokensTotal,
+      gate: null,
+      test: null,
+    };
+  };
+  // Reads the changed files off disk, so it is async — and by the time it
+  // answers the user may already have sent the next request. It measures the
+  // checkpoint and the numbers it was handed, never "the current" ones.
+  const showTurnSummary = (outcome) => {
+    const stats = turnStats;
+    const checkpoint = checkpoints.current;
+    turnStats = null;
+    if (!stats || !checkpoint) return;
+    const numbers = {
+      outcome,
+      gate: stats.gate,
+      test: stats.test,
+      durationMs: Date.now() - stats.startedAt,
+      toolCalls: stats.toolCalls,
+      cost: tui.costKnown && !tui.isFreeModel ? tui.sessionCost - stats.costAtStart : null,
+      tokens: {
+        input: tui.inputTokensTotal - stats.inputAtStart,
+        output: tui.outputTokensTotal - stats.outputAtStart,
+      },
+    };
+    checkpoints.changes(checkpoint).then((changes) => {
+      const summary = buildTurnSummary({ ...numbers, changes });
+      if (!summary) return;
+      tui.messages.push({
+        role: 'system',
+        kind: 'turn-summary',
+        summary,
+        text: turnSummaryText(summary),
+        tools: [],
+        id: Date.now(),
+      });
+      tui.needsRender = true;
+    }).catch(() => {});
+  };
   // Fingerprint of the last auto-resumed turn, so a model repeating itself
   // verbatim without running anything stops instead of looping.
   let lastResumeSignature = null;
@@ -478,7 +540,7 @@ export async function startApp(options = {}) {
   // 'complete' / 'error' / 'cancelled' handlers clean up. Used by both
   // `handleInput` (the real prompt) and the auto-resume path (synthetic
   // continuation), so the two flows stay in lockstep.
-  async function runAgent(text, imageAttachments = [], displayText = text, { continuation = false } = {}) {
+  async function runAgent(text, imageAttachments = [], displayText = text, { continuation = false, auto = continuation } = {}) {
     if (!agent || tui.isRunning) return;
     // An image goes to whatever model is active, as base64 inside the request.
     // A model that cannot read it either errors after a long wait or answers
@@ -496,9 +558,15 @@ export async function startApp(options = {}) {
     }
     mission.startTurn(text, { continuation });
     syncMission();
+    // A continuation belongs to the request that started it: its changes go
+    // in the same checkpoint, so one /undo takes the whole request back.
+    if (!continuation || !turnStats) {
+      checkpoints.begin(displayText || text);
+      startTurnStats();
+    }
     // `auto`: sent by ETTORE in the user's name, so it does not count when
     // working out which language the user writes in.
-    tui.messages.push({ role: 'user', text: displayText, tools: [], id: Date.now(), auto: continuation });
+    tui.messages.push({ role: 'user', text: displayText, tools: [], id: Date.now(), auto });
     tui.isRunning = true;
     tui.turnState = 'started';
     tui.streaming = { text: '', tools: [], reasoning: '', waitKind: 'model', lastActivityAt: Date.now(), stallMs: STALL_MS };
@@ -814,6 +882,10 @@ export async function startApp(options = {}) {
   });
 
   emitter.on('toolStart', ({ id, name, args, plugin }) => {
+    if (turnStats) {
+      turnStats.toolCalls++;
+      toolCallsInFlight.set(id, { name, args });
+    }
     mission.toolStart({ id, name, args, plugin });
     syncMission();
     firstToolSeen = true;
@@ -856,6 +928,17 @@ export async function startApp(options = {}) {
   });
 
   emitter.on('toolEnd', ({ id, name: _name, output }) => {
+    const started = toolCallsInFlight.get(id);
+    toolCallsInFlight.delete(id);
+    if (turnStats && started) {
+      const outcome = testOutcomeFromTool(started.name, started.args, output);
+      if (outcome) {
+        turnStats.test = outcome;
+        // A run is evidence for the code as it was when it ran; the gate has
+        // to open again after it for that to hold at the end of the turn.
+        turnStats.gate = null;
+      }
+    }
     mission.toolEnd({ id, name: _name, output });
     syncMission();
     if (tui.streaming?.tools) {
@@ -1045,7 +1128,7 @@ export async function startApp(options = {}) {
         // In the user's language: it shows as their message, and a prompt in
         // another language turns the model's answers into that language too.
         runAgent(
-          continuationPrompt('resume', conversationLanguage(tui.messages)),
+          continuationPrompt('resume', conversationLanguage(tui.messages, localeCode())),
           [],
           undefined,
           { continuation: true },
@@ -1085,9 +1168,11 @@ export async function startApp(options = {}) {
           id: Date.now(),
         });
         tui.needsRender = true;
+        showTurnSummary('completed');
       }
       return;
     }
+    showTurnSummary('completed');
   });
 
   emitter.on('cancelled', () => {
@@ -1114,6 +1199,9 @@ export async function startApp(options = {}) {
     lastToolIntent = '';
     tokenBuffer = '';
     tui.needsRender = true;
+    // What a cancelled turn left on disk is exactly what the user needs to
+    // see before deciding whether to carry on or /undo.
+    showTurnSummary('cancelled');
   });
 
   emitter.on('error', (msg) => {
@@ -1135,6 +1223,7 @@ export async function startApp(options = {}) {
     clearTodoPanel();
     tui.messages.push({ role: 'assistant', text: `Error: ${msg}`, tools: [], id: Date.now() });
     tui.needsRender = true;
+    showTurnSummary('failed');
   });
 
   emitter.on('todoList', (items) => {
@@ -1201,6 +1290,7 @@ export async function startApp(options = {}) {
   // did — and the CLI looks like it froze.
   // Release gate: the agent refused to end the turn on unverified or red code.
   emitter.on('releaseGate', ({ status, attempt, max }) => {
+    if (turnStats) turnStats.gate = status === 'open' || status === 'exhausted' ? status : null;
     const text = status === 'open'
       ? '✓ Tests green — changes verified'
       : status === 'exhausted'
@@ -1243,7 +1333,7 @@ export async function startApp(options = {}) {
       tools: [],
       id: Date.now(),
     });
-    pendingAutoResume = continuationPrompt('plan', conversationLanguage(tui.messages));
+    pendingAutoResume = continuationPrompt('plan', conversationLanguage(tui.messages, localeCode()));
     tui.needsRender = true;
   });
 
@@ -1269,7 +1359,7 @@ export async function startApp(options = {}) {
       tools: [],
       id: Date.now(),
     });
-    pendingAutoResume = continuationPrompt('act', conversationLanguage(tui.messages));
+    pendingAutoResume = continuationPrompt('act', conversationLanguage(tui.messages, localeCode()));
     tui.needsRender = true;
   });
 
@@ -1926,7 +2016,7 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false, freeTex
     }
     // The real build: a hardcoded '1.0.0' here made /version, /status and
     // /system report a release that shipped long ago.
-    const context = { commandSystem: { list: () => commandList }, config, version: tui.version || 'unknown', agent, history: [], emitter, mission, pluginRuntime, rebuildAgent: () => rebuildAgent(), startLoop, stopLoop, sessionId: session.id };
+    const context = { commandSystem: { list: () => commandList }, config, version: tui.version || 'unknown', agent, history: [], emitter, mission, pluginRuntime, rebuildAgent: () => rebuildAgent(), startLoop, stopLoop, sessionId: session.id, isRunning: () => tui.isRunning };
     try {
       const result = await cmd.handler(cmdArgs, context);
       syncMission();
@@ -1936,7 +2026,9 @@ uiBridge.on('askUser', ({ question, options, resolve, sensitive = false, freeTex
         tui.model = connectionManager.activeModel || tui.model;
         _initModelMeta();
         await rebuildAgent();
+        if (cmdName === 'connect') await welcomeAfterConnect();
       }
+      if (result && typeof result === 'object' && result.action === 'welcome') { await showWelcome(); return; }
       if (result && typeof result === 'object' && result.action === 'exit') { autoSaveSessionMemory().finally(() => { cleanup(); process.exit(0); }); return; }
       if (result && typeof result === 'object' && result.action === 'clear') { tui.messages.length = 0; tui.needsRender = true; return; }
       if (result && typeof result === 'object' && result.action === 'resumeSession') {
@@ -2048,7 +2140,7 @@ let result = await connectionManager.connect(providerName);
   }
   if (result.success) {
     tui.provider = providerName;
-    const firstModel = result.models[0] || '';
+    const firstModel = connectionManager.defaultModelFor(providerName, result.models) || '';
     if (firstModel) {
       connectionManager.setActive(providerName, firstModel);
       tui.model = firstModel;
@@ -2070,6 +2162,7 @@ const models = connectionManager.listModels(providerName);
     }
 tui.messages.push({ role: 'system', text: msg, tools: [], id: Date.now() });
   tui.needsRender = true;
+  await welcomeAfterConnect();
   tui.openSubMenu('models', modelItems);
 } else {
   let msg = `✓ Connected to ${meta.name}!`;
@@ -2163,7 +2256,7 @@ if (result.success) {
   tui.closeApiKeyInput();
 
   tui.provider = providerName;
-  const firstModel = result.models[0] || '';
+  const firstModel = connectionManager.defaultModelFor(providerName, result.models) || '';
   if (firstModel) {
     connectionManager.setActive(providerName, firstModel);
     tui.model = firstModel;
@@ -2187,6 +2280,7 @@ const modelList = result.models.slice(0, 10).join(', ');
   }
   tui.messages.push({ role: 'system', text: msg, tools: [], id: Date.now() });
   tui.needsRender = true;
+  await welcomeAfterConnect();
 
   // Open models sub-menu so user can pick a model
   const models = connectionManager.listModels(providerName);
@@ -2314,8 +2408,89 @@ if (cmdName === 'connect') {
     await executeCommand(cmdName, [item.value]);
   };
 
-  const handleInput = async (text) => {
+  // ── Welcome card ────────────────────────────────────────────────────────
+  // The numbered choices on the card last shown: ways to connect while there
+  // is no model, requests for this project once there is one. A bare number
+  // typed at the prompt picks one. See ./first-run.js.
+  let welcomeChoices = [];
+
+  const showWelcome = async ({ firstRun = false } = {}) => {
+    let welcome;
+    const active = connectionManager.activeProvider;
+    if (active && connectionManager.getActive()) {
+      // A provider connected from the environment starts with no model list;
+      // the one it will use is only known once the catalog has arrived. Wait
+      // for it rather than greet the user with "no model selected".
+      await Promise.race([
+        connectionManager.refreshModels(active, { silent: true }).catch(() => null),
+        new Promise((resolve) => { setTimeout(resolve, 4000).unref?.(); }),
+      ]);
+      if (connectionManager.activeModel && (tui.model !== connectionManager.activeModel || !agent)) {
+        tui.provider = connectionManager.activeProvider;
+        tui.model = connectionManager.activeModel;
+        _initModelMeta();
+        await rebuildAgent();
+      }
+      const meta = PROVIDER_REGISTRY.find(entry => entry.id === active);
+      const connection = connectionManager.listConnections().find(c => c.provider === active);
+      welcome = buildWelcome({
+        connected: {
+          provider: active,
+          name: meta?.name || active,
+          model: connectionManager.activeModel || null,
+          envVar: connection?.envVar || null,
+        },
+        facts: await projectFacts(config.workdir || process.cwd()),
+        firstRun,
+        language: localeLanguage(),
+      });
+    } else {
+      welcome = buildWelcome({
+        connected: null,
+        local: await detectLocalOptions(),
+        firstRun,
+        providerCount: PROVIDER_REGISTRY.length,
+      });
+    }
+    welcomeChoices = welcome.choices;
+    tui.messages.push({ role: 'system', kind: 'welcome', welcome, text: welcomeText(welcome), tools: [], id: Date.now() });
+    tui.needsRender = true;
+  };
+
+  // The first time a model is connected on this machine, say what to do with
+  // it. Once: a returning user knows.
+  const welcomeAfterConnect = async () => {
+    if (getConfig('onboarded') || !connectionManager.getActive()) return;
+    saveConfig('onboarded', true);
+    await showWelcome({ firstRun: !hadRunBefore });
+  };
+
+  const runWelcomeChoice = async (choice) => {
+    const { action } = choice;
+    if (action.type === 'connect') {
+      await handleConnectProvider(action.provider);
+    } else if (action.type === 'pickProvider') {
+      tui.openCommandPalette(buildCommandList());
+      tui.openSubMenu('connect', SUBMENU_COMMANDS.connect());
+      tui.needsRender = true;
+    } else if (action.type === 'prompt') {
+      // Written by ETTORE, in English: it must not be read as the language
+      // the user writes in when the next automatic prompt is worded.
+      await handleInput(action.text, { auto: true });
+    }
+  };
+
+  const handleInput = async (text, { auto = false } = {}) => {
     if (!running || (!text && tui.attachments.length === 0)) return;
+    if (welcomeChoices.length && tui.attachments.length === 0) {
+      const choice = welcomeChoiceFor(text, welcomeChoices);
+      if (choice) {
+        // Used up: the next "1" the user types is a message, not a menu pick.
+        welcomeChoices = [];
+        await runWelcomeChoice(choice);
+        return;
+      }
+    }
     if (text.startsWith('/')) {
       // Typed slash commands normally enter through the palette; this branch
       // also handles commands pasted into the regular input.
@@ -2371,16 +2546,15 @@ if (cmdName === 'connect') {
     const displayText = [imageRefs.text, ...attachments.map(file => `📎 ${file.name}`)].filter(Boolean).join('\n');
     tui.clearAttachments();
     if (!agent) {
+      // Not a dead end: show the ways to connect that work on this machine,
+      // each one keystroke away, instead of naming a command to go and type.
       tui.messages.push({ role: 'user', text: displayText, tools: [], id: Date.now() });
-      tui.messages.push({
-        role: 'assistant',
-        text: 'Not connected yet.\nUse /connect to choose a provider, or /providers to inspect available options.',
-        tools: [],
-        id: Date.now()
-      });
       tui.needsRender = true;
+      await showWelcome();
       return;
     }
+    // A real request: the card's numbers no longer mean anything.
+    welcomeChoices = [];
     // A new user prompt is the most decisive signal that the user is back
     // in control. Wipe the auto-resume budget so a model that was looping
     // gets a clean budget tied to this new turn, not the previous one's
@@ -2388,7 +2562,7 @@ if (cmdName === 'connect') {
     autoResumeCount = 0;
     pendingAutoResume = null;
     lastResumeSignature = null;
-    await runAgent(agentText, imageAttachments, displayText);
+    await runAgent(agentText, imageAttachments, displayText, { auto });
   };
 
   const openAttachmentPicker = async () => {
@@ -2477,6 +2651,19 @@ if (cmdName === 'connect') {
       appendPastedText(text);
     }
   });
+
+  // The first screen. With no model there is nothing else to do, so the ways
+  // to connect are shown on every start until one is; with a model, the
+  // suggestions for this project are shown once, on the first run only.
+  // Not awaited: it probes the machine, and the prompt must not wait on that.
+  (async () => {
+    if (!connectionManager.getActive()) {
+      await showWelcome({ firstRun: !hadRunBefore && !getConfig('onboarded') });
+    } else if (!getConfig('onboarded')) {
+      saveConfig('onboarded', true);
+      if (!hadRunBefore) await showWelcome({ firstRun: true });
+    }
+  })().catch(() => {});
 
   process.stdin.on('keypress', async (str, key) => {
     if (!running) return;

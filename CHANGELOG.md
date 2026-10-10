@@ -8,6 +8,86 @@ documented under the `Changed` heading rather than the Semantic Versioning
 
 ## [Unreleased]
 
+### Added — a first start that leads somewhere
+
+A new user was met by an empty transcript. Typing into it answered "Not
+connected yet. Use /connect", and `/connect` listed thirty providers by name.
+
+- **The welcome card.** With no model connected ETTORE opens on a card listing
+  the ways to get one that already work on this machine, each picked by typing
+  its number: an Ollama that is running and has models, the Claude subscription
+  when the `claude` CLI is installed, and pasting an API key. It comes back on
+  every start until a model is connected, and in place of the old "Not
+  connected yet" when a message has nowhere to go (`src/app/first-run.js`).
+- **What to ask.** The first time a model is connected a second card names it —
+  and the environment variable its key came from — and offers up to three
+  requests made for the folder ETTORE was started in: explain the project,
+  review the uncommitted changes, run the tests and fix what fails, write a
+  missing README, start a new project in an empty folder. A number sends one.
+  On a system set to a language other than English the request asks for the
+  answer in that language.
+- **`/welcome`** (alias `/start`) shows the card again.
+
+### Fixed — the model a new connection starts on
+
+- **Not the first id in the alphabet.** A provider whose catalog comes from its
+  `/models` endpoint started on whatever sorted first. With a Google key in
+  the environment that was `models/antigravity-preview-05-2026`, and the first
+  message a new user sent came back as `400 status code (no body)`. The
+  default is now the best general-purpose chat model on offer: embedding,
+  speech, image and moderation models are skipped, settled releases beat
+  previews, models ETTORE can drive with tools beat ones it cannot, and the
+  newer version wins between equals. A provider with a hand-written list keeps
+  its own first choice (`src/providers/default-model.js`).
+- **The header after starting from an environment key.** It stayed on
+  `not configured` after the model list arrived; the card now waits for the
+  list and the header shows the model in use.
+- **Automatic prompts after an unreadable message.** When the language of the
+  user's messages cannot be told, the prompts ETTORE sends in their name now
+  follow the system language instead of always falling back to English.
+
+### Added — a receipt for every turn, and `/undo`
+
+A turn used to end with the model's own sentence about what it did. Whether the
+files it named were the files it touched, and whether "all tests pass" was a
+measurement or a hope, was for the reader to find out.
+
+- **The turn card.** A request that changed files ends with a card: each file
+  with its lines added and removed (new and deleted files marked), the test
+  result, the time, the tool calls and the cost — tokens when the model's price
+  is not known. It is built from what the harness measured, not from the
+  model's text (`src/app/turn-summary.js`). "✓ Tests green: 1564 passed, 0
+  failed" is shown only when the release gate confirmed the run against the
+  final state of the code; an earlier green run reads "Tests ran", and a gate
+  that ran out of attempts reads "NOT verified". A cancelled or failed turn
+  gets a card too, with what it left on disk. A turn that changed nothing gets
+  none.
+- **`/undo`** puts back every file the last request changed — the turn you
+  started and every continuation run in your name. Files written by the edit
+  tools, files changed by shell commands inside a git work tree (a clean file
+  comes back from `HEAD`, one with uncommitted changes comes back with them),
+  and files the request created, which are removed. Run it again for the
+  request before; `/undo list` shows them.
+- **`/redo`** reverses the last `/undo`, until a new request is sent.
+- **It does not guess.** A file changed again since the request finished is
+  left alone and named (`/undo force` overrides); so is one whose earlier
+  state was never seen — over 5MB, changed by a shell command outside git,
+  inside an untracked directory that already existed. A commit the request
+  made stays, and `/undo` says so.
+- **The model is told.** After `/undo` or `/redo` the conversation carries a
+  note naming the files, so the next turn does not build on edits that are
+  gone.
+- **Nothing touches the repository.** No stash, no index, no objects: the
+  before-states are kept in memory for the session, capped at 20 requests and
+  200MB (`src/agents/checkpoints.js`). Around each shell command this costs
+  about 5ms.
+
+### Fixed
+
+- **The sidebar's token count for a model with no known price.** The totals
+  the usage events add to were never set to zero, so the sum was `NaN` and the
+  sidebar showed `$0.000` where it should have shown `6.0k/200`.
+
 ## [1.17.1] — 2026-10-06
 
 ### Fixed — `bash_session` after a timeout, and what `bash` leaves unsaid

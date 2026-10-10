@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { PROVIDER_REGISTRY } from './registry.js';
 import { getProviderEnvKey } from './env.js';
 import { redactSecrets } from '../utils/secrets.js';
+import { pickDefaultModel } from './default-model.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -124,18 +125,29 @@ export class ConnectionManager {
       // If no model saved, pick first from the connection
       if (!this.activeModel) {
         const conn = this.connections.get(this.activeProvider);
-        const first = conn?.models?.[0];
-        this.activeModel = typeof first === 'string' ? first : first?.id || null;
+        this.activeModel = this.defaultModelFor(this.activeProvider, conn?.models);
       }
     } else if (!this.activeProvider) {
       const first = this.connections.keys().next().value;
       if (first) {
         const conn = this.connections.get(first);
         this.activeProvider = first;
-        const firstModel = conn?.models?.[0];
-        this.activeModel = typeof firstModel === 'string' ? firstModel : firstModel?.id || null;
+        this.activeModel = this.defaultModelFor(first, conn?.models);
       }
     }
+  }
+
+  /**
+   * The model a provider starts on when the user has not chosen one: the
+   * provider's own first choice if it has a hand-written list, otherwise the
+   * best general-purpose chat model in what it offers — not simply the first
+   * id in the alphabet. See ./default-model.js.
+   */
+  defaultModelFor(providerName, models = null) {
+    const name = String(providerName || '').toLowerCase();
+    const list = models || this.connections.get(name)?.models || [];
+    const curated = PROVIDER_REGISTRY.find(entry => entry.id === name)?.Class?.getInfo?.()?.models || [];
+    return pickDefaultModel(list, { curated });
   }
 
   loadEnvConnections() {
@@ -266,9 +278,7 @@ export class ConnectionManager {
     }
 
     this.activeProvider = name;
-    const firstModel = conn.models[0];
-    const firstModelId = typeof firstModel === 'string' ? firstModel : firstModel?.id;
-    this.activeModel = model || firstModelId;
+    this.activeModel = model || this.defaultModelFor(name, conn.models);
 
     // Persist the active provider/model so it's restored on next launch
     const saved = loadKeys();
@@ -373,10 +383,7 @@ export class ConnectionManager {
     // Keep active model valid if it no longer exists.
     if (this.activeProvider === name) {
       const hasActive = models.some(m => (typeof m === 'string' ? m : m.id) === this.activeModel);
-      if (!hasActive) {
-        const first = models[0];
-        this.activeModel = typeof first === 'string' ? first : first?.id || null;
-      }
+      if (!hasActive) this.activeModel = this.defaultModelFor(name, models);
     }
 
     const saved = loadKeys();

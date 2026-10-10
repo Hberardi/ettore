@@ -67,6 +67,7 @@ import { executeToolHandler } from './tool-executor.js';
 import { guardToolCall, parseToolCall } from './tool-call-guard.js';
 import { ReleaseGateCoordinator } from './release-gate-coordinator.js';
 import { commandWriteTargets, diffSnapshots, snapshotWorkspace } from './workspace-changes.js';
+import { checkpoints } from './checkpoints.js';
 import { getJevClient, isOrchestrationEnabled } from '../jev/index.js';
 import { shortenPath } from '../utils/platform.js';
 import { changedFiles, orchestrationReport, planWork, runWorkPlan, workerBrief, WORKER_REPORT_MAX_CHARS } from './orchestrator.js';
@@ -1622,6 +1623,26 @@ export class Agent {
     this._pendingTurnOverlay = String(text || '').trim();
   }
 
+  /**
+   * Tells the model the user took its changes back (`/undo`) or put them back
+   * again (`/redo`). Without this it goes on believing the conversation: it
+   * builds on edits that are no longer on disk, or redoes work the user just
+   * rejected. Stored, not an overlay — it has to outlast one provider call.
+   */
+  noteWorkspaceRestored(files = [], { redo = false } = {}) {
+    if (!files.length) return;
+    for (const file of files) this._invalidateReadCacheForFile(file);
+    this.workingMemory.workspaceRevision++;
+    const shown = files.slice(0, 20).map(file => `- ${file}`).join('\n');
+    const more = files.length > 20 ? `\n- … and ${files.length - 20} more` : '';
+    this.messages.push({
+      role: 'user',
+      content: redo
+        ? `[The user ran /redo: the changes of an earlier turn, which they had undone, are back on disk. Files:\n${shown}${more}\nRead a file again before relying on what it contains.]`
+        : `[The user ran /undo: the file changes of your last turn were reverted. These files are back to how they were before that turn:\n${shown}${more}\nDo not assume those edits exist, and do not redo them unless the user asks. Read a file again before relying on what it contains.]`,
+    });
+  }
+
   _clearTurnOverlay() {
     this._pendingTurnOverlay = '';
   }
@@ -3171,6 +3192,12 @@ export class Agent {
         const isShell = p.name === 'bash' || p.name === 'bash_session';
         const shellCwd = isShell ? (p.args.workdir || this._workdir) : null;
         const snapshotBefore = isShell ? await snapshotWorkspace(shellCwd) : null;
+        // What `/undo` will put back: the file as it is now, before the tool
+        // writes it. A shell command names no file, so its checkpoint is taken
+        // from the snapshot. See ./checkpoints.js.
+        const isFileMutation = p.name === 'write' || p.name === 'edit' || p.name === 'apply_patch_structured';
+        if (isFileMutation && p.args.file_path) await checkpoints.captureBefore([p.args.file_path]);
+        const shellCheckpoint = isShell ? await checkpoints.shellBefore(snapshotBefore) : null;
         const execution = await executeToolHandler({
           name: p.name,
           args: p.args,
@@ -3211,9 +3238,10 @@ export class Agent {
             ].join('\n'),
           });
         }
-        if ((p.name === 'write' || p.name === 'edit' || p.name === 'apply_patch_structured') && mutationApplied(output)) {
+        if (isFileMutation && mutationApplied(output)) {
           mutationToolUsed = true;
           touchedFiles.add(p.args.file_path);
+          await checkpoints.noteAfter([p.args.file_path]);
           recordMutation(releaseGate, p.args.file_path, output);
           this._invalidateReadCacheForFile(p.args.file_path);
         }
@@ -3224,6 +3252,7 @@ export class Agent {
           const changedFiles = snapshotBefore
             ? diffSnapshots(snapshotBefore, await snapshotWorkspace(shellCwd))
             : commandWriteTargets(p.args.command, shellCwd);
+          await checkpoints.shellAfter(shellCheckpoint, changedFiles);
           if (changedFiles.length) {
             mutationToolUsed = true;
             for (const file of changedFiles) {

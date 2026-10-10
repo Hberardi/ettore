@@ -11,6 +11,7 @@ import { changelogText } from '../app/whats-new.js';
 import { readLocalPackage } from '../cli/update.js';
 import { redactSecrets } from '../utils/secrets.js';
 import { listSessions, loadSession } from '../sessions/index.js';
+import { checkpoints, displayPath } from '../agents/checkpoints.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -196,8 +197,8 @@ First steps
   !command                           Run a shell command from the TUI
 `;
 
-      output += group('Core commands', ['help', 'status', 'doctor', 'providers', 'models', 'connect', 'use', 'disconnect']);
-      output += group('Session and project', ['clear', 'new', 'sessions', 'resume', 'init', 'memory', 'skills', 'mission', 'compress', 'agent', 'caveman', 'approvals', 'history', 'team', 'loop']);
+      output += group('Core commands', ['help', 'welcome', 'status', 'doctor', 'providers', 'models', 'connect', 'use', 'disconnect']);
+      output += group('Session and project', ['clear', 'new', 'sessions', 'resume', 'undo', 'redo', 'init', 'memory', 'skills', 'mission', 'compress', 'agent', 'caveman', 'approvals', 'history', 'team', 'loop']);
       output += group('Configuration', ['keys', 'config', 'jev', 'theme', 'sidebar', 'system', 'version', 'exit']);
       output += '\nUse /help <command> for details, for example /help connect.';
 
@@ -529,6 +530,84 @@ ${setupHint()}`;
     handler: async () => ({ action: 'newSession' })
   },
   
+  welcome: {
+    description: 'Show how to connect a model, or what to ask in this project',
+    usage: 'welcome',
+    aliases: ['start'],
+    handler: async () => ({ action: 'welcome' })
+  },
+
+  undo: {
+    description: 'Take back the file changes of the last request',
+    usage: 'undo [force|list]',
+    handler: async (args, context) => {
+      const sub = String(args[0] || '').toLowerCase();
+      const cwd = process.cwd();
+      const show = path => displayPath(path, cwd);
+
+      if (sub === 'list') {
+        const open = checkpoints.list();
+        if (!open.length) return 'Nothing to undo: no request in this session has changed a file.';
+        const lines = open.map((cp, i) => `  ${i + 1}. ${cp.label || '(no prompt)'} — ${cp.files} file${cp.files === 1 ? '' : 's'}`);
+        return `Requests /undo can take back, newest first:\n${lines.join('\n')}\n\n/undo reverts the first; run it again for the next.`;
+      }
+      if (sub && sub !== 'force') return 'Usage: /undo [force|list]';
+      if (context.isRunning?.()) return '⚠ A turn is running. Press Esc to stop it, then /undo.';
+
+      const result = await checkpoints.undo({ force: sub === 'force' });
+      if (!result) return 'Nothing to undo: no request in this session has changed a file.';
+
+      const lines = [];
+      const label = result.label ? ` "${result.label}"` : '';
+      if (result.restored.length) {
+        lines.push(`✓ Undone${label}: ${result.restored.length} file${result.restored.length === 1 ? '' : 's'} back to how ${result.restored.length === 1 ? 'it was' : 'they were'}`);
+        for (const file of result.restored.slice(0, 12)) lines.push(`  ${show(file.path)} (${file.action})`);
+        if (result.restored.length > 12) lines.push(`  … and ${result.restored.length - 12} more`);
+      } else if (!result.conflicts.length && !result.unknown.length) {
+        lines.push(`Nothing to put back${label}: the files already match how they were.`);
+      }
+      if (result.conflicts.length) {
+        lines.push(`⚠ Left alone — changed again since that request: ${result.conflicts.map(show).join(', ')}`);
+        lines.push('  /undo force restores these too, discarding the later changes.');
+      }
+      for (const file of result.unknown.slice(0, 8)) {
+        lines.push(`⚠ Not undone: ${show(file.path)} ${file.reason}`);
+      }
+      if (result.unknown.length > 8) lines.push(`⚠ … and ${result.unknown.length - 8} more that could not be undone`);
+      if (result.historyMoved) {
+        lines.push('⚠ That request also ran git commands that moved HEAD. The files are back; the commits are still there.');
+      }
+      if (result.restored.length) {
+        context.agent?.noteWorkspaceRestored?.(result.restored.map(file => file.path));
+        lines.push('/redo puts the changes back.');
+      }
+      return lines.join('\n');
+    }
+  },
+
+  redo: {
+    description: 'Put back the changes the last /undo took away',
+    usage: 'redo',
+    handler: async (args, context) => {
+      if (context.isRunning?.()) return '⚠ A turn is running. Press Esc to stop it, then /redo.';
+      const result = await checkpoints.redo();
+      if (!result) return 'Nothing to redo. /redo only follows an /undo, and a new request ends the chance.';
+      const cwd = process.cwd();
+      const lines = [];
+      const label = result.label ? ` "${result.label}"` : '';
+      if (result.restored.length) {
+        lines.push(`✓ Redone${label}: ${result.restored.length} file${result.restored.length === 1 ? '' : 's'} changed again`);
+        for (const file of result.restored.slice(0, 12)) lines.push(`  ${displayPath(file.path, cwd)}`);
+        if (result.restored.length > 12) lines.push(`  … and ${result.restored.length - 12} more`);
+        context.agent?.noteWorkspaceRestored?.(result.restored.map(file => file.path), { redo: true });
+      }
+      if (result.conflicts.length) {
+        lines.push(`⚠ Left alone — changed since the undo: ${result.conflicts.map(path => displayPath(path, cwd)).join(', ')}`);
+      }
+      return lines.join('\n') || 'Nothing to put back.';
+    }
+  },
+
   exit: {
     description: 'Exit interactive mode',
     usage: 'exit',
@@ -579,8 +658,11 @@ ${setupHint()}`;
       
       if (result.success) {
         const models = result.models || [];
+        // The provider's best general-purpose model, not the first id in the
+        // alphabet; see src/providers/default-model.js.
         const firstModel = models[0];
-        const firstModelId = typeof firstModel === 'string' ? firstModel : firstModel?.id;
+        const firstModelId = manager.defaultModelFor?.(provider, models)
+          || (typeof firstModel === 'string' ? firstModel : firstModel?.id);
         let selected = null;
         if (!manager.getActive?.() && firstModelId && typeof manager.setActive === 'function') {
           const activeResult = manager.setActive(provider, firstModelId);

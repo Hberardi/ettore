@@ -3,6 +3,7 @@ import { saveConfig } from '../config/index.js';
 import { listInstallSessionApprovals } from '../tools/index.js';
 import { stripAllAnsi, stripOrphans } from '../utils/ansi.js';
 import { shortenPath, baseNameOf, hasPathSeparator } from '../utils/platform.js';
+import { effortLine, fileNote, headline, testsLine, undoLine } from './turn-summary.js';
 
 // ─── Themes ────────────────────────────────────────────────────────────────
 export const THEMES = {
@@ -233,6 +234,11 @@ class TUI {
     this.lastCharTime = 0;
 
     this.sessionCost = 0;
+    // Counted from zero, not from undefined: the usage handler adds to these,
+    // and `undefined + n` is NaN — so a model with no known price, the one
+    // case where the sidebar shows tokens instead of dollars, showed neither.
+    this.inputTokensTotal = 0;
+    this.outputTokensTotal = 0;
     this.askUser = null;
     this.askUserIdx = 0;
     this.askUserInput = '';
@@ -519,6 +525,8 @@ class TUI {
     const isSys = msg.role === 'system';
 
     if (isSys && msg.kind === 'whats-new') return this._renderWhatsNew(msg, maxWidth);
+    if (isSys && msg.kind === 'turn-summary' && msg.summary) return this._renderTurnSummary(msg.summary, maxWidth);
+    if (isSys && msg.kind === 'welcome' && msg.welcome) return this._renderWelcome(msg.welcome, maxWidth);
 
     if (isSys) {
       const lines = [];
@@ -770,6 +778,101 @@ class TUI {
       this._wrapText(line, innerWidth).forEach((w) => rows.push(`${C.dim}${w}${C.reset}`));
     });
     return this._renderBubble({ label: "✨ WHAT'S NEW", meta: '', rows, color: C.accent, maxWidth, align: 'left' });
+  }
+
+  /**
+   * The first screen: how to get a model, or — with one connected — what to
+   * ask it in this folder. Each choice carries the number that selects it.
+   * The content comes from src/app/first-run.js.
+   */
+  _renderWelcome(welcome, maxWidth) {
+    const bubbleWidth = Math.min(maxWidth - 2, Math.max(42, Math.floor(maxWidth * 0.84)));
+    const innerWidth = Math.max(18, bubbleWidth - 4);
+    const rows = [];
+    const wrap = (text, width = innerWidth) => this._wrapText(this._sanitizeForRender(text), width);
+
+    wrap(welcome.headline).forEach(w => rows.push(`${C.bold}${welcome.connected ? C.ok : C.text}${w}${C.reset}`));
+    if (welcome.connectedNote) wrap(welcome.connectedNote).forEach(w => rows.push(`${C.dim}${w}${C.reset}`));
+
+    if (welcome.prompt) {
+      rows.push('');
+      wrap(welcome.prompt).forEach(w => rows.push(`${C.text}${w}${C.reset}`));
+    }
+    for (const choice of welcome.choices) {
+      // The detail hangs under the label, both clear of the number.
+      wrap(choice.label, innerWidth - 5).forEach((w, i) => {
+        rows.push(`  ${i === 0 ? `${C.accent}${C.bold}${choice.key}${C.reset}` : ' '}  ${C.bold}${C.text}${w}${C.reset}`);
+      });
+      if (choice.detail) wrap(choice.detail, innerWidth - 5).forEach(w => rows.push(`     ${C.dim}${w}${C.reset}`));
+    }
+    const footer = [...(welcome.notes || []), ...(welcome.tips || [])];
+    if (footer.length) rows.push('');
+    footer.forEach(line => wrap(line).forEach(w => rows.push(`${C.dim}${w}${C.reset}`)));
+
+    return this._renderBubble({
+      label: welcome.firstRun ? '👋 WELCOME TO ETTORE' : welcome.connected ? '▸ START HERE' : '🔌 CONNECT A MODEL',
+      meta: '',
+      rows,
+      color: C.accent,
+      maxWidth,
+      align: 'left',
+    });
+  }
+
+  /**
+   * The receipt for a finished request: files changed with their line counts,
+   * the test result, time and cost, and the way back. The numbers come from
+   * src/app/turn-summary.js; this only lays them out.
+   */
+  _renderTurnSummary(summary, maxWidth) {
+    const bubbleWidth = Math.min(maxWidth - 2, Math.max(42, Math.floor(maxWidth * 0.84)));
+    const innerWidth = Math.max(18, bubbleWidth - 4);
+    const rows = [];
+    const stopped = summary.outcome !== 'completed';
+    const tone = { ok: C.ok, err: C.err, warn: C.warn, dim: C.dim };
+
+    this._wrapText(headline(summary), innerWidth).forEach((w) => {
+      // The counts keep their colours only when the headline fits on one row.
+      const coloured = w.replace(/(\+\d+)/, `${C.ok}$1${C.reset}${C.bold}${C.text}`).replace(/(−\d+)/, `${C.err}$1${C.reset}${C.bold}${C.text}`);
+      rows.push(`${C.bold}${stopped ? C.warn : C.text}${stopped ? w : coloured}${C.reset}`);
+    });
+
+    // One column for the paths, so the counts line up under each other. A
+    // long path loses its start, not its file name.
+    const notes = summary.files.map(file => fileNote(file));
+    const noteWidth = Math.min(Math.max(0, ...notes.map(n => this._visualLen(n))), Math.max(8, innerWidth - 14));
+    const pathWidth = Math.max(8, innerWidth - 2 - 2 - noteWidth);
+    const longest = Math.min(pathWidth, Math.max(0, ...summary.files.map(file => this._visualLen(file.path))));
+    summary.files.forEach((file, i) => {
+      const raw = this._sanitizeForRender(file.path);
+      const shown = this._visualLen(raw) > pathWidth ? `…${raw.slice(-(pathWidth - 1))}` : raw;
+      const pad = ' '.repeat(Math.max(0, longest - this._visualLen(shown)));
+      const note = notes[i]
+        .replace(/(\+\d+)/, `${C.ok}$1${C.dim}`)
+        .replace(/(−\d+)/, `${C.err}$1${C.dim}`);
+      const pathColor = file.status === 'deleted' ? C.err : file.status === 'added' ? C.ok : C.text;
+      rows.push(`  ${pathColor}${shown}${C.reset}${pad}  ${C.dim}${note}${C.reset}`);
+    });
+    if (summary.hiddenFiles) rows.push(`  ${C.dim}… and ${summary.hiddenFiles} more${C.reset}`);
+
+    const tests = testsLine(summary.tests);
+    if (tests) {
+      this._wrapText(tests.text, innerWidth).forEach(w => rows.push(`${tone[tests.tone] || C.dim}${w}${C.reset}`));
+    }
+    this._wrapText(effortLine(summary), innerWidth).forEach(w => rows.push(`${C.dim}${w}${C.reset}`));
+    this._wrapText(undoLine(summary), innerWidth).forEach((w) => {
+      rows.push(`${C.dim}${w.replace(/^\/undo/, `${C.reset}${C.accent}/undo${C.reset}${C.dim}`)}${C.reset}`);
+    });
+
+    const failing = summary.tests?.state === 'failed' || summary.tests?.state === 'unverified';
+    return this._renderBubble({
+      label: stopped ? '◼ TURN STOPPED' : failing ? '⚠ TURN DONE' : '✓ TURN DONE',
+      meta: '',
+      rows,
+      color: stopped || failing ? C.warn : C.ok,
+      maxWidth,
+      align: 'left',
+    });
   }
 
   _renderAssistantBlock({ label, meta, rows, color, maxWidth }) {
@@ -1327,7 +1430,7 @@ class TUI {
       const connected = Boolean(connectionManager.getActive());
       singleLine = connected
         ? `${C.dim}Message ETTORE…  ${C.accent}📎 attach${C.dim} (ctrl+o)  / commands  ! shell${C.reset}`
-        : `${C.dim}Type /connect to start, or /help for commands${C.reset}`;
+        : `${C.dim}Type a number to connect — or /connect${C.reset}`;
     }
 
     if (singleLine !== null) {
